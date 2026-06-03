@@ -61,6 +61,20 @@ State ALink::getState() {
     return s;
 }
 
+int ALink::getErrCount() {
+    hw->lock();
+    int e = errs;
+    hw->unlock();
+    return e;
+}
+
+int ALink::getCurrentSpdIndex() {
+    hw->lock();
+    int idx = spdI;
+    hw->unlock();
+    return idx;
+}
+
 void ALink::onRx(const uint8_t* data, int len) {
     for(int i=0; i<len; i++) {
         uint8_t b = data[i];
