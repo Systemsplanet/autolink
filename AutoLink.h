@@ -8,9 +8,9 @@ private:
     ALink* link;
 
 public:
-    AutoLink(uart_port_t u_num, int rx_pin, int tx_pin, bool isMaster) {
+    AutoLink(uart_port_t u_num, int rx_pin, int tx_pin, bool isMasterNode) {
         hal = new EspHal(u_num, rx_pin, tx_pin);
-        link = new ALink(hal, isMaster);
+        link = new ALink(hal, isMasterNode);
     }
 
     ~AutoLink() {
