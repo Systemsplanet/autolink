@@ -3,7 +3,7 @@
 ALink::ALink(ILink* h, bool master) {
     hw = h;
     isM = master;
-    st = OK;
+    state = OK;
     errs = 0;
     spdI = 0;
     hw->bind(this);
@@ -11,7 +11,7 @@ ALink::ALink(ILink* h, bool master) {
 }
 
 void ALink::err() {
-    if (st != OK) return;
+    if (state != OK) return;
     errs++;
     if (errs > 5) {
         hw->sendBreak();
@@ -32,7 +32,7 @@ int ALink::read(uint8_t* b, int max_len) {
 }
 
 void ALink::write(const uint8_t* b, int len) {
-    if (st == OK) { 
+    if (state == OK) { 
         hw->tx(b, len); 
     }
 }
@@ -41,17 +41,17 @@ void ALink::onRx(const uint8_t* data, int len) {
     for(int i=0; i<len; i++) {
         uint8_t b = data[i];
         
-        if (st == OK) {
+        if (state == OK) {
             rxBuf.push(b);
         } 
-        else if (st == SWP) {
+        else if (state == SWP) {
             if (b == 0x55 && spdI < 5) scores[spdI]++;
         } 
-        else if (st == LCK) {
+        else if (state == LCK) {
             if (isM) {
                 if (b < 5) { 
                     hw->setSpd(spds[b]);
-                    st = OK; errs = 0;
+                    state = OK; errs = 0;
                 }
             } else {
                 if (b == 0xAA) { 
@@ -63,7 +63,7 @@ void ALink::onRx(const uint8_t* data, int len) {
                     hw->tx(&res, 1);
                     hw->flushTx();
                     hw->setSpd(spds[best]);
-                    st = OK; errs = 0;
+                    state = OK; errs = 0;
                 }
             }
         }
@@ -71,7 +71,7 @@ void ALink::onRx(const uint8_t* data, int len) {
 }
 
 void ALink::onBreak() {
-    st = SWP;
+    state = SWP;
     spdI = 0;
     rxBuf.clear();
     for(int i=0; i<5; i++) scores[i]=0;
@@ -80,7 +80,7 @@ void ALink::onBreak() {
 }
 
 void ALink::onTimer() {
-    if (st == SWP) {
+    if (state == SWP) {
         if (isM && spdI < 5) {
             uint8_t ping = 0x55;
             hw->tx(&ping, 1);
@@ -92,12 +92,12 @@ void ALink::onTimer() {
             hw->setSpd(spds[spdI]);
             hw->startTimer(50);
         } else {
-            st = LCK;
+            state = LCK;
             hw->setSpd(9600);
             if (isM) hw->startTimer(50); 
         }
     } 
-    else if (st == LCK && isM) {
+    else if (state == LCK && isM) {
         uint8_t req = 0xAA;
         hw->tx(&req, 1);
         hw->flushTx();
