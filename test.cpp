@@ -19,7 +19,7 @@ public:
     std::vector<int> spdHistory;
     
     std::queue<uint8_t> appBuf;
-    std::mutex mtx;
+    mutable std::mutex mtx; // Mutable so const lock/unlock can access it
     
     void setSpd(int s) override { spd = s; spdHistory.push_back(s); }
     void sendBreak() override { 
@@ -34,8 +34,8 @@ public:
     void stopTimer() override { timerActive = false; }
     void clearTx() { txN = 0; }
     
-    void lock() override { mtx.lock(); }
-    void unlock() override { mtx.unlock(); }
+    void lock() const override { mtx.lock(); }
+    void unlock() const override { mtx.unlock(); }
     
     void pushAppBuf(uint8_t b) override { appBuf.push(b); }
     int popAppBuf() override {
@@ -44,7 +44,7 @@ public:
         appBuf.pop();
         return b;
     }
-    int appBufAvailable() override { return appBuf.size(); }
+    int appBufAvailable() const override { return appBuf.size(); }
     void clearAppBuf() override { 
         while(!appBuf.empty()) appBuf.pop(); 
     }
@@ -60,8 +60,8 @@ public:
 void run_test_basic_io() {
     std::cout << "Test: Basic Write/Read (Async Buffer)... ";
     MockHal mHal, sHal;
-    ALink master(&mHal, true);
-    ALink slave(&sHal, false);
+    ALink master(mHal, true);
+    ALink slave(sHal, false);
     
     uint8_t data[] = {0x11, 0x22};
     master.write(data, 2);
@@ -76,47 +76,43 @@ void run_test_basic_io() {
 void run_test_error_threshold() {
     std::cout << "Test: Custom Error Thresholding... ";
     MockHal mHal;
-    // Set custom threshold to 2
-    ALink master(&mHal, true, {9600, 115200}, 2, 50);
+    ALink master(mHal, true, {9600, 115200}, 2, 50);
     
-    assert(master.getState() == OK);
+    assert(master.getState() == State::OK);
     master.err();
-    assert(master.getState() == OK);
+    assert(master.getState() == State::OK);
     assert(master.getErrCount() == 1);
     master.err();
-    assert(master.getState() == OK);
+    assert(master.getState() == State::OK);
     assert(master.getErrCount() == 2);
     
     // 3rd error should cross the >2 threshold
     master.err();
-    assert(master.getState() == SWP);
+    assert(master.getState() == State::SWP);
     assert(mHal.sendBreakCalls == 1);
-    assert(mHal.spdHistory.back() == 9600); // Transitions to 1st baud
+    assert(mHal.spdHistory.back() == 9600);
     std::cout << "PASS" << std::endl;
 }
 
 void run_test_custom_config_sweep() {
     std::cout << "Test: Custom Baud Configuration & Sweep... ";
     MockHal mHal;
-    ALink master(&mHal, true, {1200, 2400, 4800}, 1, 10);
+    ALink master(mHal, true, {1200, 2400, 4800}, 1, 10);
     
     master.err();
-    master.err(); // Triggers break
-    assert(master.getState() == SWP);
+    master.err();
+    assert(master.getState() == State::SWP);
     mHal.resetSpies();
     
-    // Step 1: 1200
     master.onTimer();
-    assert(mHal.spdHistory.back() == 2400); // advances to next
+    assert(mHal.spdHistory.back() == 2400);
     
-    // Step 2: 2400
     master.onTimer();
     assert(mHal.spdHistory.back() == 4800); 
     
-    // Step 3: 4800 -> Finish Sweep
     master.onTimer();
-    assert(master.getState() == LCK);
-    assert(mHal.spdHistory.back() == 1200); // Fixed: Falls back to spds[0] for LCK negotiation
+    assert(master.getState() == State::LCK);
+    assert(mHal.spdHistory.back() == 1200); 
     
     std::cout << "PASS" << std::endl;
 }
@@ -124,40 +120,34 @@ void run_test_custom_config_sweep() {
 void run_test_slave_score_selection() {
     std::cout << "Test: Slave Score Selection Logic... ";
     MockHal sHal;
-    ALink slave(&sHal, false, {9600, 19200, 38400}, 5, 50);
+    ALink slave(sHal, false, {9600, 19200, 38400}, 5, 50);
     
-    // Force slave into sweep
     sHal.sendBreak();
-    assert(slave.getState() == SWP);
+    assert(slave.getState() == State::SWP);
     
-    // Simulate SpdI = 0 (9600) -> 1 ping
     uint8_t ping = ALINK_PING_CMD;
     slave.onRx(&ping, 1);
     
-    slave.onTimer(); // Advances to spdI = 1 (19200)
-    // Send 3 pings
+    slave.onTimer();
     slave.onRx(&ping, 1);
     slave.onRx(&ping, 1);
     slave.onRx(&ping, 1);
     
-    slave.onTimer(); // Advances to spdI = 2 (38400)
-    // Send 2 pings
+    slave.onTimer();
     slave.onRx(&ping, 1);
     slave.onRx(&ping, 1);
     
-    slave.onTimer(); // Advances to LCK
-    assert(slave.getState() == LCK);
+    slave.onTimer();
+    assert(slave.getState() == State::LCK);
     
-    // Master requests winner
     sHal.clearTx();
     uint8_t req = ALINK_REQ_CMD;
     slave.onRx(&req, 1);
     
-    // Slave should pick index 1 (19200) because it got 3 pings
     assert(sHal.txN == 1);
     assert(sHal.txBuf[0] == 1);
-    assert(slave.getState() == OK);
-    assert(sHal.spd == 19200); // verifies hal set speed correctly
+    assert(slave.getState() == State::OK);
+    assert(sHal.spd == 19200);
     
     std::cout << "PASS" << std::endl;
 }
@@ -165,14 +155,12 @@ void run_test_slave_score_selection() {
 void run_test_full_negotiation() {
     std::cout << "Test: Full Master/Slave Auto-Baud Lock... ";
     MockHal mHal, sHal;
-    ALink master(&mHal, true);
-    ALink slave(&sHal, false);
+    ALink master(mHal, true);
+    ALink slave(sHal, false);
     
-    // Trigger break
     for(int i=0; i<6; i++) master.err();
     sHal.sendBreak(); 
     
-    // Process sweeps
     for(int step=0; step<5; step++) {
         mHal.clearTx();
         master.onTimer(); 
@@ -180,17 +168,16 @@ void run_test_full_negotiation() {
         slave.onTimer(); 
     }
     
-    // LCK phase
     mHal.clearTx();
-    master.onTimer(); // Master sends req
+    master.onTimer();
     
     sHal.clearTx();
-    slave.onRx(mHal.txBuf, mHal.txN); // Slave replies with index
-    master.onRx(sHal.txBuf, sHal.txN); // Master locks
+    slave.onRx(mHal.txBuf, mHal.txN);
+    master.onRx(sHal.txBuf, sHal.txN);
     
-    assert(slave.getState() == OK);
-    assert(master.getState() == OK);
-    assert(mHal.spd == 115200); // Default array max
+    assert(slave.getState() == State::OK);
+    assert(master.getState() == State::OK);
+    assert(mHal.spd == 115200);
     std::cout << "PASS" << std::endl;
 }
 
