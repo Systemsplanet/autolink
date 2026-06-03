@@ -1,109 +1,109 @@
 #include "ALink.h"
 
-ALink::ALink(ILink* h, bool m) {
+ALink::ALink(ILink* h, bool master) {
     hw = h;
-    isM = m;
+    isM = master;
     st = OK;
     errs = 0;
-    t = 0;
     spdI = 0;
+    hw->bind(this);
     for(int i=0; i<5; i++) scores[i]=0;
 }
 
 void ALink::err() {
+    if (st != OK) return;
     errs++;
-    // Threshold: 5 CRC errors triggers resync
-    if (errs > 5 && st == OK) {
-        st = BRK;
-        t = hw->ms();
+    if (errs > 5) {
+        // Trigger a native hardware break to alert the slave
+        hw->sendBreak();
+        onBreak(); // Transition locally
     }
 }
 
-void ALink::tick() {
-    uint32_t now = hw->ms();
-    
-    if (st == OK) {
-        // Optional: clear errors periodically if no new ones occur
-        if (errs > 0 && now - t > 5000) { errs = 0; t = now; }
-        return;
-    }
+int ALink::available() { 
+    return rxBuf.available(); 
+}
 
-    if (st == BRK) {
-        if (isM) hw->brk();
-        if (now - t > 100) { // 100ms break
-            st = SWP;
-            spdI = 0;
-            hw->setSpd(spds[0]);
-            for(int i=0; i<5; i++) scores[i]=0;
-            t = now;
-        }
+int ALink::read(uint8_t* b, int max_len) {
+    int n = 0;
+    while(n < max_len && rxBuf.available()) {
+        b[n++] = (uint8_t)rxBuf.pop();
     }
-    else if (st == SWP) {
-        if (now - t < 50) {
-            // Test period (50ms per speed)
+    return n;
+}
+
+void ALink::write(const uint8_t* b, int len) {
+    if (st == OK) { 
+        hw->tx(b, len); 
+    }
+}
+
+void ALink::onRx(const uint8_t* data, int len) {
+    for(int i=0; i<len; i++) {
+        uint8_t b = data[i];
+        
+        if (st == OK) {
+            rxBuf.push(b);
+        } 
+        else if (st == SWP) {
+            // Count successful pings at current speed
+            if (b == 0x55 && spdI < 5) scores[spdI]++;
+        } 
+        else if (st == LCK) {
             if (isM) {
-                uint8_t ping = 0x55;
-                hw->tx(&ping, 1);
-            } else {
-                uint8_t b;
-                if (hw->rx(&b, 1) > 0 && b == 0x55) scores[spdI]++;
-            }
-        } else {
-            // Move to next speed
-            spdI++;
-            if (spdI > 4) {
-                st = LCK;
-                hw->setSpd(9600); // 9600 is reliable for locking
-                t = now;
-            } else {
-                hw->setSpd(spds[spdI]);
-                t = now;
-            }
-        }
-    }
-    else if (st == LCK) {
-        if (isM) {
-            // Master requests best speed
-            uint8_t req = 0xAA;
-            hw->tx(&req, 1);
-            
-            uint8_t res;
-            if (hw->rx(&res, 1) > 0) {
-                hw->setSpd(spds[res]);
-                st = OK;
-                errs = 0;
-                t = now;
-            }
-        } else {
-            // Slave decides best speed
-            uint8_t req;
-            if (hw->rx(&req, 1) > 0 && req == 0xAA) {
-                int bestI = 0;
-                for (int i=1; i<5; i++) {
-                    if (scores[i] >= scores[bestI]) bestI = i; // Prefer higher spd if tied
+                if (b < 5) { // Slave replied with optimal speed index
+                    hw->setSpd(spds[b]);
+                    st = OK; errs = 0;
                 }
-                uint8_t res = bestI;
-                hw->tx(&res, 1);
-                hw->setSpd(spds[bestI]);
-                st = OK;
-                errs = 0;
-                t = now;
+            } else {
+                if (b == 0xAA) { // Master requests best speed
+                    int best = 0;
+                    for(int j=1; j<5; j++) {
+                        if (scores[j] >= scores[best]) best = j;
+                    }
+                    uint8_t res = best;
+                    hw->tx(&res, 1);
+                    hw->flushTx();
+                    hw->setSpd(spds[best]);
+                    st = OK; errs = 0;
+                }
             }
         }
-        if (now - t > 1000) st = BRK; // Timeout during lock, retry
     }
 }
 
-int ALink::rx(uint8_t* b, int n) {
-    if (st != OK) return 0; // Block comms while resyncing
-    return hw->rx(b, n);
+void ALink::onBreak() {
+    st = SWP;
+    spdI = 0;
+    rxBuf.clear();
+    for(int i=0; i<5; i++) scores[i]=0;
+    hw->setSpd(spds[0]);
+    hw->startTimer(50); // Start 50ms sweep timer
 }
 
-void ALink::tx(const uint8_t* b, int n) {
-    if (st != OK) return; // Block comms while resyncing
-    hw->tx(b, n);
-}
-
-St ALink::getSt() { 
-    return st; 
+void ALink::onTimer() {
+    if (st == SWP) {
+        if (isM && spdI < 5) {
+            uint8_t ping = 0x55;
+            hw->tx(&ping, 1);
+            hw->flushTx();
+        }
+        
+        spdI++;
+        if (spdI < 5) {
+            hw->setSpd(spds[spdI]);
+            hw->startTimer(50);
+        } else {
+            // Sweep complete, drop to lowest speed for Lock Phase
+            st = LCK;
+            hw->setSpd(9600);
+            if (isM) hw->startTimer(50); // Give slave time to sync to 9600
+        }
+    } 
+    else if (st == LCK && isM) {
+        // Send request for slave's decision
+        uint8_t req = 0xAA;
+        hw->tx(&req, 1);
+        hw->flushTx();
+    }
 }
