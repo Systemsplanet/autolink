@@ -16,6 +16,11 @@ std::unique_ptr<AutoLink> link;
 void setup() {
     // You can optionally pass custom baud rates, error thresholds, and delays!
     link.reset(new AutoLink(UART_NUM_2, 16, 17, true));
+    
+    // Check if tasks/memory allocated properly
+    if (!link->isHealthy()) {
+        // Handle failure
+    }
 }
 
 void loop() {
@@ -35,15 +40,11 @@ void loop() {
 ```
 
 ## Advanced Testability & Coverage
-The `ALink` core has been deeply refactored to prioritize testability.
+The `ALink` core has been deeply refactored to prioritize testability and C++11 best practices.
 - **Introspection Methods:** New state accessors (`getErrCount()`, `getCurrentSpdIndex()`) allow testing frameworks to verify internal state logic without breaking encapsulation.
+- **Dependency Injection:** The core state machine expects an `ILink` hardware reference at instantiation, eliminating null-pointer risks entirely.
 - **Enhanced Mocking:** The `MockHal` testing hardware layer now employs Spies (`sendBreakCalls`, `spdHistory`) to trace exactly how the core logic manipulates the hardware under varying scenarios.
-- **Granular Test Suite:** `test.cpp` features a structured test runner handling isolated test cases for:
-    1. Base IO operations.
-    2. Dynamic error threshold validation.
-    3. Custom sweep configuration and sequence mapping.
-    4. Advanced Slave-side ping-score decision making logic.
-    5. Complete Master/Slave end-to-end locking sequences.
+- **Granular Test Suite:** `test.cpp` features a structured test runner handling isolated test cases for IO operations, baud sweep logic, and master/slave locking sequences.
 
 ## PC Unit Testing
 Run `make` to compile and execute the test runner natively on your PC, bypassing the ESP32 wrapper to prove the core protocol math is flawless.
