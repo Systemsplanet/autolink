@@ -1,22 +1,25 @@
 #pragma once
 #include "EspHal.h"
 #include "ALink.h"
+#include <memory>
+#include <vector>
 
 class AutoLink {
 private:
-    EspHal* hal;
-    ALink* link;
+    std::unique_ptr<EspHal> hal;
+    std::unique_ptr<ALink> link;
 
 public:
-    AutoLink(uart_port_t u_num, int rx_pin, int tx_pin, bool isMasterNode) {
-        hal = new EspHal(u_num, rx_pin, tx_pin);
-        link = new ALink(hal, isMasterNode);
+    AutoLink(uart_port_t u_num, int rx_pin, int tx_pin, bool isMasterNode, 
+             std::vector<int> allowedBauds = {9600, 19200, 38400, 57600, 115200}, 
+             int errThresh = 5, 
+             int delayMs = 50) 
+    {
+        hal.reset(new EspHal(u_num, rx_pin, tx_pin));
+        link.reset(new ALink(hal.get(), isMasterNode, allowedBauds, errThresh, delayMs));
     }
-
-    ~AutoLink() {
-        delete link;
-        delete hal;
-    }
+    
+    // No explicit destructor needed - std::unique_ptr ensures zero leaks.
 
     int available() { return link->available(); }
     int read(uint8_t* b, int max_len) { return link->read(b, max_len); }
