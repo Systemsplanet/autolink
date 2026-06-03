@@ -2,13 +2,13 @@
 #include "ILink.h"
 #include <vector>
 
-enum State { OK, SWP, LCK };
+enum class State { OK, SWP, LCK };
 
 const uint8_t ALINK_PING_CMD = 0x55;
 const uint8_t ALINK_REQ_CMD = 0xAA;
 
 class ALink {
-    ILink* hw;
+    ILink& hw;
     bool isMaster;
     
     // Protected by hardware lock()
@@ -23,20 +23,20 @@ class ALink {
     int timerDelayMs;
 
 public:
-    ALink(ILink* hw, bool isMasterNode, 
-          std::vector<int> allowedBauds = {9600, 19200, 38400, 57600, 115200}, 
+    ALink(ILink& hw, bool isMasterNode, 
+          const std::vector<int>& allowedBauds = {9600, 19200, 38400, 57600, 115200}, 
           int errorThreshold = 5, 
           int delayMs = 50);
     
     void err(); 
-    int available();
+    int available() const;
     int read(uint8_t* b, int max_len);
     void write(const uint8_t* b, int len);
     
     // Testability / Introspection getters
-    State getState();
-    int getErrCount();
-    int getCurrentSpdIndex();
+    State getState() const;
+    int getErrCount() const;
+    int getCurrentSpdIndex() const;
     
     void onRx(const uint8_t* data, int len);
     void onBreak();
