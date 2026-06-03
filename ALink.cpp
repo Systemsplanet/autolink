@@ -1,3 +1,4 @@
+#include <cstddef>
 #include "ALink.h"
 
 ALink::ALink(ILink* h, bool isMasterNode, std::vector<int> allowedBauds, int errorThreshold, int delayMs) {
