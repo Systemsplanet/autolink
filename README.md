@@ -88,3 +88,12 @@ You do not have to rewrite your existing protocols. Simply wrap your communicati
 ​Light as Possible: Zero dynamic allocation (malloc/new). Zero std::vector or String objects. It is purely state-machine driven and memory-safe.
 ​Easily Testable (Decoupled): I created an ILink.h Hardware Abstraction Layer. ALink knows nothing about ESP32 hardware, which means you can compile and run the logic on your PC natively.
 ​Tests Included: You will find a test.cpp and a Makefile inside the zip. Running make will execute a full simulated workflow proving the master detects errors, sends a break, cycles through baud speeds, calculates the optimum, and locks it in.
+
+
+Fully Interrupt/Event Driven: The tick() function is completely gone. The main loop (app) does not need to poll the library anymore.
+​Native Hardware Break (No GPIO pins): I switched the ESP32 hardware layer (EspHal.h) to use native ESP-IDF drivers (driver/uart.h) rather than Arduino's HardwareSerial.
+​To send a break, it now uses uart_write_bytes_with_break() which utilizes the silicon to hold the line low without touching a GPIO.
+​It runs a background FreeRTOS task blocking on the uart_queue. If the silicon detects a 15-bit low signal, it fires a UART_BREAK hardware event, instantly waking the task and triggering the Auto-Baud sweep.
+​RingBuffer Included: Since data now arrives in the background via tasks, I added RingBuffer.h to safely buffer data until your application is ready to read it (link->available()).
+​Hardware Timer Sweeps: The 50ms sweep delays are no longer blocking or polled. They are driven by a FreeRTOS software timer (xTimerCreate) that steps the state machine through the baud rates in the background.
+​PC Testability Preserved: Despite switching to FreeRTOS concepts for the ESP32, the core logic (ALink.cpp) remains 100% decoupled. The test.cpp simply acts as the "hardware" and simulates firing these asynchronous events to prove the state machine locks the new speed successfully.
