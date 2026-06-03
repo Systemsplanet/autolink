@@ -6,7 +6,7 @@ enum State { OK, SWP, LCK };
 
 class ALink {
     ILink* hw;
-    bool isM;
+    bool isMaster;
     volatile State state;
     volatile int errs;
     volatile int spdI;
@@ -15,7 +15,7 @@ class ALink {
     RingBuffer rxBuf;
 
 public:
-    ALink(ILink* hw, bool isMaster);
+    ALink(ILink* hw, bool isMasterNode);
     
     void err(); 
     int available();
