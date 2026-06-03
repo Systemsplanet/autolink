@@ -1,5 +1,5 @@
 # AutoLink ESP32
-A production-grade, self-healing UART protocol layer.
+A production-grade, self-healing UART protocol layer with comprehensive test coverage.
 
 ## The `AutoLink` Wrapper (Modern API)
 We've significantly simplified the API. You no longer need to manually wire the Hardware Abstraction Layer (`EspHal`) into the Core State Machine (`ALink`). 
@@ -34,11 +34,16 @@ void loop() {
 }
 ```
 
-## Architecture Under the Hood
-- `AutoLink`: Clean interface utilizing C++11 `<memory>` to prevent leaks.
-- `EspHal`: The ESP32 driver utilizing `uart_driver_install` and FreeRTOS Timers. Protected by hardware initialization checks (`ESP_ERROR_CHECK`). 
-- `ALink`: The pure state machine triggered by events. Protected internally against multi-task race conditions by abstract hardware locks.
-- `StreamBuffer`: Safely queues incoming data from the background ISR/Task using the native `freertos/stream_buffer.h`.
+## Advanced Testability & Coverage
+The `ALink` core has been deeply refactored to prioritize testability.
+- **Introspection Methods:** New state accessors (`getErrCount()`, `getCurrentSpdIndex()`) allow testing frameworks to verify internal state logic without breaking encapsulation.
+- **Enhanced Mocking:** The `MockHal` testing hardware layer now employs Spies (`sendBreakCalls`, `spdHistory`) to trace exactly how the core logic manipulates the hardware under varying scenarios.
+- **Granular Test Suite:** `test.cpp` features a structured test runner handling isolated test cases for:
+    1. Base IO operations.
+    2. Dynamic error threshold validation.
+    3. Custom sweep configuration and sequence mapping.
+    4. Advanced Slave-side ping-score decision making logic.
+    5. Complete Master/Slave end-to-end locking sequences.
 
 ## PC Unit Testing
-Run `make` to compile and run the entire suite. The core state machine (`ALink.cpp`) is tested natively on your PC using standard C++ libraries (`<queue>` and `<mutex>`), bypassing the ESP32 wrapper to prove the logic is flawless.
+Run `make` to compile and execute the test runner natively on your PC, bypassing the ESP32 wrapper to prove the core protocol math is flawless.
