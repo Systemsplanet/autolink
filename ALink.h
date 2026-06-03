@@ -1,31 +1,32 @@
 #pragma once
 #include "ILink.h"
+#include "RingBuffer.h"
 
-// States: OK (Normal), BRK (Break sent/detected), SWP (Sweeping baud), LCK (Locking baud)
-enum St { OK, BRK, SWP, LCK };
+enum St { OK, SWP, LCK };
 
+// Core State Machine logic (Interrupt & Timer Safe)
 class ALink {
     ILink* hw;
-    St st;
-    int errs;
-    uint32_t t;     // timer
-    int spdI;       // speed index
+    bool isM;
+    volatile St st;
+    volatile int errs;
+    volatile int spdI;
     int spds[5] = {9600, 19200, 38400, 57600, 115200};
-    int scores[5];
-    bool isM;       // is master
+    volatile int scores[5];
+    RingBuffer rxBuf;
 
 public:
-    ALink(ILink* h, bool master);
+    ALink(ILink* hw, bool isMaster);
     
-    // Call this from your upper protocol when a CRC fails
-    void err(); 
+    // --- Application API ---
+    void err(); // Call when external CRC fails
+    int available();
+    int read(uint8_t* b, int max_len);
+    void write(const uint8_t* b, int len);
+    St getSt() { return st; }
     
-    // Call this in your main loop
-    void tick(); 
-    
-    // Layered API to send/receive data
-    int rx(uint8_t* b, int n);
-    void tx(const uint8_t* b, int n);
-    
-    St getSt();
+    // --- Hardware Event Callbacks (Do not call from App) ---
+    void onRx(const uint8_t* data, int len);
+    void onBreak();
+    void onTimer();
 };
