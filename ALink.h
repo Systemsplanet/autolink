@@ -4,6 +4,9 @@
 
 enum State { OK, SWP, LCK };
 
+const uint8_t ALINK_PING_CMD = 0x55;
+const uint8_t ALINK_REQ_CMD = 0xAA;
+
 class ALink {
     ILink* hw;
     bool isMaster;
