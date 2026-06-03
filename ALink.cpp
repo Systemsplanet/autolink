@@ -1,4 +1,3 @@
-#include <cstddef>
 #include "ALink.h"
 
 ALink::ALink(ILink* h, bool isMasterNode, std::vector<int> allowedBauds, int errorThreshold, int delayMs) {
@@ -77,31 +76,32 @@ int ALink::getCurrentSpdIndex() {
 }
 
 void ALink::onRx(const uint8_t* data, int len) {
+    hw->lock();
+    State current_state = state;
+    hw->unlock();
+
     for(int i=0; i<len; i++) {
         uint8_t b = data[i];
         
-        hw->lock();
-        State s = state;
-        hw->unlock();
-        
-        if (s == OK) {
+        if (current_state == OK) {
             hw->pushAppBuf(b);
         } 
-        else if (s == SWP) {
+        else if (current_state == SWP) {
             hw->lock();
-            if (b == 0x55 && spdI < (int)spds.size()) scores[spdI]++;
+            if (b == ALINK_PING_CMD && spdI < (int)spds.size()) scores[spdI]++;
             hw->unlock();
         } 
-        else if (s == LCK) {
+        else if (current_state == LCK) {
             if (isMaster) {
                 if (b < spds.size()) { 
                     hw->setSpd(spds[b]);
                     hw->lock();
                     state = OK; errs = 0;
+                    current_state = OK; // Update local copy
                     hw->unlock();
                 }
             } else {
-                if (b == 0xAA) { 
+                if (b == ALINK_REQ_CMD) { 
                     int best = 0;
                     hw->lock();
                     for(size_t j=1; j<spds.size(); j++) {
@@ -116,6 +116,7 @@ void ALink::onRx(const uint8_t* data, int len) {
                     
                     hw->lock();
                     state = OK; errs = 0;
+                    current_state = OK; // Update local copy
                     hw->unlock();
                 }
             }
@@ -143,7 +144,7 @@ void ALink::onTimer() {
     
     if (s == SWP) {
         if (isMaster && curSpd < (int)spds.size()) {
-            uint8_t ping = 0x55;
+            uint8_t ping = ALINK_PING_CMD;
             hw->tx(&ping, 1);
             hw->flushTx();
         }
@@ -161,12 +162,12 @@ void ALink::onTimer() {
             state = LCK;
             hw->unlock();
             
-            hw->setSpd(9600);
+            hw->setSpd(spds[0]);
             if (isMaster) hw->startTimer(timerDelayMs); 
         }
     } 
     else if (s == LCK && isMaster) {
-        uint8_t req = 0xAA;
+        uint8_t req = ALINK_REQ_CMD;
         hw->tx(&req, 1);
         hw->flushTx();
     }
