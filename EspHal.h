@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include "driver/uart.h"
 #include "esp_err.h"
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/timers.h"
@@ -11,27 +12,29 @@
 #include "freertos/semphr.h"
 
 #define UART_MAX_RX_BUFFER 512
+static const char* HAL_TAG = "EspHal";
 
 class EspHal : public ILink {
     uart_port_t uart_num;
-    QueueHandle_t uart_queue;
-    TaskHandle_t task_handle;
-    TimerHandle_t timer_handle;
-    StreamBufferHandle_t stream_buf;
-    SemaphoreHandle_t mutex;
+    QueueHandle_t uart_queue = nullptr;
+    TaskHandle_t task_handle = nullptr;
+    TimerHandle_t timer_handle = nullptr;
+    StreamBufferHandle_t stream_buf = nullptr;
+    SemaphoreHandle_t mutex = nullptr;
+    bool healthy = false;
 
     static void uart_event_task(void *pvParameters) {
         EspHal* hal = (EspHal*)pvParameters;
         uart_event_t event;
         uint8_t* dtmp = (uint8_t*) malloc(UART_MAX_RX_BUFFER);
         if(dtmp == NULL) {
-           vTaskDelete(NULL); // Handle malloc failure gracefully
+            ESP_LOGE(HAL_TAG, "Failed to allocate memory for UART RX buffer. Task aborting.");
+            vTaskDelete(NULL); 
         }
         
         while(1) {
             if(xQueueReceive(hal->uart_queue, (void * )&event, (TickType_t)portMAX_DELAY)) {
                 if(event.type == UART_DATA) {
-                    // Safe read, bounded by max buffer size
                     size_t read_len = (event.size > UART_MAX_RX_BUFFER) ? UART_MAX_RX_BUFFER : event.size;
                     int len = uart_read_bytes(hal->uart_num, dtmp, read_len, portMAX_DELAY);
                     if(hal->link && len > 0) hal->link->onRx(dtmp, len);
@@ -60,29 +63,39 @@ public:
             .data_bits = UART_DATA_8_BITS,
             .parity = UART_PARITY_DISABLE,
             .stop_bits = UART_STOP_BITS_1,
-            .flow_ctrl = UART_HW_FLOWCTRL_DISABLE
+            .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+            .rx_flow_ctrl_thresh = 122,
+            .use_ref_tick = false
         };
         
-        ESP_ERROR_CHECK(uart_driver_install(uart_num, UART_MAX_RX_BUFFER, UART_MAX_RX_BUFFER, 10, &uart_queue, 0));
-        ESP_ERROR_CHECK(uart_param_config(uart_num, &uart_config));
-        ESP_ERROR_CHECK(uart_set_pin(uart_num, tx_pin, rx_pin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+        if (uart_driver_install(uart_num, UART_MAX_RX_BUFFER, UART_MAX_RX_BUFFER, 10, &uart_queue, 0) != ESP_OK) {
+            ESP_LOGE(HAL_TAG, "Failed to install UART driver");
+            return;
+        }
+        uart_param_config(uart_num, &uart_config);
+        uart_set_pin(uart_num, tx_pin, rx_pin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
         
         if (xTaskCreate(uart_event_task, "uart_ev_task", 4096, this, 12, &task_handle) != pdPASS) {
-             // Handle task creation failure (e.g., log error)
+            ESP_LOGE(HAL_TAG, "Failed to create UART event task due to insufficient memory");
+            return;
         }
         timer_handle = xTimerCreate("alink_tmr", pdMS_TO_TICKS(50), pdFALSE, this, timer_callback);
         if (timer_handle == NULL) {
-            // Handle timer creation failure
+            ESP_LOGE(HAL_TAG, "Failed to create FreeRTOS timer");
+            return;
         }
+        healthy = true;
     }
     
     ~EspHal() {
         if(task_handle) vTaskDelete(task_handle);
         if(timer_handle) xTimerDelete(timer_handle, 0);
-        uart_driver_delete(uart_num);
+        uart_driver_delete(uart_num); 
         if(stream_buf) vStreamBufferDelete(stream_buf);
         if(mutex) vSemaphoreDelete(mutex);
     }
+    
+    bool isHealthy() const { return healthy; }
 
     void setSpd(int spd) override { uart_set_baudrate(uart_num, spd); }
     void sendBreak() override { uart_write_bytes_with_break(uart_num, "\0", 1, 15); }
@@ -99,10 +112,10 @@ public:
         if(timer_handle) xTimerStop(timer_handle, 0); 
     }
     
-    void lock() override { 
+    void lock() const override { 
         if(mutex) xSemaphoreTake(mutex, portMAX_DELAY); 
     }
-    void unlock() override { 
+    void unlock() const override { 
         if(mutex) xSemaphoreGive(mutex); 
     }
     
@@ -114,7 +127,7 @@ public:
         if (stream_buf && xStreamBufferReceive(stream_buf, &b, 1, 0) == 1) return b;
         return -1;
     }
-    int appBufAvailable() override { 
+    int appBufAvailable() const override { 
         return stream_buf ? xStreamBufferBytesAvailable(stream_buf) : 0; 
     }
     void clearAppBuf() override { 
