@@ -1,7 +1,6 @@
 #pragma once
 #include <stdint.h>
 
-// A lightweight, volatile-safe ring buffer for ISR-to-App data transfer
 class RingBuffer {
     uint8_t buf[256];
     volatile int head = 0;
