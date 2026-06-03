@@ -20,7 +20,7 @@ class EspHal : public ILink {
     static void uart_event_task(void *pvParameters) {
         EspHal* hal = (EspHal*)pvParameters;
         uart_event_t event;
-        uint8_t dtmp[256]; // Stack allocation replaces malloc
+        uint8_t dtmp[256]; 
         
         while(1) {
             if(xQueueReceive(hal->uart_queue, (void * )&event, (TickType_t)portMAX_DELAY)) {
@@ -54,7 +54,6 @@ public:
             .flow_ctrl = UART_HW_FLOWCTRL_DISABLE
         };
         
-        // Wrapped in ESP_ERROR_CHECK for error catching
         ESP_ERROR_CHECK(uart_driver_install(uart_num, 512, 512, 10, &uart_queue, 0));
         ESP_ERROR_CHECK(uart_param_config(uart_num, &uart_config));
         ESP_ERROR_CHECK(uart_set_pin(uart_num, tx_pin, rx_pin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
@@ -84,21 +83,12 @@ public:
     void lock() override { portENTER_CRITICAL(&mux); }
     void unlock() override { portEXIT_CRITICAL(&mux); }
     
-    void pushAppBuf(uint8_t b) override {
-        xStreamBufferSend(stream_buf, &b, 1, 0);
-    }
-    
+    void pushAppBuf(uint8_t b) override { xStreamBufferSend(stream_buf, &b, 1, 0); }
     int popAppBuf() override {
         uint8_t b;
         if (xStreamBufferReceive(stream_buf, &b, 1, 0) == 1) return b;
         return -1;
     }
-    
-    int appBufAvailable() override {
-        return xStreamBufferBytesAvailable(stream_buf);
-    }
-    
-    void clearAppBuf() override {
-        xStreamBufferReset(stream_buf);
-    }
+    int appBufAvailable() override { return xStreamBufferBytesAvailable(stream_buf); }
+    void clearAppBuf() override { xStreamBufferReset(stream_buf); }
 };
