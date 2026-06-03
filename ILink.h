@@ -16,4 +16,14 @@ public:
     virtual void flushTx() = 0;
     virtual void startTimer(int ms) = 0;
     virtual void stopTimer() = 0;
+    
+    // Concurrency Controls
+    virtual void lock() = 0;
+    virtual void unlock() = 0;
+    
+    // Abstract Buffering
+    virtual void pushAppBuf(uint8_t b) = 0;
+    virtual int popAppBuf() = 0;
+    virtual int appBufAvailable() = 0;
+    virtual void clearAppBuf() = 0;
 };
