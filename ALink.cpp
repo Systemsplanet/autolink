@@ -1,8 +1,8 @@
 #include "ALink.h"
 
-ALink::ALink(ILink* h, bool master) {
+ALink::ALink(ILink* h, bool isMasterNode) {
     hw = h;
-    isM = master;
+    isMaster = isMasterNode;
     state = OK;
     errs = 0;
     spdI = 0;
@@ -48,7 +48,7 @@ void ALink::onRx(const uint8_t* data, int len) {
             if (b == 0x55 && spdI < 5) scores[spdI]++;
         } 
         else if (state == LCK) {
-            if (isM) {
+            if (isMaster) {
                 if (b < 5) { 
                     hw->setSpd(spds[b]);
                     state = OK; errs = 0;
@@ -81,7 +81,7 @@ void ALink::onBreak() {
 
 void ALink::onTimer() {
     if (state == SWP) {
-        if (isM && spdI < 5) {
+        if (isMaster && spdI < 5) {
             uint8_t ping = 0x55;
             hw->tx(&ping, 1);
             hw->flushTx();
@@ -94,10 +94,10 @@ void ALink::onTimer() {
         } else {
             state = LCK;
             hw->setSpd(9600);
-            if (isM) hw->startTimer(50); 
+            if (isMaster) hw->startTimer(50); 
         }
     } 
-    else if (state == LCK && isM) {
+    else if (state == LCK && isMaster) {
         uint8_t req = 0xAA;
         hw->tx(&req, 1);
         hw->flushTx();
