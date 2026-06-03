@@ -47,10 +47,10 @@ Run `make` to compile and run the entire suite. The core state machine (`ALink.c
 ## Notes & Design Principles
 
 * **Simple API & Layerable**: You do not have to rewrite your existing protocols. Simply wrap your communication via `link->read()` and `link->write()`. Whenever your higher-level protocol (like Modbus or a custom packet framer) detects a bad CRC, just call `link->err()`. The library intercepts the stream to fix the connection and returns to normal automatically.
-* **Short Variable Names**: Used terse structural naming (`ALink` for AutoLink, `st` for state, `spd` for speed, `isM` for master role, `hw` for hardware).
+* **Short Variable Names**: Used terse structural naming (`ALink` for AutoLink, `state` for state, `spd` for speed, `isM` for master role, `hw` for hardware).
 * **Lightweight Core**: Uses zero `std::vector` or `String` objects. The core logic is purely state-machine driven and memory-safe (dynamic allocation is kept minimally to RTOS queue structures).
 * **Easily Testable (Decoupled)**: An `ILink.h` Hardware Abstraction Layer ensures `ALink` knows nothing about ESP32 hardware, allowing you to compile and run the logic natively on your PC.
-* **Tests Included**: A `test.cpp` and `Makefile` are included. Running `make` executes a full simulated workflow proving the master detects errors, sends a break, cycles through baud speeds, calculates the optimum, and locks it in.
+* **Tests Included**: A `test.cpp` and `Makefile` are included. Running `make` executes a full simulated workflow proving the master detects errors, sends a break, cycles through baud speeds, calculates the optimum, and locks it in. Includes a dedicated test for `RingBuffer`.
 * **Fully Interrupt/Event Driven**: There is no polling `tick()` function. The main loop is completely free.
 * **Native Hardware Break (No GPIO pins)**: The ESP32 hardware layer (`EspHal.h`) uses native ESP-IDF drivers (`driver/uart.h`) instead of `HardwareSerial`. To send a break, it natively uses `uart_write_bytes_with_break()` to hold the line low without touching a GPIO.
 * **Hardware Event Queues**: A background FreeRTOS task blocks on the `uart_queue`. If the silicon detects a 15-bit low signal, it fires a `UART_BREAK` hardware event, instantly waking the task and triggering the Auto-Baud sweep.
