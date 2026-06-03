@@ -29,7 +29,11 @@ public:
     int available();
     int read(uint8_t* b, int max_len);
     void write(const uint8_t* b, int len);
+    
+    // Testability / Introspection getters
     State getState();
+    int getErrCount();
+    int getCurrentSpdIndex();
     
     void onRx(const uint8_t* data, int len);
     void onBreak();
