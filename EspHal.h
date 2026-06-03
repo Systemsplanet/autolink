@@ -1,39 +1,97 @@
 #pragma once
 #include "ILink.h"
+#include "ALink.h"
 #include <Arduino.h>
+#include "driver/uart.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/timers.h"
 
+// Hardware binding for ESP32 utilizing native ESP-IDF drivers
 class EspHal : public ILink {
-    HardwareSerial* s;
-    int rxP, txP;
-public:
-    EspHal(HardwareSerial* ser, int r, int t) : s(ser), rxP(r), txP(t) {}
-    
-    void setSpd(int spd) override {
-        s->end();
-        s->begin(spd, SERIAL_8N1, rxP, txP);
-    }
-    
-    void brk() override {
-        s->end();
-        pinMode(txP, OUTPUT);
-        digitalWrite(txP, LOW);
-        delay(20);
-        digitalWrite(txP, HIGH);
-    }
-    
-    int rx(uint8_t* b, int len) override {
-        int n = 0;
-        while(s->available() && n < len) {
-            b[n++] = s->read();
+    uart_port_t uart_num;
+    QueueHandle_t uart_queue;
+    TaskHandle_t task_handle;
+    TimerHandle_t timer_handle;
+
+    // Background RTOS task waiting for Hardware Interrupts
+    static void uart_event_task(void *pvParameters) {
+        EspHal* hal = (EspHal*)pvParameters;
+        uart_event_t event;
+        uint8_t* dtmp = (uint8_t*) malloc(256);
+        
+        while(1) {
+            // Blocks until an interrupt queues an event
+            if(xQueueReceive(hal->uart_queue, (void * )&event, (TickType_t)portMAX_DELAY)) {
+                if(event.type == UART_DATA) {
+                    int len = uart_read_bytes(hal->uart_num, dtmp, event.size, portMAX_DELAY);
+                    if(hal->link && len > 0) hal->link->onRx(dtmp, len);
+                } 
+                else if(event.type == UART_BREAK) {
+                    // Native hardware break detected, no GPIO interrupts needed!
+                    uart_flush_input(hal->uart_num);
+                    if(hal->link) hal->link->onBreak();
+                }
+            }
         }
-        return n;
+        free(dtmp);
+    }
+
+    // Hardware Timer Callback for Sweep steps
+    static void timer_callback(TimerHandle_t xTimer) {
+        EspHal* hal = (EspHal*) pvTimerGetTimerID(xTimer);
+        if(hal->link) hal->link->onTimer();
+    }
+
+public:
+    EspHal(uart_port_t u_num, int rx_pin, int tx_pin) : uart_num(u_num) {
+        uart_config_t uart_config = {
+            .baud_rate = 9600,
+            .data_bits = UART_DATA_8_BITS,
+            .parity = UART_PARITY_DISABLE,
+            .stop_bits = UART_STOP_BITS_1,
+            .flow_ctrl = UART_HW_FLOWCTRL_DISABLE
+        };
+        
+        // Install driver with event queue enabled
+        uart_driver_install(uart_num, 512, 512, 10, &uart_queue, 0);
+        uart_param_config(uart_num, &uart_config);
+        uart_set_pin(uart_num, tx_pin, rx_pin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+        
+        // Spin up background handling
+        xTaskCreate(uart_event_task, "uart_ev_task", 2048, this, 12, &task_handle);
+        timer_handle = xTimerCreate("alink_tmr", pdMS_TO_TICKS(50), pdFALSE, this, timer_callback);
     }
     
-    void tx(const uint8_t* b, int len) override {
-        s->write(b, len);
+    ~EspHal() {
+        vTaskDelete(task_handle);
+        xTimerDelete(timer_handle, 0);
+        uart_driver_delete(uart_num);
     }
-    
-    uint32_t ms() override {
-        return millis();
+
+    void setSpd(int spd) override {
+        uart_set_baudrate(uart_num, spd);
+    }
+
+    void sendBreak() override {
+        // Native ESP-IDF hardware function to pull TX low for 15 bit durations
+        uart_write_bytes_with_break(uart_num, "\0", 1, 15);
+    }
+
+    void tx(const uint8_t* b, int n) override {
+        uart_write_bytes(uart_num, (const char*)b, n);
+    }
+
+    void flushTx() override {
+        uart_wait_tx_done(uart_num, portMAX_DELAY);
+    }
+
+    void startTimer(int ms) override {
+        xTimerChangePeriod(timer_handle, pdMS_TO_TICKS(ms), 0);
+        xTimerStart(timer_handle, 0);
+    }
+
+    void stopTimer() override {
+        xTimerStop(timer_handle, 0);
     }
 };
