@@ -2,12 +2,12 @@
 #include "ILink.h"
 #include "RingBuffer.h"
 
-enum St { OK, SWP, LCK };
+enum State { OK, SWP, LCK };
 
 class ALink {
     ILink* hw;
     bool isM;
-    volatile St st;
+    volatile State state;
     volatile int errs;
     volatile int spdI;
     int spds[5] = {9600, 19200, 38400, 57600, 115200};
@@ -21,7 +21,7 @@ public:
     int available();
     int read(uint8_t* b, int max_len);
     void write(const uint8_t* b, int len);
-    St getSt() { return st; }
+    State getState() { return state; }
     
     void onRx(const uint8_t* data, int len);
     void onBreak();
