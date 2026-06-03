@@ -2,72 +2,81 @@
 #include <cassert>
 #include "ALink.h"
 
-// Mock Hardware Interface
+// Simulate the ESP32 Hardware Environment perfectly on a PC
 class MockHal : public ILink {
 public:
     int spd = 9600;
-    bool inBrk = false;
-    uint32_t time = 0;
-    uint8_t rxBuf[256];
-    int rxN = 0;
+    bool timerActive = false;
+    uint8_t txBuf[256];
+    int txN = 0;
     
     void setSpd(int s) override { spd = s; }
-    void brk() override { inBrk = true; }
-    int rx(uint8_t* b, int len) override {
-        int n = std::min(len, rxN);
-        for(int i=0; i<n; i++) b[i] = rxBuf[i];
-        
-        // shift remaining
-        for(int i=n; i<rxN; i++) rxBuf[i-n] = rxBuf[i];
-        rxN -= n;
-        
-        return n;
+    void sendBreak() override { 
+        if (link) link->onBreak(); 
     }
-    void tx(const uint8_t* b, int len) override {} // No-op for M mock
-    uint32_t ms() override { return time; }
+    void tx(const uint8_t* b, int n) override {
+        for(int i=0; i<n; i++) txBuf[txN++] = b[i];
+    }
+    void flushTx() override {}
+    void startTimer(int ms) override { timerActive = true; }
+    void stopTimer() override { timerActive = false; }
     
-    void pushRx(uint8_t val) { rxBuf[rxN++] = val; }
+    void clearTx() { txN = 0; }
 };
 
 int main() {
-    MockHal hw;
-    ALink link(&hw, true); // Initialize as Master
+    MockHal mHal, sHal;
+    ALink master(&mHal, true);
+    ALink slave(&sHal, false);
     
-    std::cout << "Starting tests..." << std::endl;
-    assert(link.getSt() == OK);
+    std::cout << "Test 1: App Layer Write/Read (Async Buffer)" << std::endl;
+    uint8_t data[] = {0x11, 0x22};
+    master.write(data, 2);
+    assert(mHal.txN == 2);
+    slave.onRx(mHal.txBuf, mHal.txN);
+    uint8_t rb[10];
+    int rn = slave.read(rb, 10);
+    assert(rn == 2 && rb[0] == 0x11);
     
-    // Simulate upper layer CRC errors
-    std::cout << "Testing Error Trigger..." << std::endl;
-    for(int i=0; i<6; i++) link.err();
-    assert(link.getSt() == BRK);
+    std::cout << "Test 2: Trigger CRC Error -> Hardware Break" << std::endl;
+    for(int i=0; i<6; i++) master.err();
+    assert(master.getSt() == SWP); 
+    assert(mHal.spd == 9600);
+    assert(mHal.timerActive);
     
-    // Process break
-    std::cout << "Testing Break State..." << std::endl;
-    hw.time = 150; 
-    link.tick();
-    assert(link.getSt() == SWP);
-    assert(hw.spd == 9600);
+    // Simulate UART hardware natively detecting the break at slave
+    sHal.sendBreak(); 
+    assert(slave.getSt() == SWP);
     
-    // Process Sweep Array (50ms per step)
-    std::cout << "Testing Baud Sweep State..." << std::endl;
-    hw.time += 60; link.tick(); assert(hw.spd == 19200);
-    hw.time += 60; link.tick(); assert(hw.spd == 38400);
-    hw.time += 60; link.tick(); assert(hw.spd == 57600);
-    hw.time += 60; link.tick(); assert(hw.spd == 115200);
+    std::cout << "Test 3: Sweep Phase (Timer Driven)" << std::endl;
+    for(int step=0; step<5; step++) {
+        mHal.clearTx();
+        master.onTimer(); 
+        assert(mHal.txN == 1 && mHal.txBuf[0] == 0x55); // Master sent Ping
+        
+        slave.onRx(mHal.txBuf, 1); // Slave captured Ping automatically via ISR
+        slave.onTimer(); 
+    }
     
-    // Move to Lock State
-    std::cout << "Testing Lock State Negotiation..." << std::endl;
-    hw.time += 60; link.tick(); 
-    assert(link.getSt() == LCK);
-    assert(hw.spd == 9600); // Must drop to 9600 to negotiate
+    std::cout << "Test 4: Lock Phase Negotiation" << std::endl;
+    assert(master.getSt() == LCK);
+    assert(slave.getSt() == LCK);
     
-    // Simulate Slave replying with Index 3 (57600 baud)
-    hw.pushRx(3);
-    link.tick();
+    mHal.clearTx();
+    master.onTimer(); // Master timer triggers request packet
+    assert(mHal.txN == 1 && mHal.txBuf[0] == 0xAA);
     
-    assert(link.getSt() == OK);
-    assert(hw.spd == 57600); // Successfully jumped to new agreed speed
+    sHal.clearTx();
+    slave.onRx(mHal.txBuf, 1); // Slave processes request
     
-    std::cout << "All AutoLink Unit Tests Passed Successfully!" << std::endl;
+    assert(slave.getSt() == OK);
+    assert(sHal.txN == 1); // Slave responds with Index 4 (115200)
+    assert(sHal.spd == 115200);
+    
+    master.onRx(sHal.txBuf, 1); // Master processes response
+    assert(master.getSt() == OK);
+    assert(mHal.spd == 115200);
+    
+    std::cout << "SUCCESS: All Fully-Asynchronous AutoLink Tests Passed!" << std::endl;
     return 0;
 }
