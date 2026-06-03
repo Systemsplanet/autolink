@@ -22,5 +22,5 @@ public:
     int read(uint8_t* b, int max_len) { return link->read(b, max_len); }
     void write(const uint8_t* b, int len) { link->write(b, len); }
     void err() { link->err(); }
-    St getSt() { return link->getSt(); }
+    State getState() { return link->getState(); }
 };
