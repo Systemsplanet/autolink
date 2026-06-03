@@ -1,12 +1,25 @@
 #pragma once
 #include <stdint.h>
 
-// Hardware Abstraction Layer for easy testing on PC or ESP32
+class ALink;
+
+// Hardware Abstraction Layer for event-driven UART
 class ILink {
+protected:
+    ALink* link = nullptr;
 public:
+    virtual ~ILink() {}
+    void bind(ALink* l) { link = l; }
+    
     virtual void setSpd(int s) = 0;
-    virtual void brk() = 0; // Send hardware break
-    virtual int rx(uint8_t* b, int n) = 0;
+    
+    // Hardware native break transmission (No GPIO toggling)
+    virtual void sendBreak() = 0;
+    
     virtual void tx(const uint8_t* b, int n) = 0;
-    virtual uint32_t ms() = 0; // Milliseconds timer
+    virtual void flushTx() = 0;
+    
+    // Hardware Timer controls for the sweep state machine
+    virtual void startTimer(int ms) = 0;
+    virtual void stopTimer() = 0;
 };
