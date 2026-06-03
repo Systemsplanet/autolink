@@ -116,7 +116,7 @@ void run_test_custom_config_sweep() {
     // Step 3: 4800 -> Finish Sweep
     master.onTimer();
     assert(master.getState() == LCK);
-    assert(mHal.spdHistory.back() == 9600); // Always falls back to 9600 for LCK negotiation
+    assert(mHal.spdHistory.back() == 1200); // Fixed: Falls back to spds[0] for LCK negotiation
     
     std::cout << "PASS" << std::endl;
 }
@@ -131,7 +131,7 @@ void run_test_slave_score_selection() {
     assert(slave.getState() == SWP);
     
     // Simulate SpdI = 0 (9600) -> 1 ping
-    uint8_t ping = 0x55;
+    uint8_t ping = ALINK_PING_CMD;
     slave.onRx(&ping, 1);
     
     slave.onTimer(); // Advances to spdI = 1 (19200)
@@ -150,7 +150,7 @@ void run_test_slave_score_selection() {
     
     // Master requests winner
     sHal.clearTx();
-    uint8_t req = 0xAA;
+    uint8_t req = ALINK_REQ_CMD;
     slave.onRx(&req, 1);
     
     // Slave should pick index 1 (19200) because it got 3 pings
