@@ -1,7 +1,8 @@
 #include <iostream>
 #include <cassert>
+#include <queue>
+#include <mutex>
 #include "ALink.h"
-#include "RingBuffer.h"
 
 class MockHal : public ILink {
 public:
@@ -9,6 +10,9 @@ public:
     bool timerActive = false;
     uint8_t txBuf[256];
     int txN = 0;
+    
+    std::queue<uint8_t> appBuf;
+    std::mutex mtx;
     
     void setSpd(int s) override { spd = s; }
     void sendBreak() override { if (link) link->onBreak(); }
@@ -19,20 +23,35 @@ public:
     void startTimer(int ms) override { timerActive = true; }
     void stopTimer() override { timerActive = false; }
     void clearTx() { txN = 0; }
+    
+    void lock() override { mtx.lock(); }
+    void unlock() override { mtx.unlock(); }
+    
+    void pushAppBuf(uint8_t b) override { appBuf.push(b); }
+    int popAppBuf() override {
+        if (appBuf.empty()) return -1;
+        uint8_t b = appBuf.front();
+        appBuf.pop();
+        return b;
+    }
+    int appBufAvailable() override { return appBuf.size(); }
+    void clearAppBuf() override { 
+        while(!appBuf.empty()) appBuf.pop(); 
+    }
 };
 
 int main() {
-    std::cout << "Test 0: RingBuffer functionality" << std::endl;
-    RingBuffer rb;
-    assert(rb.available() == 0);
-    rb.push(0xAA);
-    rb.push(0xBB);
-    assert(rb.available() == 2);
-    assert(rb.pop() == 0xAA);
-    assert(rb.available() == 1);
-    assert(rb.pop() == 0xBB);
-    assert(rb.available() == 0);
-    assert(rb.pop() == -1); // empty
+    std::cout << "Test 0: Stream Buffer functionality (Mocked)" << std::endl;
+    MockHal tHal;
+    assert(tHal.appBufAvailable() == 0);
+    tHal.pushAppBuf(0xAA);
+    tHal.pushAppBuf(0xBB);
+    assert(tHal.appBufAvailable() == 2);
+    assert(tHal.popAppBuf() == 0xAA);
+    assert(tHal.appBufAvailable() == 1);
+    assert(tHal.popAppBuf() == 0xBB);
+    assert(tHal.appBufAvailable() == 0);
+    assert(tHal.popAppBuf() == -1);
 
     MockHal mHal, sHal;
     ALink master(&mHal, true);
