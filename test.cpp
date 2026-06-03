@@ -1,6 +1,7 @@
 #include <iostream>
 #include <cassert>
 #include "ALink.h"
+#include "RingBuffer.h"
 
 class MockHal : public ILink {
 public:
@@ -21,8 +22,18 @@ public:
 };
 
 int main() {
-    // Tests remain coupled directly to the ALink core to prove the 
-    // state machine works entirely without ESP32 hardware dependencies.
+    std::cout << "Test 0: RingBuffer functionality" << std::endl;
+    RingBuffer rb;
+    assert(rb.available() == 0);
+    rb.push(0xAA);
+    rb.push(0xBB);
+    assert(rb.available() == 2);
+    assert(rb.pop() == 0xAA);
+    assert(rb.available() == 1);
+    assert(rb.pop() == 0xBB);
+    assert(rb.available() == 0);
+    assert(rb.pop() == -1); // empty
+
     MockHal mHal, sHal;
     ALink master(&mHal, true);
     ALink slave(&sHal, false);
@@ -31,15 +42,15 @@ int main() {
     uint8_t data[] = {0x11, 0x22};
     master.write(data, 2);
     slave.onRx(mHal.txBuf, mHal.txN);
-    uint8_t rb[10];
-    assert(slave.read(rb, 10) == 2 && rb[0] == 0x11);
+    uint8_t rb_arr[10];
+    assert(slave.read(rb_arr, 10) == 2 && rb_arr[0] == 0x11);
     
     std::cout << "Test 2: Trigger CRC Error -> Hardware Break" << std::endl;
     for(int i=0; i<6; i++) master.err();
-    assert(master.getSt() == SWP); 
+    assert(master.getState() == SWP); 
     
     sHal.sendBreak(); 
-    assert(slave.getSt() == SWP);
+    assert(slave.getState() == SWP);
     
     std::cout << "Test 3: Sweep Phase (Timer Driven)" << std::endl;
     for(int step=0; step<5; step++) {
@@ -56,9 +67,9 @@ int main() {
     sHal.clearTx();
     slave.onRx(mHal.txBuf, 1);
     
-    assert(slave.getSt() == OK);
+    assert(slave.getState() == OK);
     master.onRx(sHal.txBuf, 1);
-    assert(master.getSt() == OK);
+    assert(master.getState() == OK);
     assert(mHal.spd == 115200);
     
     std::cout << "SUCCESS: All Fully-Asynchronous AutoLink Core Tests Passed!" << std::endl;
