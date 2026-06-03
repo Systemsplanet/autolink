@@ -18,8 +18,6 @@ public:
         hal.reset(new EspHal(u_num, rx_pin, tx_pin));
         link.reset(new ALink(hal.get(), isMasterNode, allowedBauds, errThresh, delayMs));
     }
-    
-    // No explicit destructor needed - std::unique_ptr ensures zero leaks.
 
     int available() { return link->available(); }
     int read(uint8_t* b, int max_len) { return link->read(b, max_len); }
