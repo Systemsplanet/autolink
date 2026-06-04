@@ -1,6 +1,8 @@
 #pragma once
 #include <stdint.h>
 
+namespace autolink {
+
 class ALink;
 
 class ILink {
@@ -27,3 +29,5 @@ public:
     virtual int appBufAvailable() const = 0;
     virtual void clearAppBuf() = 0;
 };
+
+} // namespace autolink
