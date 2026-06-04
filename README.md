@@ -56,8 +56,7 @@ void loop() {
 # 🛠️ Simple Usage: Master & Slave
 ​AutoLink requires one device to act as the Master (initiates the baud negotiation) and one to act as the Slave (listens and responds to the sweep).
 
-
-​## The Slave Node
+## The Slave Node
 
 ​Setting up a listening device is just as easy as setting up the master. Just pass false for the master flag!
 
@@ -88,8 +87,7 @@ void loop() {
 
 ```
 
-
-#🧠 Advanced Usage: The Power User API
+# 🧠 Advanced Usage: The Power User API
 
 ​AutoLink isn't just a wrapper; it's a dynamic state machine. For mission-critical applications, you want fine-grained control over exactly how the system reacts to noise, which baud rates it's allowed to use, and how it handles payload errors.
 
@@ -171,7 +169,6 @@ Namespace Isolation: Everything lives cleanly inside namespace autolink, prevent
 
 ​Test-Driven Core: The core state machine (ALink) is completely decoupled from the ESP32 hardware via Dependency Injection. Run make test to compile and verify the mathematical logic natively on your PC!
 
-
-​# 📜 License
+# 📜 License
 
 ​MIT License. See LICENSE for details. Build something awesome.
