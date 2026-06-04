@@ -29,22 +29,18 @@ void loop() {
         uint8_t buf[64];
         int len = link->read(buf, 64);
         
-        // Process payload...
-        // if (payload_crc_is_bad) link->err(); 
+        // Process payload and acknowledge success to reset the error counter!
+        if (payload_crc_is_good) {
+            link->clearErr(); 
+        } else {
+            link->err();
+        }
     }
-
-    // Write data normally
-    // uint8_t msg[] = {0x01, 0x02};
-    // link->write(msg, 2);
 }
 ```
 
 ## Advanced Testability & Coverage
 The `ALink` core has been deeply refactored to prioritize testability and C++11 best practices.
-- **Introspection Methods:** New state accessors (`getErrCount()`, `getCurrentSpdIndex()`) allow testing frameworks to verify internal state logic without breaking encapsulation.
-- **Dependency Injection:** The core state machine expects an `ILink` hardware reference at instantiation, eliminating null-pointer risks entirely.
-- **Enhanced Mocking:** The `MockHal` testing hardware layer now employs Spies (`sendBreakCalls`, `spdHistory`) to trace exactly how the core logic manipulates the hardware under varying scenarios.
-- **Granular Test Suite:** `test.cpp` features a structured test runner handling isolated test cases for IO operations, baud sweep logic, and master/slave locking sequences.
-
-## PC Unit Testing
-Run `make` to compile and execute the test runner natively on your PC, bypassing the ESP32 wrapper to prove the core protocol math is flawless.
+- **Introspection Methods:** New state accessors allow testing frameworks to verify internal state logic without breaking encapsulation.
+- **Dependency Injection:** The core state machine expects an `ILink` hardware reference at instantiation.
+- **Enhanced Mocking:** The `MockHal` testing hardware layer now employs Spies to trace exactly how the core logic manipulates the hardware.
