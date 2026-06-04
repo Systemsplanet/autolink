@@ -175,17 +175,17 @@ void loop() {
 # 🛠️ Developer Notes
 ​If you are contributing to or maintaining this library, keep the following architectural decisions in mind:
 
-+ **​Hardware Abstraction (Dependency Injection):** The core protocol logic (ALink.cpp) is entirely decoupled from the ESP32 hardware (EspHal.cpp) via the ILink interface. Do not put ESP-IDF or FreeRTOS headers inside ALink.cpp.
++ **​Hardware Abstraction (Dependency Injection):** The core protocol logic (`ALink.cpp`) is entirely decoupled from the ESP32 hardware (`EspHal.cpp`) via the `ILink` interface. Do not put ESP-IDF or FreeRTOS headers inside `ALink.cpp`.
 
 
-+ ​**Native PC Testing:** Because of the abstraction mentioned above, the entire state machine and negotiation logic can be tested locally on your computer. Run make test to compile and execute the mock hardware tests in test.cpp.
++ ​**Native PC Testing:** Because of the abstraction mentioned above, the entire state machine and negotiation logic can be tested locally on your computer. Run `make test` to compile and execute the mock hardware tests in `test.cpp`.
   
 + **​State Machine Mechanics:**
-  + ​`SWP` (Sweep): The master iterates through the allowed baud rates sending PING. The slave listens and calculates an RSSI-like score based on successful reads.
+  + ​`SWP` (Sweep): The master iterates through the allowed baud rates sending `PING`. The slave listens and calculates an RSSI-like score based on successful reads.
 ​  + `LCK` (Lock): The master requests the best baud rate from the slave. Both ends switch to the agreed speed.
 ​  + `OK` (Connected): Raw data or Reliable Mode frames are exchanged.
 
-+ **​Reliable Mode:** When enabled via AutoLinkConfig, raw user data is encapsulated into a 3-byte frame [0xDD, Payload, CRC8]. This prevents noise from mimicking valid payload data during the OK state.
++ **​Reliable Mode:** When enabled via `AutoLinkConfig`, raw user data is encapsulated into a 3-byte frame `[0xDD, Payload, CRC8]`. This prevents noise from mimicking valid payload data during the `OK` state.
 
 + **​CRC Optimization:** We use a precomputed 256-byte Lookup Table (LUT) for O(1) CRC-8 calculations, keeping CPU utilization low even during high-throughput data streams.
 ​
@@ -196,15 +196,15 @@ void loop() {
 
 **​v2.0.0 (Production-Ready)**
 
-+ **​API Enhancement:** Inherited AutoLink from the standard Arduino Stream class, unlocking native compatibility with standard functions like .println(), .parseInt(), and other third-party libraries.
-+ **​Reliable Mode Added:** Added an opt-in cfg.reliableMode that wraps standard user data in CRC-8 validated frames, completely shielding the application layer from corrupted bytes.
++ **​API Enhancement:** Inherited `AutoLink` from the standard Arduino `Stream` class, unlocking native compatibility with standard functions like `.println()`, `.parseInt()`, and other third-party libraries.
++ **​Reliable Mode Added:** Added an opt-in `cfg.reliableMode` that wraps standard user data in CRC-8 validated frames, completely shielding the application layer from corrupted bytes.
 ​+ **Performance Optimization:** Replaced bitwise nested loops in the CRC calculator with an O(1) 256-byte Lookup Table (LUT).
 + **​Concurrency Fixes:**
-  + ​Fixed a teardown trap in the FreeRTOS uart_event_task by replacing portMAX_DELAY with pdMS_TO_TICKS(100), ensuring clean thread exits during destruction.
-  + Held the mutex lock throughout the entirety of hardware TX sequences in ALink::write() to prevent interleaved transmissions from multiple tasks.
-+ ​**Memory Safety:** Transitioned resource allocations to std::make_unique and patched memory leaks occurring during failed UART hardware initializations.
+  + ​Fixed a teardown trap in the FreeRTOS `uart_event_task` by replacing `portMAX_DELAY` with `pdMS_TO_TICKS(100)`, ensuring clean thread exits during destruction.
+  + Held the mutex lock throughout the entirety of hardware TX sequences in `ALink::write()` to prevent interleaved transmissions from multiple tasks.
++ ​**Memory Safety:** Transitioned resource allocations to `std::make_unique` and patched memory leaks occurring during failed UART hardware initializations.
 
-+ **​Developer Ergonomics:** Consolidated long constructor parameter signatures into a clean AutoLinkConfig struct.
++ **​Developer Ergonomics:** Consolidated long constructor parameter signatures into a clean `AutoLinkConfig` struct.
 
 **​v1.0.0 (Initial Prototype)**
 
