@@ -23,6 +23,9 @@ public:
     int available() const { return link->available(); }
     int read(uint8_t* b, int max_len) { return link->read(b, max_len); }
     void write(const uint8_t* b, int len) { link->write(b, len); }
+    
     void err() { link->err(); }
+    void clearErr() { link->clearErr(); } // Expose clearErr to the API
+    
     State getState() const { return link->getState(); }
 };
