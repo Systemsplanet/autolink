@@ -26,6 +26,7 @@ public:
     // Abstract Buffering
     virtual void pushAppBuf(uint8_t b) = 0;
     virtual int popAppBuf() = 0;
+    virtual int peekAppBuf() = 0;
     virtual int appBufAvailable() const = 0;
     virtual void clearAppBuf() = 0;
 };
