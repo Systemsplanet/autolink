@@ -5,6 +5,8 @@
 #include <vector>
 #include "ALink.h"
 
+using namespace autolink;
+
 // Enhanced Testable Mock Hardware Layer
 class MockHal : public ILink {
 public:
@@ -157,22 +159,22 @@ void run_test_slave_score_selection() {
     sHal.sendBreak();
     assert(slave.getState() == State::SWP);
     
-    sendFrameTo(slave, ALINK_PING_CMD);
+    sendFrameTo(slave, PING_CMD);
     
     slave.onTimer();
-    sendFrameTo(slave, ALINK_PING_CMD);
-    sendFrameTo(slave, ALINK_PING_CMD);
-    sendFrameTo(slave, ALINK_PING_CMD);
+    sendFrameTo(slave, PING_CMD);
+    sendFrameTo(slave, PING_CMD);
+    sendFrameTo(slave, PING_CMD);
     
     slave.onTimer();
-    sendFrameTo(slave, ALINK_PING_CMD);
-    sendFrameTo(slave, ALINK_PING_CMD);
+    sendFrameTo(slave, PING_CMD);
+    sendFrameTo(slave, PING_CMD);
     
     slave.onTimer();
     assert(slave.getState() == State::LCK);
     
     sHal.clearTx();
-    sendFrameTo(slave, ALINK_REQ_CMD);
+    sendFrameTo(slave, REQ_CMD);
     
     assert(sHal.txN == 4);
     assert(sHal.txBuf[2] == 1);
