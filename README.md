@@ -10,6 +10,9 @@ Instead, just include `AutoLink.h` and use the single `AutoLink` class. It manag
 ```cpp
 #include "AutoLink.h"
 
+// Access the library namespace
+using namespace autolink;
+
 // Initialize AutoLink on UART2, RX Pin 16, TX Pin 17, as Master (true)
 std::unique_ptr<AutoLink> link;
 
@@ -39,8 +42,5 @@ void loop() {
 }
 ```
 
-## Advanced Testability & Coverage
-The `ALink` core has been deeply refactored to prioritize testability and C++11 best practices.
-- **Introspection Methods:** New state accessors allow testing frameworks to verify internal state logic without breaking encapsulation.
-- **Dependency Injection:** The core state machine expects an `ILink` hardware reference at instantiation.
-- **Enhanced Mocking:** The `MockHal` testing hardware layer now employs Spies to trace exactly how the core logic manipulates the hardware.
+## Namespace & Architecture
+To prevent collisions, all classes (`AutoLink`, `ALink`, `EspHal`, `ILink`) and state enums (`State::OK`, `State::SWP`, `State::LCK`) are enclosed within the `autolink` namespace. 
