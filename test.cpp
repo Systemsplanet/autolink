@@ -76,7 +76,9 @@ void sendFrameTo(ALink& receiver, uint8_t payload) {
 }
 
 void run_test_basic_io() {
-    std::cout << "Test: Basic Write/Read (Async Buffer)... ";
+    std::cout << "
+=== Test: Basic Write/Read (Async Buffer) ===
+";
     MockHal mHal, sHal;
     ALink master(mHal, true);
     ALink slave(sHal, false);
@@ -92,7 +94,9 @@ void run_test_basic_io() {
 }
 
 void run_test_error_threshold() {
-    std::cout << "Test: Custom Error Thresholding... ";
+    std::cout << "
+=== Test: Custom Error Thresholding ===
+";
     MockHal mHal;
     ALink master(mHal, true, {9600, 115200}, 2, 50);
     
@@ -100,6 +104,12 @@ void run_test_error_threshold() {
     master.err();
     assert(master.getState() == State::OK);
     assert(master.getErrCount() == 1);
+    
+    // Prove that clearing error successfully prevents trigger
+    master.clearErr();
+    assert(master.getErrCount() == 0);
+    
+    master.err();
     master.err();
     assert(master.getState() == State::OK);
     assert(master.getErrCount() == 2);
@@ -113,7 +123,9 @@ void run_test_error_threshold() {
 }
 
 void run_test_custom_config_sweep() {
-    std::cout << "Test: Custom Baud Configuration & Sweep... ";
+    std::cout << "
+=== Test: Custom Baud Configuration & Sweep ===
+";
     MockHal mHal;
     ALink master(mHal, true, {1200, 2400, 4800}, 1, 10);
     
@@ -136,7 +148,9 @@ void run_test_custom_config_sweep() {
 }
 
 void run_test_slave_score_selection() {
-    std::cout << "Test: Slave Score Selection Logic... ";
+    std::cout << "
+=== Test: Slave Score Selection Logic ===
+";
     MockHal sHal;
     ALink slave(sHal, false, {9600, 19200, 38400}, 5, 50);
     
@@ -169,7 +183,9 @@ void run_test_slave_score_selection() {
 }
 
 void run_test_full_negotiation() {
-    std::cout << "Test: Full Master/Slave Auto-Baud Lock... ";
+    std::cout << "
+=== Test: Full Master/Slave Auto-Baud Lock ===
+";
     MockHal mHal, sHal;
     ALink master(mHal, true);
     ALink slave(sHal, false);
@@ -204,6 +220,7 @@ int main() {
     run_test_custom_config_sweep();
     run_test_slave_score_selection();
     run_test_full_negotiation();
-    std::cout << "=== All Tests Completed Successfully ===" << std::endl;
+    std::cout << "
+=== All Tests Completed Successfully ===" << std::endl;
     return 0;
 }
