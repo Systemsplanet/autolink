@@ -11,7 +11,7 @@ private:
 
 public:
     AutoLink(uart_port_t u_num, int rx_pin, int tx_pin, bool isMasterNode, 
-             const std::vector<int>& allowedBauds = {9600, 19200, 38400, 57600, 115200}, 
+             const std::vector<uint32_t>& allowedBauds = {9600, 19200, 38400, 57600, 115200}, 
              int errThresh = 5, 
              int delayMs = 50) 
     {
