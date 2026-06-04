@@ -160,17 +160,18 @@ void loop() {
 
 # 📦 Features Under the Hood
 
-​+ **100% Non-Blocking:** AutoLink relies on a dedicated FreeRTOS task, hardware interrupts, and StreamBuffers. Your loop() will never get blocked by a full TX buffer or a stalled RX line.
+
++ **100% Non-Blocking:** AutoLink relies on a dedicated FreeRTOS task, hardware interrupts, and `StreamBuffers`. Your `loop()` will never get blocked by a full TX buffer or a stalled RX line.
 
 
-+ **​Smart Framing:** When in a negotiation state (SWP or LCK), AutoLink wraps commands in a multi-byte, CRC8-validated frame. Electrical noise physically cannot trigger a false-positive state change.
++ **​Smart Framing:** When in a negotiation state (`SWP` or `LCK`), AutoLink wraps commands in a multi-byte, CRC8-validated frame. Electrical noise physically cannot trigger a false-positive state change.
 ​
 
-+ **Namespace Isolation:** Everything lives cleanly inside namespace autolink, preventing frustrating naming collisions with standard Arduino or ESP-IDF libraries.
++ **Namespace Isolation:** Everything lives cleanly inside `namespace autolink`, preventing frustrating naming collisions with standard Arduino or ESP-IDF libraries.
 
 
-+ ***​Test-Driven Core:*** The core state machine (ALink) is completely decoupled from the ESP32 hardware via Dependency Injection. Run make test to compile and verify the mathematical logic natively on your PC!
++ ***​Test-Driven Core:*** The core state machine (`ALink`) is completely decoupled from the ESP32 hardware via Dependency Injection. Run `make test` to compile and verify the mathematical logic natively on your PC!
 
 # 📜 License
 
-​MIT License. See LICENSE for details. Build something awesome.
+​MIT License. See `LICENSE` for details. Build something awesome.
