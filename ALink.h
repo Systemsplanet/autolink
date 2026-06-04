@@ -18,13 +18,20 @@ class ALink {
     std::vector<int> scores;
     
     // Configuration
-    std::vector<int> spds;
+    std::vector<uint32_t> spds;
     int errThreshold;
     int timerDelayMs;
 
+    // Frame Parsing Buffer
+    uint8_t rxBuf[4];
+    int rxIdx;
+
+    uint8_t calcCrc(const uint8_t* data, int len) const;
+    void sendFrame(uint8_t payload);
+
 public:
     ALink(ILink& hw, bool isMasterNode, 
-          const std::vector<int>& allowedBauds = {9600, 19200, 38400, 57600, 115200}, 
+          const std::vector<uint32_t>& allowedBauds = {9600, 19200, 38400, 57600, 115200}, 
           int errorThreshold = 5, 
           int delayMs = 50);
     
