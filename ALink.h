@@ -3,13 +3,15 @@
 #include <vector>
 #include <stdint.h>
 
+namespace autolink {
+
 enum class State { OK, SWP, LCK };
 
 // Helper for human-readable state logs
 const char* StateToStr(State s);
 
-const uint8_t ALINK_PING_CMD = 0x55;
-const uint8_t ALINK_REQ_CMD = 0xAA;
+constexpr uint8_t PING_CMD = 0x55;
+constexpr uint8_t REQ_CMD = 0xAA;
 
 class ALink {
     ILink& hw;
@@ -41,7 +43,7 @@ public:
           int delayMs = 50);
     
     void err(); 
-    void clearErr(); // Resolves the leaky error accumulation bug
+    void clearErr();
     
     int available() const;
     int read(uint8_t* b, int max_len);
@@ -56,3 +58,5 @@ public:
     void onBreak();
     void onTimer();
 };
+
+} // namespace autolink
