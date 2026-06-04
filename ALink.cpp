@@ -2,9 +2,11 @@
 #include <stdio.h>
 #include <time.h>
 
-// Standardizes output format across PC and ESP32 with the requested HH:MM:SS format
+// Macro is only defined in the CPP file, so it doesn't pollute user headers
 #define ALINK_LOG(fmt, ...) do {     time_t _t; time(&_t);     struct tm* _tm = localtime(&_t);     char _tbuf[10];     if (_tm) strftime(_tbuf, sizeof(_tbuf), "%H:%M:%S", _tm);     else snprintf(_tbuf, sizeof(_tbuf), "00:00:00");     printf("[%s] [AutoLink] " fmt "
 ", _tbuf, ##__VA_ARGS__); } while(0)
+
+namespace autolink {
 
 const char* StateToStr(State s) {
     switch(s) {
@@ -144,7 +146,7 @@ void ALink::onRx(const uint8_t* data, int len) {
                     uint8_t payload = rxBuf[2];
                     if (current_state == State::SWP) {
                         hw.lock();
-                        if (payload == ALINK_PING_CMD && spdI < (int)spds.size()) {
+                        if (payload == PING_CMD && spdI < (int)spds.size()) {
                             scores[spdI]++;
                             ALINK_LOG("Ping received at sweep index %d", spdI);
                         }
@@ -162,7 +164,7 @@ void ALink::onRx(const uint8_t* data, int len) {
                                 hw.unlock();
                             }
                         } else {
-                            if (payload == ALINK_REQ_CMD) { 
+                            if (payload == REQ_CMD) { 
                                 int best = 0;
                                 hw.lock();
                                 for(int j=1; j<(int)spds.size(); j++) {
@@ -212,7 +214,7 @@ void ALink::onTimer() {
     
     if (s == State::SWP) {
         if (isMaster && curSpd < (int)spds.size()) {
-            sendFrame(ALINK_PING_CMD);
+            sendFrame(PING_CMD);
         }
         
         hw.lock();
@@ -234,6 +236,8 @@ void ALink::onTimer() {
         }
     } 
     else if (s == State::LCK && isMaster) {
-        sendFrame(ALINK_REQ_CMD);
+        sendFrame(REQ_CMD);
     }
 }
+
+} // namespace autolink
