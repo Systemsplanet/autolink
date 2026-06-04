@@ -1,11 +1,30 @@
 #include "ALink.h"
 
-ALink::ALink(ILink& h, bool isMasterNode, const std::vector<int>& allowedBauds, int errorThreshold, int delayMs)
+ALink::ALink(ILink& h, bool isMasterNode, const std::vector<uint32_t>& allowedBauds, int errorThreshold, int delayMs)
     : hw(h), isMaster(isMasterNode), spds(allowedBauds), errThreshold(errorThreshold), timerDelayMs(delayMs),
-      state(State::OK), errs(0), spdI(0) 
+      state(State::OK), errs(0), spdI(0), rxIdx(0) 
 {
     scores.resize(spds.size(), 0);
     hw.bind(this);
+}
+
+uint8_t ALink::calcCrc(const uint8_t* data, int len) const {
+    uint8_t crc = 0;
+    for (int i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int j = 0; j < 8; j++) {
+            if (crc & 0x80) crc = (crc << 1) ^ 0x07;
+            else crc <<= 1;
+        }
+    }
+    return crc;
+}
+
+void ALink::sendFrame(uint8_t payload) {
+    uint8_t frame[4] = {0xAA, 0x55, payload, 0};
+    frame[3] = calcCrc(frame, 3);
+    hw.tx(frame, 4);
+    hw.flushTx();
 }
 
 void ALink::err() {
@@ -79,38 +98,47 @@ void ALink::onRx(const uint8_t* data, int len) {
         if (current_state == State::OK) {
             hw.pushAppBuf(b);
         } 
-        else if (current_state == State::SWP) {
-            hw.lock();
-            if (b == ALINK_PING_CMD && spdI < (int)spds.size()) scores[spdI]++;
-            hw.unlock();
-        } 
-        else if (current_state == State::LCK) {
-            if (isMaster) {
-                if (b < (int)spds.size()) { 
-                    hw.setSpd(spds[b]);
-                    hw.lock();
-                    state = State::OK; errs = 0;
-                    current_state = State::OK; // Update local copy
-                    hw.unlock();
-                }
-            } else {
-                if (b == ALINK_REQ_CMD) { 
-                    int best = 0;
-                    hw.lock();
-                    for(int j=1; j<(int)spds.size(); j++) {
-                        if (scores[j] >= scores[best]) best = j;
+        else {
+            if (rxIdx == 0 && b != 0xAA) continue;
+            if (rxIdx == 1 && b != 0x55) { rxIdx = 0; continue; }
+            rxBuf[rxIdx++] = b;
+            if (rxIdx == 4) {
+                rxIdx = 0;
+                if (calcCrc(rxBuf, 3) == rxBuf[3]) {
+                    uint8_t payload = rxBuf[2];
+                    if (current_state == State::SWP) {
+                        hw.lock();
+                        if (payload == ALINK_PING_CMD && spdI < (int)spds.size()) scores[spdI]++;
+                        hw.unlock();
+                    } 
+                    else if (current_state == State::LCK) {
+                        if (isMaster) {
+                            if (payload < (int)spds.size()) { 
+                                hw.setSpd(spds[payload]);
+                                hw.lock();
+                                state = State::OK; errs = 0;
+                                current_state = State::OK; // Update local copy
+                                hw.unlock();
+                            }
+                        } else {
+                            if (payload == ALINK_REQ_CMD) { 
+                                int best = 0;
+                                hw.lock();
+                                for(int j=1; j<(int)spds.size(); j++) {
+                                    if (scores[j] >= scores[best]) best = j;
+                                }
+                                hw.unlock();
+                                
+                                sendFrame(best);
+                                hw.setSpd(spds[best]);
+                                
+                                hw.lock();
+                                state = State::OK; errs = 0;
+                                current_state = State::OK; // Update local copy
+                                hw.unlock();
+                            }
+                        }
                     }
-                    hw.unlock();
-                    
-                    uint8_t res = best;
-                    hw.tx(&res, 1);
-                    hw.flushTx();
-                    hw.setSpd(spds[best]);
-                    
-                    hw.lock();
-                    state = State::OK; errs = 0;
-                    current_state = State::OK; // Update local copy
-                    hw.unlock();
                 }
             }
         }
@@ -121,6 +149,7 @@ void ALink::onBreak() {
     hw.lock();
     state = State::SWP;
     spdI = 0;
+    rxIdx = 0;
     for(int i=0; i<(int)scores.size(); i++) scores[i]=0;
     hw.unlock();
     
@@ -137,9 +166,7 @@ void ALink::onTimer() {
     
     if (s == State::SWP) {
         if (isMaster && curSpd < (int)spds.size()) {
-            uint8_t ping = ALINK_PING_CMD;
-            hw.tx(&ping, 1);
-            hw.flushTx();
+            sendFrame(ALINK_PING_CMD);
         }
         
         hw.lock();
@@ -160,8 +187,6 @@ void ALink::onTimer() {
         }
     } 
     else if (s == State::LCK && isMaster) {
-        uint8_t req = ALINK_REQ_CMD;
-        hw.tx(&req, 1);
-        hw.flushTx();
+        sendFrame(ALINK_REQ_CMD);
     }
 }
