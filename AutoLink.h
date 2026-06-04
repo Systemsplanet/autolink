@@ -4,6 +4,8 @@
 #include <memory>
 #include <vector>
 
+namespace autolink {
+
 class AutoLink {
 private:
     std::unique_ptr<EspHal> hal;
@@ -25,7 +27,9 @@ public:
     void write(const uint8_t* b, int len) { link->write(b, len); }
     
     void err() { link->err(); }
-    void clearErr() { link->clearErr(); } // Expose clearErr to the API
+    void clearErr() { link->clearErr(); }
     
     State getState() const { return link->getState(); }
 };
+
+} // namespace autolink
