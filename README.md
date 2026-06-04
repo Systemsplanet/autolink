@@ -2,14 +2,23 @@
 # ​🚀 AutoLink ESP32
 ​A production-grade, self-healing UART protocol layer for ESP32.
 
+
 ​Ever had a UART connection drop because a motor spun up nearby? Have you ever hardcoded a baud rate, only to realize the other microcontroller reset and desynced? Raw UART is notoriously fragile in the real world.
-​AutoLink fixes this. It sits on top of the standard ESP-IDF UART drivers and transforms your serial connection into a robust, auto-negotiating, self-healing lifeline. If the line gets noisy, AutoLink drops down to a safer baud rate. If a wire gets bumped, it automatically sweeps and locks back onto the connection.
-​It manages all the FreeRTOS background tasks, queues, and hardware interrupts automatically. You just read and write data.
+
+
+​AutoLink fixes this. It sits on top of the standard ESP-IDF UART drivers and transforms your serial connection into a robust, auto-negotiating, self-healing lifeline. 
+
+
+If the line gets noisy, AutoLink drops down to a safer baud rate. If a wire gets bumped, it automatically sweeps and locks back onto the connection.
+​
+
+It manages all the FreeRTOS background tasks, queues, and hardware interrupts automatically. You just read and write data.
 
 # ​⚡ Quick Start
 ​Drop the AutoLink files into your project, include the header, and let the library do the heavy lifting.
 
-''' cpp
+
+``` cpp
 #include "AutoLink.h"
 
 using namespace autolink;
@@ -39,7 +48,7 @@ void loop() {
     
     delay(10);
 }
-'''
+```
 
 
 
@@ -47,11 +56,13 @@ void loop() {
 # 🛠️ Simple Usage: Master & Slave
 ​AutoLink requires one device to act as the Master (initiates the baud negotiation) and one to act as the Slave (listens and responds to the sweep).
 
+
 ​## The Slave Node
+
 ​Setting up a listening device is just as easy as setting up the master. Just pass false for the master flag!
 
 
-'''cpp
+```cpp
 #include "AutoLink.h"
 using namespace autolink;
 
@@ -75,15 +86,18 @@ void loop() {
     }
 }
 
-'''
+```
 
 
 #🧠 Advanced Usage: The Power User API
+
 ​AutoLink isn't just a wrapper; it's a dynamic state machine. For mission-critical applications, you want fine-grained control over exactly how the system reacts to noise, which baud rates it's allowed to use, and how it handles payload errors.
+
 
 ​Here is an advanced example showing how to utilize the entire API, including custom configurations and manual error tracking.
 
-'''cpp
+
+```cpp
 #include "AutoLink.h"
 using namespace autolink;
 
@@ -142,16 +156,22 @@ void loop() {
     delay(10);
 }
 
-'''
+```
 
 # 📦 Features Under the Hood
+
 ​100% Non-Blocking: AutoLink relies on a dedicated FreeRTOS task, hardware interrupts, and StreamBuffers. Your loop() will never get blocked by a full TX buffer or a stalled RX line.
+
 
 ​Smart Framing: When in a negotiation state (SWP or LCK), AutoLink wraps commands in a multi-byte, CRC8-validated frame. Electrical noise physically cannot trigger a false-positive state change.
 ​
+
 Namespace Isolation: Everything lives cleanly inside namespace autolink, preventing frustrating naming collisions with standard Arduino or ESP-IDF libraries.
+
 
 ​Test-Driven Core: The core state machine (ALink) is completely decoupled from the ESP32 hardware via Dependency Injection. Run make test to compile and verify the mathematical logic natively on your PC!
 
+
 ​# 📜 License
+
 ​MIT License. See LICENSE for details. Build something awesome.
