@@ -8,7 +8,7 @@
 // Enhanced Testable Mock Hardware Layer
 class MockHal : public ILink {
 public:
-    int spd = 9600;
+    uint32_t spd = 9600;
     bool timerActive = false;
     uint8_t txBuf[256];
     int txN = 0;
@@ -16,12 +16,12 @@ public:
     // Spying Metrics for Advanced Testing
     int sendBreakCalls = 0;
     int timerStartCalls = 0;
-    std::vector<int> spdHistory;
+    std::vector<uint32_t> spdHistory;
     
     std::queue<uint8_t> appBuf;
     mutable std::mutex mtx; // Mutable so const lock/unlock can access it
     
-    void setSpd(int s) override { spd = s; spdHistory.push_back(s); }
+    void setSpd(uint32_t s) override { spd = s; spdHistory.push_back(s); }
     void sendBreak() override { 
         sendBreakCalls++; 
         if (link) link->onBreak(); 
@@ -56,6 +56,24 @@ public:
         clearTx();
     }
 };
+
+uint8_t calcTestCrc(const uint8_t* data, int len) {
+    uint8_t crc = 0;
+    for (int i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int j = 0; j < 8; j++) {
+            if (crc & 0x80) crc = (crc << 1) ^ 0x07;
+            else crc <<= 1;
+        }
+    }
+    return crc;
+}
+
+void sendFrameTo(ALink& receiver, uint8_t payload) {
+    uint8_t frame[4] = {0xAA, 0x55, payload, 0};
+    frame[3] = calcTestCrc(frame, 3);
+    receiver.onRx(frame, 4);
+}
 
 void run_test_basic_io() {
     std::cout << "Test: Basic Write/Read (Async Buffer)... ";
@@ -125,27 +143,25 @@ void run_test_slave_score_selection() {
     sHal.sendBreak();
     assert(slave.getState() == State::SWP);
     
-    uint8_t ping = ALINK_PING_CMD;
-    slave.onRx(&ping, 1);
+    sendFrameTo(slave, ALINK_PING_CMD);
     
     slave.onTimer();
-    slave.onRx(&ping, 1);
-    slave.onRx(&ping, 1);
-    slave.onRx(&ping, 1);
+    sendFrameTo(slave, ALINK_PING_CMD);
+    sendFrameTo(slave, ALINK_PING_CMD);
+    sendFrameTo(slave, ALINK_PING_CMD);
     
     slave.onTimer();
-    slave.onRx(&ping, 1);
-    slave.onRx(&ping, 1);
+    sendFrameTo(slave, ALINK_PING_CMD);
+    sendFrameTo(slave, ALINK_PING_CMD);
     
     slave.onTimer();
     assert(slave.getState() == State::LCK);
     
     sHal.clearTx();
-    uint8_t req = ALINK_REQ_CMD;
-    slave.onRx(&req, 1);
+    sendFrameTo(slave, ALINK_REQ_CMD);
     
-    assert(sHal.txN == 1);
-    assert(sHal.txBuf[0] == 1);
+    assert(sHal.txN == 4);
+    assert(sHal.txBuf[2] == 1);
     assert(slave.getState() == State::OK);
     assert(sHal.spd == 19200);
     
