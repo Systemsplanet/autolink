@@ -53,6 +53,7 @@ public:
     
     int available() const;
     int peek();
+    int read(); // FIXED: Added missing no-argument read declaration
     int read(uint8_t* b, int max_len);
     void write(const uint8_t* b, int len);
     void flush();
@@ -67,3 +68,4 @@ public:
 };
 
 } // namespace autolink
+
