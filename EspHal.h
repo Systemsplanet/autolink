@@ -10,14 +10,18 @@
 #include "freertos/timers.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/semphr.h"
+#include <vector>
 
 namespace autolink {
 
 class EspHal : public ILink {
-    static constexpr size_t MAX_RX_BUFFER = 512;
     static constexpr const char* HAL_TAG = "EspHal";
 
     uart_port_t uart_num;
+    int rx_pin;
+    int tx_pin;
+    AutoLinkConfig cfg;
+    
     QueueHandle_t uart_queue = nullptr;
     TaskHandle_t task_handle = nullptr;
     TimerHandle_t timer_handle = nullptr;
@@ -28,26 +32,24 @@ class EspHal : public ILink {
     bool healthy = false;
     int peek_buf = -1;
     
-    uint8_t rx_buf[MAX_RX_BUFFER];
+    uart_config_t uart_config;
 
     static void uart_event_task(void *pvParameters) {
         EspHal* hal = (EspHal*)pvParameters;
         uart_event_t event;
+        std::vector<uint8_t> rx_buf(hal->cfg.rxBufferSize);
         
         while(hal->running) {
             if(xQueueReceive(hal->uart_queue, (void * )&event, pdMS_TO_TICKS(100))) {
                 if (!hal->running) break;
                 if(event.type == UART_DATA) {
-                    size_t read_len = (event.size > MAX_RX_BUFFER) ? MAX_RX_BUFFER : event.size;
-                    int len = uart_read_bytes(hal->uart_num, hal->rx_buf, read_len, portMAX_DELAY);
-                    if(hal->link && len > 0) hal->link->onRx(hal->rx_buf, len);
+                    size_t read_len = (event.size > hal->cfg.rxBufferSize) ? hal->cfg.rxBufferSize : event.size;
+                    int len = uart_read_bytes(hal->uart_num, rx_buf.data(), read_len, portMAX_DELAY);
+                    if(hal->link && len > 0) hal->link->onRx(rx_buf.data(), len);
                 } 
                 else if(event.type == UART_BREAK) {
                     uart_flush_input(hal->uart_num);
                     if(hal->link) hal->link->onBreak();
-                }
-                else if(event.type == (uart_event_type_t)UART_EVENT_MAX) {
-                    if(hal->link) hal->link->onTimer();
                 }
             }
         }
@@ -57,19 +59,18 @@ class EspHal : public ILink {
 
     static void timer_callback(TimerHandle_t xTimer) {
         EspHal* hal = (EspHal*) pvTimerGetTimerID(xTimer);
-        uart_event_t event;
-        event.type = (uart_event_type_t)UART_EVENT_MAX; 
-        if (hal->uart_queue) xQueueSend(hal->uart_queue, &event, 0);
+        // Direct call, safe because state modifications are locked
+        if (hal && hal->link) hal->link->onTimer();
     }
 
 public:
-    EspHal(uart_port_t u_num, int rx_pin, int tx_pin) : uart_num(u_num) {
+    EspHal(uart_port_t u_num, int rx_pin, int tx_pin, const AutoLinkConfig& config) 
+        : uart_num(u_num), rx_pin(rx_pin), tx_pin(tx_pin), cfg(config) {
         mutex = xSemaphoreCreateMutex();
         task_exit_sem = xSemaphoreCreateBinary();
-        stream_buf = xStreamBufferCreate(1024, 1);
-        running = true;
+        stream_buf = xStreamBufferCreate(cfg.streamBufferSize, 1);
         
-        uart_config_t uart_config = {
+        uart_config = {
             .baud_rate = 9600,
             .data_bits = UART_DATA_8_BITS,
             .parity = UART_PARITY_DISABLE,
@@ -78,6 +79,11 @@ public:
             .rx_flow_ctrl_thresh = 122,
             .use_ref_tick = false
         };
+    }
+    
+    void begin() override {
+        if (running) return;
+        running = true;
         
         auto cleanup_resources = [&]() {
             running = false;
@@ -86,7 +92,7 @@ public:
             if(stream_buf) { vStreamBufferDelete(stream_buf); stream_buf = nullptr; }
         };
 
-        if (uart_driver_install(uart_num, MAX_RX_BUFFER, MAX_RX_BUFFER, 10, &uart_queue, 0) != ESP_OK) {
+        if (uart_driver_install(uart_num, cfg.rxBufferSize, cfg.rxBufferSize, 10, &uart_queue, 0) != ESP_OK) {
             ESP_LOGE(HAL_TAG, "Failed to install UART driver");
             cleanup_resources();
             return;
@@ -138,6 +144,10 @@ public:
         if(timer_handle) xTimerStop(timer_handle, 0); 
     }
     
+    void delayMs(int ms) override {
+        vTaskDelay(pdMS_TO_TICKS(ms));
+    }
+    
     void lock() const override { 
         if(mutex) xSemaphoreTake(mutex, portMAX_DELAY); 
     }
@@ -148,16 +158,29 @@ public:
     void pushAppBuf(uint8_t b) override { 
         if(stream_buf) xStreamBufferSend(stream_buf, &b, 1, 0); 
     }
+    void pushAppBuf(const uint8_t* b, int n) override {
+        if(stream_buf && n > 0) xStreamBufferSend(stream_buf, b, n, 0);
+    }
+    
     int popAppBuf() override {
-        if (peek_buf != -1) {
-            int b = peek_buf;
-            peek_buf = -1;
-            return b;
-        }
         uint8_t b;
-        if (stream_buf && xStreamBufferReceive(stream_buf, &b, 1, 0) == 1) return b;
+        if (popAppBuf(&b, 1) == 1) return b;
         return -1;
     }
+    int popAppBuf(uint8_t* b, int max_len) override {
+        int total = 0;
+        if (peek_buf != -1 && max_len > 0) {
+            b[0] = peek_buf;
+            peek_buf = -1;
+            total = 1;
+        }
+        if (total < max_len && stream_buf) {
+            size_t recv = xStreamBufferReceive(stream_buf, b + total, max_len - total, 0);
+            total += recv;
+        }
+        return total;
+    }
+    
     int peekAppBuf() override {
         if (peek_buf == -1) {
             uint8_t b;
