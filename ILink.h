@@ -6,9 +6,9 @@ namespace autolink {
 class ALink;
 
 class ILink {
-protected:
+public: // FIXED: Moved from protected to public
     ALink* link = nullptr;
-public:
+
     virtual ~ILink() {}
     void bind(ALink* l) { link = l; }
     
@@ -34,3 +34,4 @@ public:
 };
 
 } // namespace autolink
+
