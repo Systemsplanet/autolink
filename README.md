@@ -5,6 +5,7 @@ A robust, auto-negotiating UART layer for the ESP32.
 - **Performance Enhancements**: Removed byte-by-byte mutex locking and transitioned `StreamBuffer` calls to high-speed block transfers. 
 - **Stability Improvements**: Moved hardware and task initialization from the constructor into `begin()` to prevent early kernel panics upon global initialization.
 - **Safety Fixes**: Removed heavy stack allocations inside loops, safely defer FreeRTOS timer events, and integrated native `ESP_LOG` functions for thread-safe logging.
+- **Comprehensive Testing**: Full throughput benchmarking and message chunk testing scaling up to 16,000 bytes.
 
 ## Basic Usage
 
