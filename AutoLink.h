@@ -27,9 +27,11 @@ private:
 public:
     AutoLink(uart_port_t u_num, int rx_pin, int tx_pin, bool isMasterNode, const AutoLinkConfig& cfg = AutoLinkConfig()) 
     {
-        hal = std::make_unique<EspHal>(u_num, rx_pin, tx_pin);
+        hal = std::make_unique<EspHal>(u_num, rx_pin, tx_pin, cfg);
         link = std::make_unique<ALink>(*hal, isMasterNode, cfg);
     }
+
+    void begin() { hal->begin(); }
 
     bool isHealthy() const { return hal->isHealthy(); }
     
