@@ -21,6 +21,7 @@ public:
     std::queue<uint8_t> appBuf;
     mutable std::mutex mtx; 
     
+    void begin() override {}
     void setSpd(uint32_t s) override { spd = s; spdHistory.push_back(s); }
     void sendBreak() override { 
         sendBreakCalls++; 
@@ -32,16 +33,28 @@ public:
     void flushTx() override {}
     void startTimer(int ms) override { timerStartCalls++; timerActive = true; }
     void stopTimer() override { timerActive = false; }
+    void delayMs(int ms) override {}
     void clearTx() { txN = 0; }
     
     void lock() const override { mtx.lock(); }
     void unlock() const override { mtx.unlock(); }
     
     void pushAppBuf(uint8_t b) override { appBuf.push(b); }
+    void pushAppBuf(const uint8_t* b, int n) override {
+        for(int i=0; i<n; i++) appBuf.push(b[i]);
+    }
     int popAppBuf() override {
         if (appBuf.empty()) return -1;
         uint8_t b = appBuf.front(); appBuf.pop();
         return b;
+    }
+    int popAppBuf(uint8_t* b, int max_len) override {
+        int n = 0;
+        while(n < max_len && !appBuf.empty()) {
+            b[n++] = appBuf.front();
+            appBuf.pop();
+        }
+        return n;
     }
     int peekAppBuf() override {
         if (appBuf.empty()) return -1;
@@ -75,13 +88,17 @@ void run_test_hal_methods() {
     
     hal.lock(); hal.unlock(); 
     
-    hal.pushAppBuf(0xAA);
-    assert(hal.appBufAvailable() == 1);
+    uint8_t pb[] = {0xAA, 0xBB};
+    hal.pushAppBuf(pb, 2);
+    assert(hal.appBufAvailable() == 2);
     assert(hal.peekAppBuf() == 0xAA);
-    assert(hal.popAppBuf() == 0xAA);
+    
+    uint8_t rb[2];
+    assert(hal.popAppBuf(rb, 2) == 2);
+    assert(rb[0] == 0xAA && rb[1] == 0xBB);
     assert(hal.popAppBuf() == -1); 
     
-    hal.pushAppBuf(0xBB);
+    hal.pushAppBuf(0xCC);
     hal.clearAppBuf();
     assert(hal.appBufAvailable() == 0);
     
