@@ -19,11 +19,9 @@ public:
     virtual void startTimer(int ms) = 0;
     virtual void stopTimer() = 0;
     
-    // Concurrency Controls
     virtual void lock() const = 0;
     virtual void unlock() const = 0;
     
-    // Abstract Buffering
     virtual void pushAppBuf(uint8_t b) = 0;
     virtual int popAppBuf() = 0;
     virtual int peekAppBuf() = 0;
