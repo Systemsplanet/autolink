@@ -144,11 +144,10 @@ int ALink::read(uint8_t* b, int max_len) {
 void ALink::write(const uint8_t* b, int len) {
     if (!cfg.reliableMode) {
         hw.lock(); State s = state; hw.unlock();
-        if (s == State::OK) hw.tx(b, len); // Released lock before I/O
+        if (s == State::OK) hw.tx(b, len); 
         return;
     }
     
-    // Chunked COBS payload framing to decouple from mutex completely
     int offset = 0;
     while(offset < len) {
         hw.lock(); State s = state; hw.unlock();
@@ -190,7 +189,6 @@ void ALink::onRx(const uint8_t* data, int len) {
     for(int i=0; i<len; i++) {
         uint8_t b = data[i];
         
-        // Dynamically fetch state per byte to prevent mid-packet corruption
         hw.lock();
         State cur_state = state;
         hw.unlock();
@@ -215,7 +213,7 @@ void ALink::onRx(const uint8_t* data, int len) {
                     }
                 } else {
                     if (relRxIdx < 255) relRxBuf[relRxIdx++] = b;
-                    else relRxIdx = 0; // Overflow safety
+                    else relRxIdx = 0; 
                 }
             } else {
                 hw.pushAppBuf(b);
