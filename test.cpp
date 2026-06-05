@@ -1,4 +1,6 @@
 #include <iostream>
+#include <iomanip>
+#include <chrono>
 #include <cassert>
 #include <queue>
 #include <mutex>
@@ -11,8 +13,7 @@ class MockHal : public ILink {
 public:
     uint32_t spd = 9600;
     bool timerActive = false;
-    uint8_t txBuf[1024];
-    int txN = 0;
+    std::vector<uint8_t> txBuf; 
     
     int sendBreakCalls = 0;
     int timerStartCalls = 0;
@@ -28,13 +29,13 @@ public:
         if (link) link->onBreak(); 
     }
     void tx(const uint8_t* b, int n) override {
-        for(int i=0; i<n; i++) txBuf[txN++] = b[i];
+        txBuf.insert(txBuf.end(), b, b+n);
     }
     void flushTx() override {}
     void startTimer(int ms) override { timerStartCalls++; timerActive = true; }
     void stopTimer() override { timerActive = false; }
     void delayMs(int ms) override {}
-    void clearTx() { txN = 0; }
+    void clearTx() { txBuf.clear(); }
     
     void lock() const override { mtx.lock(); }
     void unlock() const override { mtx.unlock(); }
@@ -67,8 +68,8 @@ public:
 };
 
 void pipe_data(MockHal& src, MockHal& dest) {
-    if (src.txN > 0) {
-        dest.link->onRx(src.txBuf, src.txN);
+    if (!src.txBuf.empty()) {
+        dest.link->onRx(src.txBuf.data(), src.txBuf.size());
         src.clearTx();
     }
 }
@@ -80,7 +81,7 @@ void run_test_hal_methods() {
     hal.sendBreak(); assert(hal.sendBreakCalls == 1);
     
     uint8_t tb[] = {0xFF};
-    hal.tx(tb, 1); assert(hal.txN == 1); assert(hal.txBuf[0] == 0xFF);
+    hal.tx(tb, 1); assert(hal.txBuf.size() == 1); assert(hal.txBuf[0] == 0xFF);
     hal.flushTx();
     
     hal.startTimer(50); assert(hal.timerActive == true);
@@ -115,7 +116,7 @@ void run_test_basic_io() {
     master.write(data, 2);
     master.flush();
     
-    slave.onRx(mHal.txBuf, mHal.txN);
+    slave.onRx(mHal.txBuf.data(), mHal.txBuf.size());
     
     assert(slave.available() == 2);
     assert(slave.peek() == 0x11);
@@ -139,9 +140,9 @@ void run_test_reliable_mode() {
     
     uint8_t data[] = {0xAA, 0xBB};
     master.write(data, 2);
-    assert(mHal.txN > 0);
+    assert(!mHal.txBuf.empty());
     
-    slave.onRx(mHal.txBuf, mHal.txN);
+    slave.onRx(mHal.txBuf.data(), mHal.txBuf.size());
     uint8_t rb_arr[10];
     assert(slave.read(rb_arr, 10) == 2);
     assert(rb_arr[0] == 0xAA);
@@ -217,6 +218,108 @@ void run_test_negotiation_state_machine() {
     std::cout << "PASS" << std::endl;
 }
 
+void run_test_throughput_and_sizes() {
+    std::cout << "\n=== Test: Payloads & Throughput (Reliable Mode) ===" << std::endl;
+    MockHal mHal, sHal;
+    AutoLinkConfig cfg; 
+    cfg.reliableMode = true; 
+    cfg.streamBufferSize = 32000; 
+    ALink master(mHal, true, cfg);
+    ALink slave(sHal, false, cfg);
+    
+    std::vector<int> sizes = {0, 1, 2, 4, 8, 16, 32, 64, 128, 512, 1024, 2048, 4096, 8000, 16000};
+    
+    std::cout << std::left << std::setw(15) << "Payload Size" 
+              << std::setw(20) << "Time Taken (s)" 
+              << std::setw(20) << "Bytes/Sec" << std::endl;
+    std::cout << std::string(55, '-') << std::endl;
+
+    for(int sz : sizes) {
+        std::vector<uint8_t> txData(sz > 0 ? sz : 1);
+        std::vector<uint8_t> rxData(sz > 0 ? sz : 1);
+        
+        for(int i=0; i<sz; i++) {
+            txData[i] = i & 0xFF; // Fill with dummy data
+        }
+        
+        auto start = std::chrono::high_resolution_clock::now();
+        
+        if (sz > 0) {
+            master.write(txData.data(), sz);
+        }
+        
+        pipe_data(mHal, sHal);
+        
+        int bytesRead = 0;
+        if (sz > 0) {
+            // Read until all bytes are consumed
+            int chunk;
+            while ((chunk = slave.read(rxData.data() + bytesRead, sz - bytesRead)) > 0) {
+                bytesRead += chunk;
+            }
+        }
+        
+        auto end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> diff = end - start;
+        
+        double bps = sz > 0 ? (sz / diff.count()) : 0.0;
+        
+        assert(bytesRead == sz);
+        if(sz > 0) {
+            for(int i=0; i<sz; i++) {
+                if (rxData[i] != txData[i]) {
+                    std::cerr << "Data mismatch at index " << i << " for size " << sz << std::endl;
+                    assert(false);
+                }
+            }
+        }
+        
+        std::cout << std::left << std::setw(15) << sz 
+                  << std::setw(20) << std::fixed << std::setprecision(6) << diff.count() 
+                  << std::setw(20) << std::fixed << std::setprecision(2) << bps << std::endl;
+    }
+    
+    std::cout << "\nPASS" << std::endl;
+}
+
+void run_test_readme_usage() {
+    std::cout << "\n=== Test: Real-world README Usage Simulation ===" << std::endl;
+    
+    // --- Setup Phase (Simulating what goes in setup() ) ---
+    AutoLinkConfig cfg;
+    cfg.reliableMode = true;
+    cfg.streamBufferSize = 2048;
+    
+    // We use the core ALink logic so it compiles cleanly on desktop, 
+    // simulating the exact methods AutoLink uses on hardware.
+    MockHal txHal, rxHal;
+    ALink txNode(txHal, true, cfg);
+    ALink link(rxHal, false, cfg); // "link" represents the receiving ESP32
+    
+    // --- Execution Phase ---
+    // Simulate remote node sending 3 real bytes
+    uint8_t payload[] = {0xAB, 0xCD, 0xEF};
+    txNode.write(payload, 3);
+    
+    // Simulate hardware UART interrupt dropping data into the RX buffer
+    pipe_data(txHal, rxHal);
+    
+    // --- Loop Phase (Simulating what goes in loop() in the README) ---
+    int bytes_processed = 0;
+    while (link.available()) {
+        int b = link.read();
+        
+        // Simulating Serial.printf("Got: %02X\n", b);
+        std::cout << "Got: " << std::hex << std::uppercase << std::setw(2) << std::setfill('0') << b << std::dec << std::endl;
+        
+        assert(b == payload[bytes_processed]);
+        bytes_processed++;
+    }
+    
+    assert(bytes_processed == 3);
+    std::cout << "PASS" << std::endl;
+}
+
 int main() {
     std::cout << "=== Running AutoLink Core Tests ===" << std::endl;
     run_test_hal_methods();
@@ -224,6 +327,8 @@ int main() {
     run_test_reliable_mode();
     run_test_error_threshold();
     run_test_negotiation_state_machine();
+    run_test_throughput_and_sizes();
+    run_test_readme_usage();
     std::cout << "\n=== All Tests Completed Successfully ===" << std::endl;
     return 0;
 }
