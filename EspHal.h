@@ -46,7 +46,6 @@ class EspHal : public ILink {
                     uart_flush_input(hal->uart_num);
                     if(hal->link) hal->link->onBreak();
                 }
-                // Custom event type injected from the timer callback
                 else if(event.type == (uart_event_type_t)UART_EVENT_MAX) {
                     if(hal->link) hal->link->onTimer();
                 }
@@ -58,7 +57,6 @@ class EspHal : public ILink {
 
     static void timer_callback(TimerHandle_t xTimer) {
         EspHal* hal = (EspHal*) pvTimerGetTimerID(xTimer);
-        // Offload execution to the event task to avoid Tmr Svc mutex stalls
         uart_event_t event;
         event.type = (uart_event_type_t)UART_EVENT_MAX; 
         if (hal->uart_queue) xQueueSend(hal->uart_queue, &event, 0);
