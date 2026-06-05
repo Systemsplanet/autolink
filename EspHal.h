@@ -11,6 +11,7 @@
 #include "freertos/stream_buffer.h"
 #include "freertos/semphr.h"
 #include <vector>
+#include <string.h> // FIXED: Included for memset
 
 namespace autolink {
 
@@ -70,15 +71,19 @@ public:
         task_exit_sem = xSemaphoreCreateBinary();
         stream_buf = xStreamBufferCreate(cfg.streamBufferSize, 1);
         
-        uart_config = {
-            .baud_rate = 9600,
-            .data_bits = UART_DATA_8_BITS,
-            .parity = UART_PARITY_DISABLE,
-            .stop_bits = UART_STOP_BITS_1,
-            .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-            .rx_flow_ctrl_thresh = 122,
-            .use_ref_tick = false
-        };
+        // FIX: Zero the structure to avoid garbage data for newer ESP-IDF v5 variables
+        memset(&uart_config, 0, sizeof(uart_config_t));
+        
+        // FIX: Standard struct assignment instead of C99 designated initializers
+        uart_config.baud_rate = 9600;
+        uart_config.data_bits = UART_DATA_8_BITS;
+        uart_config.parity = UART_PARITY_DISABLE;
+        uart_config.stop_bits = UART_STOP_BITS_1;
+        uart_config.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
+        uart_config.rx_flow_ctrl_thresh = 122;
+        
+        // Note: 'use_ref_tick' is intentionally omitted here as it was removed in ESP-IDF v5+.
+        // Using memset above guarantees the struct is properly initialized without it.
     }
     
     void begin() override {
@@ -200,3 +205,4 @@ public:
 };
 
 } // namespace autolink
+
