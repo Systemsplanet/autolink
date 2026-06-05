@@ -2,6 +2,7 @@
 #include "ILink.h"
 #include <vector>
 #include <stdint.h>
+#include <stddef.h>
 
 namespace autolink {
 
@@ -11,7 +12,6 @@ const char* StateToStr(State s);
 
 constexpr uint8_t PING_CMD = 0x55;
 constexpr uint8_t REQ_CMD = 0xAA;
-constexpr uint8_t RELIABLE_SYNC = 0xDD;
 
 struct AutoLinkConfig {
     std::vector<uint32_t> allowedBauds = {9600, 19200, 38400, 57600, 115200};
@@ -35,12 +35,15 @@ class ALink {
     uint8_t rxBuf[4];
     int rxIdx;
     
-    uint8_t relRxBuf[3];
+    uint8_t relRxBuf[256];
     int relRxIdx;
 
     uint8_t calcCrc(const uint8_t* data, int len) const;
     void sendFrame(uint8_t payload);
     void changeState_unlocked(State newState);
+    
+    size_t cobsEncode(const uint8_t *ptr, size_t length, uint8_t *dst) const;
+    size_t cobsDecode(const uint8_t *ptr, size_t length, uint8_t *dst) const;
 
 public:
     ALink(ILink& hw, bool isMasterNode, const AutoLinkConfig& config = AutoLinkConfig());
