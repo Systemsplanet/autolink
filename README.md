@@ -31,9 +31,9 @@ AutoLink* myLink = nullptr;
 void flash(int times = 1) {
   for (int i = 0; i < times; i++) {
     digitalWrite(ledPin, HIGH); 
-    delay(50);                 
+    delay(100);                 
     digitalWrite(ledPin, LOW);   
-    delay(50);     
+    delay(100);     
   }
   if (times > 1) delay(2000); 
 }
