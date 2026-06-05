@@ -23,31 +23,55 @@ Drop the AutoLink files into your project, include the header, and let the libra
 
 using namespace autolink;
 
-// Create a Master node on UART2 (RX=Pin 16, TX=Pin 17)
-AutoLink masterLink(UART_NUM_2, 16, 17, true);
+// built-in blue LED on pin 2
+const int ledPin = 2; 
+
+AutoLink* myLink = nullptr;
+
+void flash(int times = 1) {
+  for (int i = 0; i < times; i++) {
+    digitalWrite(ledPin, HIGH); 
+    delay(50);                 
+    digitalWrite(ledPin, LOW);   
+    delay(50);     
+  }
+  if (times > 1) delay(2000); 
+}
+
 
 void setup() {
+    pinMode(ledPin, OUTPUT);
+    flash(2);    
     Serial.begin(115200);
     
-    if (!masterLink.isHealthy()) {
+    AutoLinkConfig cfg;
+    cfg.reliableMode = true;
+    cfg.streamBufferSize = 2048; 
+    flash(3); 
+    myLink = new AutoLink(UART_NUM_1, 16, 17, true, cfg);
+    myLink->begin();
+    flash(4);  
+
+    if (!myLink->isHealthy()) {
         Serial.println("Failed to initialize UART hardware!");
+        while (true) delay(1000);
     }
+    flash(5);  
 }
 
 void loop() {
-    // 1. Write data
     uint8_t msg[] = "Hello Slave!";
-    masterLink.write(msg, sizeof(msg));
-
-    // 2. Read data asynchronously
-    if (masterLink.available()) {
+    myLink->write(msg, sizeof(msg));
+    flash(2);
+    
+    while (myLink->available()) {
         uint8_t buffer[64];
-        int len = masterLink.read(buffer, 64);
+        flash(1);
+        int len = myLink->read(buffer, sizeof(buffer));
         Serial.printf("Received %d bytes!\n", len);
     }
-    
-    delay(10);
 }
+   
 ```
 
 
