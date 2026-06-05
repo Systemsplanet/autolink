@@ -6,7 +6,6 @@
 #ifdef ARDUINO
 #include <Stream.h>
 #else
-// Mock Stream for native testing if ARDUINO is not defined
 class Stream {
 public:
     virtual int available() = 0;
@@ -34,7 +33,6 @@ public:
 
     bool isHealthy() const { return hal->isHealthy(); }
     
-    // Standard Stream implementation
     int available() override { return link->available(); }
     int read() override { uint8_t b; return link->read(&b, 1) ? b : -1; }
     int peek() override { return link->peek(); }
@@ -42,7 +40,6 @@ public:
     size_t write(const uint8_t *buffer, size_t size) override { link->write(buffer, size); return size; }
     void flush() override { link->flush(); }
     
-    // Standard array read
     int read(uint8_t* b, int max_len) { return link->read(b, max_len); }
     
     void err() { link->err(); }
