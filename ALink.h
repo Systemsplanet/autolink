@@ -18,6 +18,8 @@ struct AutoLinkConfig {
     int errThreshold = 5;
     int delayMs = 50;
     bool reliableMode = false;
+    size_t rxBufferSize = 1024;
+    size_t streamBufferSize = 2048;
 };
 
 class ALink {
