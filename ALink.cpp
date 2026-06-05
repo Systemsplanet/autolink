@@ -2,8 +2,9 @@
 #include <stdio.h>
 #include <time.h>
 #include <algorithm>
+#include <string.h>
 
-#define ALINK_LOG(fmt, ...) do {     time_t _t; time(&_t);     struct tm* _tm = localtime(&_t);     char _tbuf[10];     if (_tm) strftime(_tbuf, sizeof(_tbuf), "%H:%M:%S", _tm);     else snprintf(_tbuf, sizeof(_tbuf), "00:00:00");     printf("[%s] [AutoLink] " fmt "\n", _tbuf, ##__VA_ARGS__); } while(0)
+#define ALINK_LOG(fmt, ...) do { time_t _t; time(&_t); struct tm* _tm = localtime(&_t); char _tbuf[10]; if (_tm) strftime(_tbuf, sizeof(_tbuf), "%H:%M:%S", _tm); else snprintf(_tbuf, sizeof(_tbuf), "00:00:00"); printf("[%s] [AutoLink] " fmt "\n", _tbuf, ##__VA_ARGS__); } while(0)
 
 namespace autolink {
 
@@ -59,6 +60,48 @@ uint8_t ALink::calcCrc(const uint8_t* data, int len) const {
     return crc;
 }
 
+size_t ALink::cobsEncode(const uint8_t *ptr, size_t length, uint8_t *dst) const {
+    size_t read_index = 0;
+    size_t write_index = 1;
+    size_t code_index = 0;
+    uint8_t code = 1;
+    while(read_index < length) {
+        if(ptr[read_index] == 0) {
+            dst[code_index] = code;
+            code = 1;
+            code_index = write_index++;
+            read_index++;
+        } else {
+            dst[write_index++] = ptr[read_index++];
+            code++;
+            if(code == 0xFF) {
+                dst[code_index] = code;
+                code = 1;
+                code_index = write_index++;
+            }
+        }
+    }
+    dst[code_index] = code;
+    return write_index;
+}
+
+size_t ALink::cobsDecode(const uint8_t *ptr, size_t length, uint8_t *dst) const {
+    size_t read_index = 0;
+    size_t write_index = 0;
+    uint8_t code;
+    uint8_t i;
+    while(read_index < length) {
+        code = ptr[read_index];
+        if(read_index + code > length && code != 1) return 0;
+        read_index++;
+        for(i = 1; i < code; i++) {
+            dst[write_index++] = ptr[read_index++];
+        }
+        if(code < 0xFF && read_index < length) dst[write_index++] = 0;
+    }
+    return write_index;
+}
+
 void ALink::sendFrame(uint8_t payload) {
     uint8_t frame[4] = {0xAA, 0x55, payload, 0};
     frame[3] = calcCrc(frame, 3);
@@ -87,7 +130,6 @@ void ALink::clearErr() {
 }
 
 int ALink::available() const { return hw.appBufAvailable(); }
-
 int ALink::peek() { return hw.peekAppBuf(); }
 
 int ALink::read(uint8_t* b, int max_len) {
@@ -100,19 +142,32 @@ int ALink::read(uint8_t* b, int max_len) {
 }
 
 void ALink::write(const uint8_t* b, int len) {
-    hw.lock();
-    if (state == State::OK) { 
-        if (cfg.reliableMode) {
-            for(int i=0; i<len; i++) {
-                uint8_t frame[3] = {RELIABLE_SYNC, b[i], 0};
-                frame[2] = calcCrc(frame, 2);
-                hw.tx(frame, 3);
-            }
-        } else {
-            hw.tx(b, len);
-        }
+    if (!cfg.reliableMode) {
+        hw.lock(); State s = state; hw.unlock();
+        if (s == State::OK) hw.tx(b, len); // Released lock before I/O
+        return;
     }
-    hw.unlock();
+    
+    // Chunked COBS payload framing to decouple from mutex completely
+    int offset = 0;
+    while(offset < len) {
+        hw.lock(); State s = state; hw.unlock();
+        if (s != State::OK) break;
+
+        int chunk = std::min(len - offset, 250);
+        uint8_t unencoded[255];
+        uint8_t frame[260];
+        
+        memcpy(unencoded, b + offset, chunk);
+        unencoded[chunk] = calcCrc(unencoded, chunk);
+        
+        frame[0] = 0x00;
+        size_t encLen = cobsEncode(unencoded, chunk + 1, frame + 1);
+        frame[1 + encLen] = 0x00;
+        
+        hw.tx(frame, encLen + 2);
+        offset += chunk;
+    }
 }
 
 void ALink::flush() {
@@ -132,26 +187,35 @@ int ALink::getCurrentSpdIndex() const {
 }
 
 void ALink::onRx(const uint8_t* data, int len) {
-    hw.lock();
-    State current_state = state;
-    hw.unlock();
-
     for(int i=0; i<len; i++) {
         uint8_t b = data[i];
         
-        if (current_state == State::OK) {
+        // Dynamically fetch state per byte to prevent mid-packet corruption
+        hw.lock();
+        State cur_state = state;
+        hw.unlock();
+        
+        if (cur_state == State::OK) {
             if (cfg.reliableMode) {
-                if (relRxIdx == 0 && b != RELIABLE_SYNC) continue;
-                relRxBuf[relRxIdx++] = b;
-                if (relRxIdx == 3) {
-                    relRxIdx = 0;
-                    if (calcCrc(relRxBuf, 2) == relRxBuf[2]) {
-                        hw.pushAppBuf(relRxBuf[1]);
-                    } else {
-                        // Avoid direct recursion or deadlock, call err from unlocked state via a queue ideally,
-                        // but here we just increment or call err() directly since err() takes lock internally.
-                        err(); 
+                if (b == 0x00) {
+                    if (relRxIdx > 0) {
+                        uint8_t decoded[256];
+                        size_t decLen = cobsDecode(relRxBuf, relRxIdx, decoded);
+                        relRxIdx = 0;
+                        if (decLen > 1) {
+                            uint8_t crc = calcCrc(decoded, decLen - 1);
+                            if (crc == decoded[decLen - 1]) {
+                                for(size_t j=0; j<decLen-1; j++) hw.pushAppBuf(decoded[j]);
+                            } else {
+                                err(); 
+                            }
+                        } else if (decLen > 0) {
+                             err();
+                        }
                     }
+                } else {
+                    if (relRxIdx < 255) relRxBuf[relRxIdx++] = b;
+                    else relRxIdx = 0; // Overflow safety
                 }
             } else {
                 hw.pushAppBuf(b);
@@ -166,21 +230,18 @@ void ALink::onRx(const uint8_t* data, int len) {
                 rxIdx = 0; 
                 if (calcCrc(rxBuf, 3) == rxBuf[3]) {
                     uint8_t payload = rxBuf[2];
-                    if (current_state == State::SWP) {
+                    if (cur_state == State::SWP) {
                         hw.lock();
-                        if (payload == PING_CMD && spdI < (int)cfg.allowedBauds.size()) {
-                            scores[spdI]++;
-                        }
+                        if (payload == PING_CMD && spdI < (int)cfg.allowedBauds.size()) scores[spdI]++;
                         hw.unlock();
                     } 
-                    else if (current_state == State::LCK) {
+                    else if (cur_state == State::LCK) {
                         if (isMaster) {
                             if (payload < (int)cfg.allowedBauds.size()) { 
                                 hw.setSpd(cfg.allowedBauds[payload]);
                                 hw.lock();
                                 errs = 0;
                                 changeState_unlocked(State::OK);
-                                current_state = State::OK; 
                                 hw.unlock();
                             }
                         } else {
@@ -198,7 +259,6 @@ void ALink::onRx(const uint8_t* data, int len) {
                                 hw.lock();
                                 errs = 0;
                                 changeState_unlocked(State::OK);
-                                current_state = State::OK; 
                                 hw.unlock();
                             }
                         }
