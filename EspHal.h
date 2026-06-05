@@ -35,7 +35,6 @@ class EspHal : public ILink {
         uart_event_t event;
         
         while(hal->running) {
-            // Using finite timeout to prevent teardown trap
             if(xQueueReceive(hal->uart_queue, (void * )&event, pdMS_TO_TICKS(100))) {
                 if (!hal->running) break;
                 if(event.type == UART_DATA) {
@@ -47,6 +46,10 @@ class EspHal : public ILink {
                     uart_flush_input(hal->uart_num);
                     if(hal->link) hal->link->onBreak();
                 }
+                // Custom event type injected from the timer callback
+                else if(event.type == (uart_event_type_t)UART_EVENT_MAX) {
+                    if(hal->link) hal->link->onTimer();
+                }
             }
         }
         if (hal->task_exit_sem) xSemaphoreGive(hal->task_exit_sem);
@@ -55,7 +58,10 @@ class EspHal : public ILink {
 
     static void timer_callback(TimerHandle_t xTimer) {
         EspHal* hal = (EspHal*) pvTimerGetTimerID(xTimer);
-        if(hal->link) hal->link->onTimer();
+        // Offload execution to the event task to avoid Tmr Svc mutex stalls
+        uart_event_t event;
+        event.type = (uart_event_type_t)UART_EVENT_MAX; 
+        if (hal->uart_queue) xQueueSend(hal->uart_queue, &event, 0);
     }
 
 public:
@@ -100,7 +106,6 @@ public:
         if (timer_handle == NULL) {
             ESP_LOGE(HAL_TAG, "Failed to create FreeRTOS timer");
             running = false;
-            // Task is already running, destruction will handle cleanup gracefully
             return;
         }
         healthy = true;
