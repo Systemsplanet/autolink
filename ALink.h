@@ -25,13 +25,11 @@ class ALink {
     bool isMaster;
     AutoLinkConfig cfg;
     
-    // Protected by hardware lock()
     State state;
     int errs;
     int spdI;
     std::vector<int> scores;
 
-    // Frame Parsing Buffers
     uint8_t rxBuf[4];
     int rxIdx;
     
