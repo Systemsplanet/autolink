@@ -87,27 +87,59 @@ Setting up a listening device is just as easy as setting up the master. Just pas
 
 ```cpp
 #include "AutoLink.h"
+
 using namespace autolink;
 
-// Initialize as Slave (false)
-AutoLink slaveLink(UART_NUM_2, 16, 17, false);
+// built-in blue LED on pin 2
+const int ledPin = 2; 
+
+AutoLink* myLink = nullptr;
+
+void flash(int times = 1) {
+  for (int i = 0; i < times; i++) {
+    digitalWrite(ledPin, HIGH); 
+    delay(100);                 
+    digitalWrite(ledPin, LOW);   
+    delay(100);     
+  }
+  if (times > 1) delay(2000); 
+}
 
 void setup() {
+    pinMode(ledPin, OUTPUT);
+    flash(2);    
+    Serial.begin(115200);
+    
+    AutoLinkConfig cfg;
+    cfg.reliableMode = true;
+    cfg.streamBufferSize = 2048; 
+    flash(3); 
+    myLink = new AutoLink(UART_NUM_1, 16, 17, false, cfg);
+
     // Wait for the Master to find us and lock on!
-    while(slaveLink.getState() != State::OK) {
-        delay(100); 
+    while(myLink->getState() != State::OK) {
+        flash(4); 
     }
+    
+    if (!myLink->isHealthy()) {
+        Serial.println("Failed to initialize UART hardware!");
+        while (true) delay(1000);
+    }
+    flash(5);  
 }
 
 void loop() {
-    if (slaveLink.available()) {
-        uint8_t buf[128];
-        int len = slaveLink.read(buf, 128);
-        
+     if (myLink->available()) {
+        uint8_t buffer[64];
+        flash(1);
+        int len = myLink->read(buffer, sizeof(buffer));
+        Serial.printf("Received %d bytes!\n", len);
         // Echo the data back
-        slaveLink.write(buf, len);
+        myLink->write(buffer, len);
+        flash(2);
     }
 }
+   
 
 ```
 
