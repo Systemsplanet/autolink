@@ -1,10 +1,15 @@
 #include "ALink.h"
-#include <stdio.h>
-#include <time.h>
 #include <algorithm>
 #include <string.h>
 
+#ifdef ESP_PLATFORM
+#include "esp_log.h"
+#define ALINK_LOG(fmt, ...) ESP_LOGI("AutoLink", fmt, ##__VA_ARGS__)
+#else
+#include <stdio.h>
+#include <time.h>
 #define ALINK_LOG(fmt, ...) do { time_t _t; time(&_t); struct tm* _tm = localtime(&_t); char _tbuf[10]; if (_tm) strftime(_tbuf, sizeof(_tbuf), "%H:%M:%S", _tm); else snprintf(_tbuf, sizeof(_tbuf), "00:00:00"); printf("[%s] [AutoLink] " fmt "\n", _tbuf, ##__VA_ARGS__); } while(0)
+#endif
 
 namespace autolink {
 
@@ -133,12 +138,7 @@ int ALink::available() const { return hw.appBufAvailable(); }
 int ALink::peek() { return hw.peekAppBuf(); }
 
 int ALink::read(uint8_t* b, int max_len) {
-    int n = 0;
-    while(n < max_len && hw.appBufAvailable() > 0) {
-        int val = hw.popAppBuf();
-        if(val >= 0) b[n++] = (uint8_t)val;
-    }
-    return n;
+    return hw.popAppBuf(b, max_len);
 }
 
 void ALink::write(const uint8_t* b, int len) {
@@ -154,18 +154,20 @@ void ALink::write(const uint8_t* b, int len) {
         if (s != State::OK) break;
 
         int chunk = std::min(len - offset, 250);
-        uint8_t unencoded[255];
-        uint8_t frame[260];
+        std::vector<uint8_t> unencoded(chunk + 1);
+        std::vector<uint8_t> frame(chunk + 6);
         
-        memcpy(unencoded, b + offset, chunk);
-        unencoded[chunk] = calcCrc(unencoded, chunk);
+        memcpy(unencoded.data(), b + offset, chunk);
+        unencoded[chunk] = calcCrc(unencoded.data(), chunk);
         
         frame[0] = 0x00;
-        size_t encLen = cobsEncode(unencoded, chunk + 1, frame + 1);
+        size_t encLen = cobsEncode(unencoded.data(), chunk + 1, frame.data() + 1);
         frame[1 + encLen] = 0x00;
         
-        hw.tx(frame, encLen + 2);
+        hw.tx(frame.data(), encLen + 2);
         offset += chunk;
+        
+        hw.delayMs(1); // Yield execution
     }
 }
 
@@ -186,40 +188,44 @@ int ALink::getCurrentSpdIndex() const {
 }
 
 void ALink::onRx(const uint8_t* data, int len) {
-    for(int i=0; i<len; i++) {
-        uint8_t b = data[i];
-        
+    int i = 0;
+    while (i < len) {
         hw.lock();
         State cur_state = state;
         hw.unlock();
-        
+
         if (cur_state == State::OK) {
             if (cfg.reliableMode) {
-                if (b == 0x00) {
-                    if (relRxIdx > 0) {
-                        uint8_t decoded[256];
-                        size_t decLen = cobsDecode(relRxBuf, relRxIdx, decoded);
-                        relRxIdx = 0;
-                        if (decLen > 1) {
-                            uint8_t crc = calcCrc(decoded, decLen - 1);
-                            if (crc == decoded[decLen - 1]) {
-                                for(size_t j=0; j<decLen-1; j++) hw.pushAppBuf(decoded[j]);
-                            } else {
-                                err(); 
+                for (; i < len; i++) {
+                    uint8_t b = data[i];
+                    if (b == 0x00) {
+                        if (relRxIdx > 0) {
+                            std::vector<uint8_t> decoded(256);
+                            size_t decLen = cobsDecode(relRxBuf, relRxIdx, decoded.data());
+                            relRxIdx = 0;
+                            if (decLen > 1) {
+                                uint8_t crc = calcCrc(decoded.data(), decLen - 1);
+                                if (crc == decoded[decLen - 1]) {
+                                    hw.pushAppBuf(decoded.data(), decLen - 1);
+                                } else {
+                                    err(); break;
+                                }
+                            } else if (decLen > 0) {
+                                 err(); break;
                             }
-                        } else if (decLen > 0) {
-                             err();
                         }
+                    } else {
+                        if (relRxIdx < 255) relRxBuf[relRxIdx++] = b;
+                        else relRxIdx = 0; 
                     }
-                } else {
-                    if (relRxIdx < 255) relRxBuf[relRxIdx++] = b;
-                    else relRxIdx = 0; 
                 }
             } else {
-                hw.pushAppBuf(b);
+                hw.pushAppBuf(data + i, len - i);
+                i = len;
             }
         } 
         else {
+            uint8_t b = data[i++];
             if (rxIdx == 0 && b != 0xAA) continue;
             if (rxIdx == 1 && b != 0x55) { rxIdx = 0; continue; }
             rxBuf[rxIdx++] = b;
