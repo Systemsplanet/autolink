@@ -137,6 +137,15 @@ void ALink::clearErr() {
 int ALink::available() const { return hw.appBufAvailable(); }
 int ALink::peek() { return hw.peekAppBuf(); }
 
+// FIXED: Implemented the missing no-argument read() method
+int ALink::read() {
+    uint8_t single_byte;
+    if (hw.popAppBuf(&single_byte, 1) == 1) {
+        return single_byte;
+    }
+    return -1;
+}
+
 int ALink::read(uint8_t* b, int max_len) {
     return hw.popAppBuf(b, max_len);
 }
@@ -319,3 +328,4 @@ void ALink::onTimer() {
 }
 
 } // namespace autolink
+
