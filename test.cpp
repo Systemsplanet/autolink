@@ -53,19 +53,63 @@ public:
     }
 };
 
+void pipe_data(MockHal& src, MockHal& dest) {
+    if (src.txN > 0) {
+        dest.link->onRx(src.txBuf, src.txN);
+        src.clearTx();
+    }
+}
+
+void run_test_hal_methods() {
+    std::cout << "\n=== Test: MockHal Methods ===" << std::endl;
+    MockHal hal;
+    hal.setSpd(115200); assert(hal.spd == 115200);
+    hal.sendBreak(); assert(hal.sendBreakCalls == 1);
+    
+    uint8_t tb[] = {0xFF};
+    hal.tx(tb, 1); assert(hal.txN == 1); assert(hal.txBuf[0] == 0xFF);
+    hal.flushTx();
+    
+    hal.startTimer(50); assert(hal.timerActive == true);
+    hal.stopTimer(); assert(hal.timerActive == false);
+    
+    hal.lock(); hal.unlock(); 
+    
+    hal.pushAppBuf(0xAA);
+    assert(hal.appBufAvailable() == 1);
+    assert(hal.peekAppBuf() == 0xAA);
+    assert(hal.popAppBuf() == 0xAA);
+    assert(hal.popAppBuf() == -1); 
+    
+    hal.pushAppBuf(0xBB);
+    hal.clearAppBuf();
+    assert(hal.appBufAvailable() == 0);
+    
+    std::cout << "PASS" << std::endl;
+}
+
 void run_test_basic_io() {
-    std::cout << "\n=== Test: Basic Write/Read (Async Buffer) ===" << std::endl;
+    std::cout << "\n=== Test: Basic Write/Read/Peek/Flush/Available ===" << std::endl;
     MockHal mHal, sHal;
     ALink master(mHal, true);
     ALink slave(sHal, false);
     
     uint8_t data[] = {0x11, 0x22};
     master.write(data, 2);
+    master.flush();
+    
     slave.onRx(mHal.txBuf, mHal.txN);
+    
+    assert(slave.available() == 2);
+    assert(slave.peek() == 0x11);
+    assert(slave.available() == 2);
+    
     uint8_t rb_arr[10];
     assert(slave.read(rb_arr, 10) == 2);
     assert(rb_arr[0] == 0x11);
     assert(rb_arr[1] == 0x22);
+    
+    assert(slave.available() == 0);
     std::cout << "PASS" << std::endl;
 }
 
@@ -78,8 +122,6 @@ void run_test_reliable_mode() {
     
     uint8_t data[] = {0xAA, 0xBB};
     master.write(data, 2);
-    
-    // TX should contain COBS encoded frame now
     assert(mHal.txN > 0);
     
     slave.onRx(mHal.txBuf, mHal.txN);
@@ -87,6 +129,11 @@ void run_test_reliable_mode() {
     assert(slave.read(rb_arr, 10) == 2);
     assert(rb_arr[0] == 0xAA);
     assert(rb_arr[1] == 0xBB);
+    
+    uint8_t bad_cobs[] = {0x00, 0x05, 0x01, 0x02, 0x00}; 
+    slave.onRx(bad_cobs, sizeof(bad_cobs));
+    assert(slave.getErrCount() > 0);
+    
     std::cout << "PASS" << std::endl;
 }
 
@@ -109,16 +156,57 @@ void run_test_error_threshold() {
     assert(master.getState() == State::OK);
     assert(master.getErrCount() == 2);
     
-    master.err();
+    master.err(); 
     assert(master.getState() == State::SWP);
+    std::cout << "PASS" << std::endl;
+}
+
+void run_test_negotiation_state_machine() {
+    std::cout << "\n=== Test: Auto-Baud Negotiation State Machine ===" << std::endl;
+    MockHal mHal, sHal;
+    AutoLinkConfig cfg;
+    cfg.allowedBauds = {9600, 115200};
+    ALink master(mHal, true, cfg);
+    ALink slave(sHal, false, cfg);
+    
+    master.onBreak();
+    slave.onBreak();
+    
+    assert(master.getState() == State::SWP);
+    assert(slave.getState() == State::SWP);
+    assert(master.getCurrentSpdIndex() == 0);
+    
+    master.onTimer();
+    pipe_data(mHal, sHal);
+    assert(master.getCurrentSpdIndex() == 1);
+    
+    master.onTimer();
+    pipe_data(mHal, sHal);
+    assert(master.getCurrentSpdIndex() == 2);
+    
+    master.onTimer();
+    assert(master.getState() == State::LCK);
+    
+    slave.onTimer(); slave.onTimer(); slave.onTimer();
+    assert(slave.getState() == State::LCK);
+    
+    master.onTimer();
+    pipe_data(mHal, sHal);
+    assert(slave.getState() == State::OK);
+    
+    pipe_data(sHal, mHal);
+    assert(master.getState() == State::OK);
+    
     std::cout << "PASS" << std::endl;
 }
 
 int main() {
     std::cout << "=== Running AutoLink Core Tests ===" << std::endl;
+    run_test_hal_methods();
     run_test_basic_io();
     run_test_reliable_mode();
     run_test_error_threshold();
+    run_test_negotiation_state_machine();
     std::cout << "\n=== All Tests Completed Successfully ===" << std::endl;
     return 0;
 }
