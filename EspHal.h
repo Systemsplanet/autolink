@@ -118,6 +118,8 @@ public:
             return;
         }
         healthy = true;
+        // Kick off baud negotiation now that the HAL is fully running.
+        if (link) link->begin();
     }
     
     ~EspHal() {
