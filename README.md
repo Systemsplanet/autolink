@@ -24,18 +24,18 @@ Drop the AutoLink files into your project, include the header, and let the libra
 using namespace autolink;
 
 // built-in blue LED on pin 2
-const int ledPin = 2; 
+const int ledPin = 2;
 
 AutoLink* myLink = nullptr;
 
 void flash(int times = 1) {
   for (int i = 0; i < times; i++) {
-    digitalWrite(ledPin, HIGH); 
-    delay(100);                 
-    digitalWrite(ledPin, LOW);   
-    delay(100);     
+    digitalWrite(ledPin, HIGH);
+    delay(100);
+    digitalWrite(ledPin, LOW);
+    delay(100);
   }
-  if (times > 1) delay(2000); 
+  if (times > 1) delay(2000);
 }
 
 
@@ -43,37 +43,47 @@ void setup() {
     // Silence AutoLink library logs (optional)
     // Log::getLog().setLevel(Log::NONE);
     pinMode(ledPin, OUTPUT);
-    flash(2);    
+    flash(2);
     Serial.begin(115200);
-    
+
     AutoLinkConfig cfg;
     cfg.reliableMode = true;
-    cfg.streamBufferSize = 2048; 
-    flash(3); 
+    cfg.streamBufferSize = 2048;
+    flash(3);
     myLink = new AutoLink(UART_NUM_1, 16, 17, true, cfg);
-    myLink->begin();
-    flash(4);  
+    myLink->begin(); // Triggers baud sweep; blocks until HAL is healthy
+    flash(4);
 
     if (!myLink->isHealthy()) {
         Log::getLog().error("App", "Failed to initialize UART hardware!");
         while (true) delay(1000);
     }
-    flash(5);  
+
+    // Wait for negotiation to complete before sending user data.
+    Log::getLog().info("App", "Waiting for link...");
+    while (myLink->getState() != State::OK) delay(10);
+    flash(5);
+    Log::getLog().info("App", "Link established. Starting loop.");
 }
 
 void loop() {
-    uint8_t msg[] = "Hello Slave!";
-    myLink->write(msg, sizeof(msg));
-    flash(2);
-    
+    // Only transmit when the link is healthy.
+    if (myLink->getState() == State::OK) {
+        const char* str = "Hello Slave!";
+        myLink->write((const uint8_t*)str, strlen(str)); // no null terminator
+        flash(2);
+    }
+
     while (myLink->available()) {
         uint8_t buffer[64];
-        flash(1);
         int len = myLink->read(buffer, sizeof(buffer));
-        Log::getLog().info("App", "Received %d bytes!", len);
+        buffer[len] = '\0'; // safe: buffer has room
+        Log::getLog().info("App", "Received %d bytes: %s", len, (char*)buffer);
+        flash(1);
     }
+
+    delay(500); // throttle ping rate
 }
-   
 ```
 
 
@@ -93,31 +103,31 @@ Setting up a listening device is just as easy as setting up the master. Just pas
 using namespace autolink;
 
 // built-in blue LED on pin 2
-const int ledPin = 2; 
+const int ledPin = 2;
 
 AutoLink* myLink = nullptr;
 
 void flash(int times = 1) {
   for (int i = 0; i < times; i++) {
-    digitalWrite(ledPin, HIGH); 
-    delay(100);                 
-    digitalWrite(ledPin, LOW);   
-    delay(100);     
+    digitalWrite(ledPin, HIGH);
+    delay(100);
+    digitalWrite(ledPin, LOW);
+    delay(100);
   }
-  if (times > 1) delay(2000); 
+  if (times > 1) delay(2000);
 }
 
 void setup() {
     pinMode(ledPin, OUTPUT);
-    flash(2);    
+    flash(2);
     Serial.begin(115200);
-    
+
     AutoLinkConfig cfg;
     cfg.reliableMode = true;
-    cfg.streamBufferSize = 2048; 
-    flash(3); 
+    cfg.streamBufferSize = 2048;
+    flash(3);
     myLink = new AutoLink(UART_NUM_1, 16, 17, false, cfg);
-    myLink->begin();
+    myLink->begin(); // Arms slave in SWP — waits for master's PING sweep
 
     if (!myLink->isHealthy()) {
         Log::getLog().error("App", "Failed to initialize UART hardware!");
@@ -125,27 +135,32 @@ void setup() {
     }
     flash(4);
 
-    // Wait for the Master to find us and lock on!
-    while(myLink->getState() != State::OK) {
-        flash(1); 
+    // Wait for the Master to find us and lock on.
+    // The master drives negotiation; we just wait here.
+    Log::getLog().info("App", "Waiting for master...");
+    while (myLink->getState() != State::OK) {
+        flash(1);
+        delay(200);
     }
-    flash(5);  
+    flash(5);
+    Log::getLog().info("App", "Link established. Starting loop.");
 }
 
 void loop() {
-     if (myLink->available()) {
+    if (myLink->available()) {
         uint8_t buffer[64];
-        flash(1);
         int len = myLink->read(buffer, sizeof(buffer));
-        Log::getLog().info("App", "Received %d bytes!", len);
-        // Echo the data back
-        myLink->write(buffer, len);
-        flash(2);
+        buffer[len] = '\0'; // safe: buffer has room
+        Log::getLog().info("App", "Received %d bytes: %s", len, (char*)buffer);
+        flash(1);
+
+        // Echo the data back — only when link is confirmed OK.
+        if (myLink->getState() == State::OK) {
+            myLink->write(buffer, len);
+            flash(2);
+        }
     }
 }
-   
-
-```
 
 # 🧠 Advanced Usage: The Power User API
 
