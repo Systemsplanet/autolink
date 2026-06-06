@@ -55,7 +55,7 @@ void setup() {
     flash(4);  
 
     if (!myLink->isHealthy()) {
-        Serial.println("Failed to initialize UART hardware!");
+        Log::getLog().error("App", "Failed to initialize UART hardware!");
         while (true) delay(1000);
     }
     flash(5);  
@@ -70,7 +70,7 @@ void loop() {
         uint8_t buffer[64];
         flash(1);
         int len = myLink->read(buffer, sizeof(buffer));
-        Serial.printf("Received %d bytes!\n", len);
+        Log::getLog().info("App", "Received %d bytes!", len);
     }
 }
    
@@ -120,7 +120,7 @@ void setup() {
     myLink->begin();
 
     if (!myLink->isHealthy()) {
-        Serial.println("Failed to initialize UART hardware!");
+        Log::getLog().error("App", "Failed to initialize UART hardware!");
         while (true) delay(1000);
     }
     flash(4);
@@ -137,7 +137,7 @@ void loop() {
         uint8_t buffer[64];
         flash(1);
         int len = myLink->read(buffer, sizeof(buffer));
-        Serial.printf("Received %d bytes!\n", len);
+        Log::getLog().info("App", "Received %d bytes!", len);
         // Echo the data back
         myLink->write(buffer, len);
         flash(2);
@@ -191,10 +191,10 @@ void loop() {
     State currentState = link->getState();
 
     if (currentState == State::SWP) {
-        Serial.println("Connection lost. Sweeping for device...");
+        Log::getLog().info("App", "Connection lost. Sweeping for device...");
     } 
     else if (currentState == State::LCK) {
-        Serial.println("Device found! Locking baud rate...");
+        Log::getLog().info("App", "Device found! Locking baud rate...");
     } 
     else if (currentState == State::OK) {
         
@@ -214,7 +214,7 @@ void loop() {
                 // After 10 sequential errors (our threshold), AutoLink automatically
                 // triggers a hardware BREAK and drops back to State::SWP.
                 link->err();
-                Serial.printf("Corrupt packet! Warning count: %d\n", link->getErrCount());
+                Log::getLog().error("App", "Corrupt packet! Warning count: %d", link->getErrCount());
             }
         }
     }
@@ -245,13 +245,13 @@ bool verifyMyChecksum(const uint8_t* data, int len) {
 // Dedicated hardware instantiation routine for clean reboots
 void initializeAutoLink() {
     if (link != nullptr) {
-        Serial.println("--- Self-Healing: Deleting corrupted AutoLink instance ---");
+        Log::getLog().info("App", "Self-Healing: Deleting corrupted AutoLink instance");
         delete link; 
         link = nullptr;
         delay(100); // Give FreeRTOS tasks time to fully dismantle
     }
     
-    Serial.println("--- Self-Healing: Initializing fresh UART peripheral stack ---");
+    Log::getLog().info("App", "Self-Healing: Initializing fresh UART peripheral stack");
     link = new AutoLink(UART_NUM_2, 16, 17, true, globalCfg);
     link->begin();
     
@@ -269,7 +269,7 @@ void setup() {
     globalCfg.reliableMode = false;                  
 
     initializeAutoLink();
-    Serial.println("System initialized successfully.");
+    Log::getLog().info("App", "System initialized successfully.");
 }
 
 void loop() {
@@ -290,18 +290,18 @@ void loop() {
     // 3. The Watchdog Recovery Engine
     // If stuck in Sweep mode for too long, the physical bus or transceiver is locked up.
     if (currentState == State::SWP && (millis() - lastStateChangeMs > SWEEP_TIMEOUT_MS)) {
-        Serial.println("CRITICAL: Sweep timeout exceeded! Hardware/Line deadlock suspected.");
+        Log::getLog().error("App", "Sweep timeout exceeded! Hardware/Line deadlock suspected.");
         initializeAutoLink(); // Destroy and recreate the entire peripheral stack
         return;
     }
 
     // 4. State Machine Execution
     if (currentState == State::SWP) {
-        Serial.println("Connection dropped or noisy. Sweeping available spectrum...");
+        Log::getLog().info("App", "Connection dropped or noisy. Sweeping available spectrum...");
         delay(500); // Reduce monitoring spam on terminal
     } 
     else if (currentState == State::LCK) {
-        Serial.println("Handshake target identified. Locking baud rate parameters...");
+        Log::getLog().info("App", "Handshake target identified. Locking baud rate parameters...");
     } 
     else if (currentState == State::OK) {
         
@@ -320,11 +320,11 @@ void loop() {
 
             if (verifyMyChecksum(payload, 5)) {
                 link->clearErr(); // Decay error count
-                Serial.println("Valid user data packet decoded.");
+                Log::getLog().info("App", "Valid user data packet decoded.");
             } else {
                 // link->err() will naturally shift internal state to State::SWP if count > threshold
                 link->err();
-                Serial.printf("Corrupted sequence packet detected. Total Warning Count: %d\n", link->getErrCount());
+                Log::getLog().error("App", "Corrupted packet detected. Warning count: %d", link->getErrCount());
             }
         }
         // Garbage Collector: If a partial fragment lingers without completing a packet, drain it
