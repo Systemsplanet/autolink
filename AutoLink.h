@@ -1,6 +1,7 @@
 #pragma once
 #include "EspHal.h"
 #include "ALink.h"
+#include "Log.h"
 #include <memory>
 
 #ifdef ARDUINO
