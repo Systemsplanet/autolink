@@ -222,6 +222,121 @@ void loop() {
 
 ```
 
+## Robust recovery
+``` cpp
+#include "AutoLink.h"
+
+using namespace autolink;
+
+AutoLink* link = nullptr;
+AutoLinkConfig globalCfg; // Keep config global so we can recreate the object identically
+
+// Track timing for structural self-healing
+unsigned long lastStateChangeMs = 0;
+State lastKnownState = State::OK;
+const unsigned long SWEEP_TIMEOUT_MS = 15000; // Force hard reset if stuck sweeping for 15 seconds
+
+bool verifyMyChecksum(const uint8_t* data, int len) {
+    return (data[0] ^ data[1] ^ data[2] ^ data[3]) == data[4];
+}
+
+// Dedicated hardware instantiation routine for clean reboots
+void initializeAutoLink() {
+    if (link != nullptr) {
+        Serial.println("--- Self-Healing: Deleting corrupted AutoLink instance ---");
+        delete link; 
+        link = nullptr;
+        delay(100); [span_1](start_span)// Give FreeRTOS tasks time to fully dismantle[span_1](end_span)
+    }
+    
+    Serial.println("--- Self-Healing: Initializing fresh UART peripheral stack ---");
+    link = new AutoLink(UART_NUM_2, 16, 17, true, globalCfg);
+    link->begin();
+    
+    lastKnownState = State::OK;
+    lastStateChangeMs = millis();
+}
+
+void setup() {
+    Serial.begin(115200);
+
+    // Populate global configurations
+    globalCfg.allowedBauds = {9600, 38400, 115200}; 
+    globalCfg.errThreshold = 10;                     
+    globalCfg.delayMs      = 100;                    
+    globalCfg.reliableMode = false;                  
+
+    initializeAutoLink();
+    Serial.println("System initialized successfully.");
+}
+
+void loop() {
+    // 1. Critical Safe Check: If instantiation failed, retry immediately
+    if (!link) {
+        initializeAutoLink();
+        return;
+    }
+
+    State currentState = link->getState();
+
+    // 2. Monitor State Machine Health Transitions
+    if (currentState != lastKnownState) {
+        lastKnownState = currentState;
+        lastStateChangeMs = millis(); // Reset timeout watchdog timer on any state transition
+    }
+
+    // 3. The Watchdog Recovery Engine
+    // If stuck in Sweep mode for too long, the physical bus or transceiver is locked up.
+    if (currentState == State::SWP && (millis() - lastStateChangeMs > SWEEP_TIMEOUT_MS)) {
+        Serial.println("CRITICAL: Sweep timeout exceeded! Hardware/Line deadlock suspected.");
+        initializeAutoLink(); // Destroy and recreate the entire peripheral stack
+        return;
+    }
+
+    // 4. State Machine Execution
+    if (currentState == State::SWP) {
+        Serial.println("Connection dropped or noisy. Sweeping available spectrum...");
+        delay(500); // Reduce monitoring spam on terminal
+    } 
+    else if (currentState == State::LCK) {
+        Serial.println("Handshake target identified. Locking baud rate parameters...");
+    } 
+    else if (currentState == State::OK) {
+        
+        // Actively process synchronized incoming streams
+        int availableBytes = link->available();
+        
+        if (availableBytes >= 5) { 
+            uint8_t payload[5];
+            
+            // Peek at data to make sure it's not a repeating zero/garbage alignment trap
+            if (link->peek() == -1) {
+                link->read(); // Drop leading invalid byte if stream gets offset
+                return;
+            }
+
+            link->read(payload, 5);
+
+            if (verifyMyChecksum(payload, 5)) {
+                link->clearErr(); [span_2](start_span)// Decay error count[span_2](end_span)
+                Serial.println("Valid user data packet decoded.");
+            } else {
+                [span_3](start_span)// link->err() will naturally shift internal state to State::SWP if count > 10[span_3](end_span)
+                link->err();
+                Serial.printf("Corrupted sequence packet detected. Total Warning Count: %d\n", link->getErrCount());
+            }
+        }
+        // Garbage Collector: If odd trailing data fragments linger without forming a packet, clean them out
+        else if (availableBytes > 0 && availableBytes < 5 && (millis() - lastStateChangeMs > 2000)) {
+            link->flush(); // Purge unaligned remainder fragments
+        }
+    }
+    
+    delay(10); // FreeRTOS CPU yield
+}
+
+```
+
 # 📦 Features Under the Hood
 
 
