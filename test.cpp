@@ -114,7 +114,9 @@ void run_test_basic_io() {
     MockHal mHal, sHal;
     ALink master(mHal, true);
     ALink slave(sHal, false);
-    
+    // Both nodes start in State::OK by constructor default. begin() is deliberately
+    // not called here so this test exercises only the data path in isolation,
+    // without negotiation. This mirrors a known-good-baud scenario (e.g. fixed config).
     uint8_t data[] = {0x11, 0x22};
     master.write(data, 2);
     master.flush();
@@ -194,6 +196,8 @@ void run_test_negotiation_state_machine() {
     ALink master(mHal, true, cfg);
     ALink slave(sHal, false, cfg);
 
+    // master.begin() -> MockHal::sendBreak() -> onBreak() [exactly once].
+    // slave.begin()  -> arms SWP passively, no timer.
     master.begin();
     slave.begin();
 
@@ -201,26 +205,27 @@ void run_test_negotiation_state_machine() {
     assert(slave.getState() == State::SWP);
     assert(master.getCurrentSpdIndex() == 0);
 
-    // Master sweeps: 2 bauds -> 2 PING ticks then LCK
+    // Tick 1: master sends PING@9600, slave scores it into scores[0], slave spdI->1
     master.onTimer();
-    pipe_data(mHal, sHal); // slave scores PING@9600
+    pipe_data(mHal, sHal);
     assert(master.getCurrentSpdIndex() == 1);
+    assert(slave.getCurrentSpdIndex() == 1); // slave advanced after scoring
 
+    // Tick 2: master sends PING@115200, slave scores into scores[1], slave spdI->2, master -> LCK
     master.onTimer();
-    pipe_data(mHal, sHal); // slave scores PING@115200, master -> LCK
+    pipe_data(mHal, sHal);
     assert(master.getCurrentSpdIndex() == 2);
-
     assert(master.getState() == State::LCK);
 
-    // Master sends REQ_CMD; slave handles it directly from SWP -> OK
+    // Tick 3: master sends REQ_CMD; slave handles from SWP -> OK, replies best index
     master.onTimer();
     pipe_data(mHal, sHal);
     assert(slave.getState() == State::OK);
 
-    // Slave reply (baud index) arrives at master -> OK
+    // Master receives slave's baud-index reply -> OK
     pipe_data(sHal, mHal);
     assert(master.getState() == State::OK);
-    
+
     std::cout << "PASS" << std::endl;
 }
 
@@ -301,10 +306,7 @@ void run_test_readme_usage() {
     ALink txNode(txHal, true, cfg);
     ALink link(rxHal, false, cfg);
 
-    // begin() sets master to SWP (via sendBreak->onBreak and direct onBreak call).
-    // MockHal::sendBreak() calls onBreak() internally, so master hits onBreak twice;
-    // this is idempotent — second call just resets the same SWP state.
-    txNode.begin(); // master: SWP, timer armed
+    txNode.begin(); // master: MockHal::sendBreak() -> onBreak() [once], timer armed
     link.begin();   // slave:  SWP, no timer
 
     // Fast-forward negotiation to OK.
