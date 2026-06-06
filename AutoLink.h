@@ -37,7 +37,7 @@ public:
     bool isHealthy() const { return hal->isHealthy(); }
     
     int available() override { return link->available(); }
-    int read() override { uint8_t b; return link->read(&b, 1) ? b : -1; }
+    int read() override { uint8_t b; return link->read(&b, 1) == 1 ? b : -1; }
     int peek() override { return link->peek(); }
     size_t write(uint8_t b) override { link->write(&b, 1); return 1; }
     size_t write(const uint8_t *buffer, size_t size) override { link->write(buffer, size); return size; }
