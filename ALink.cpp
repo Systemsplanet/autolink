@@ -46,20 +46,20 @@ ALink::ALink(ILink& h, bool isMasterNode, const AutoLinkConfig& config)
 }
 
 void ALink::begin() {
-    // Master sends a hardware BREAK to kick off baud negotiation from a known state.
-    // Slave arms itself passively — it will receive the BREAK from the master and
-    // call onBreak() via the HAL's UART_BREAK event, but we also set state here
-    // so it is ready even if the first BREAK arrives before the HAL task starts.
     if (isMaster) {
+        // sendBreak() delivers onBreak() synchronously on MockHal (via bind) and
+        // asynchronously via the UART_BREAK event on EspHal. Either way we must not
+        // call onBreak() a second time here — that would reset spdI after the first
+        // timer tick has already fired.
         hw.sendBreak();
-        // onBreak() will be called by the HAL when the BREAK echo is detected.
-        // Call directly here too so master state is set in all code paths
-        // (host tests, and devices where sendBreak does not loop back).
-        onBreak();
     } else {
+        // Slave arms itself passively in SWP. The HAL will call onBreak() when it
+        // detects the BREAK signal from the master, but we set state here too so the
+        // slave is ready even before the first byte arrives.
         hw.lock();
         changeState_unlocked(State::SWP);
         spdI = 0; rxIdx = 0; relRxIdx = 0;
+        memset(relRxBuf, 0, sizeof(relRxBuf));
         for (int i = 0; i < (int)scores.size(); i++) scores[i] = 0;
         hw.unlock();
         hw.clearAppBuf();
@@ -129,8 +129,10 @@ size_t ALink::cobsDecode(const uint8_t *ptr, size_t length, uint8_t *dst) const 
 void ALink::sendFrame(uint8_t payload) {
     uint8_t frame[4] = {0xAA, 0x55, payload, 0};
     frame[3] = calcCrc(frame, 3);
+    hw.lock();
     hw.tx(frame, 4);
     hw.flushTx();
+    hw.unlock();
 }
 
 void ALink::err() {
@@ -143,8 +145,9 @@ void ALink::err() {
     hw.unlock();
 
     if (trigger) {
+        // sendBreak() delivers onBreak() via the HAL (sync on MockHal,
+        // async via UART_BREAK event on EspHal). Do not call onBreak() directly.
         hw.sendBreak();
-        onBreak(); 
     }
 }
 
@@ -248,7 +251,7 @@ void ALink::onRx(const uint8_t* data, int len) {
                             }
                         }
                     } else {
-                        if (relRxIdx < 255) {
+                        if (relRxIdx < (int)sizeof(relRxBuf)) {
                             relRxBuf[relRxIdx++] = b;
                         } else {
                             // Buffer overflow — discard the corrupt partial frame.
@@ -292,6 +295,7 @@ void ALink::onRx(const uint8_t* data, int len) {
                         } else if (payload == PING_CMD && spdI < (int)cfg.allowedBauds.size()) {
                             hw.lock();
                             scores[spdI]++;
+                            spdI++; // Advance slot: each PING corresponds to one baud step
                             hw.unlock();
                         }
                     }
