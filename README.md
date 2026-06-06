@@ -40,6 +40,8 @@ void flash(int times = 1) {
 
 
 void setup() {
+// mutes AutoLink library logs
+//    esp_log_level_set("AutoLink", ESP_LOG_NONE); 
     pinMode(ledPin, OUTPUT);
     flash(2);    
     Serial.begin(115200);
