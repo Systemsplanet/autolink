@@ -98,7 +98,7 @@ public:
         };
 
         if (uart_driver_install(uart_num, cfg.rxBufferSize, cfg.rxBufferSize, 10, &uart_queue, 0) != ESP_OK) {
-            Log::getLog().info(HAL_TAG, "Failed to install UART driver");
+            Log::getLog().error(HAL_TAG, "Failed to install UART driver");
             cleanup_resources();
             return;
         }
@@ -106,14 +106,14 @@ public:
         uart_set_pin(uart_num, tx_pin, rx_pin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
         
         if (xTaskCreate(uart_event_task, "uart_ev_task", 4096, this, 12, &task_handle) != pdPASS) {
-            Log::getLog().info(HAL_TAG, "Failed to create UART event task");
+            Log::getLog().error(HAL_TAG, "Failed to create UART event task");
             uart_driver_delete(uart_num);
             cleanup_resources();
             return;
         }
         timer_handle = xTimerCreate("alink_tmr", pdMS_TO_TICKS(50), pdFALSE, this, timer_callback);
         if (timer_handle == NULL) {
-            Log::getLog().info(HAL_TAG, "Failed to create FreeRTOS timer");
+            Log::getLog().error(HAL_TAG, "Failed to create FreeRTOS timer");
             running = false;
             return;
         }
