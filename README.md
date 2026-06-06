@@ -155,28 +155,36 @@ Here is an advanced example showing how to utilize the **entire API**, including
 
 ```cpp
 #include "AutoLink.h"
+#include <vector>
+
 using namespace autolink;
 
-std::unique_ptr<AutoLink> link;
+// Allocate globally via standard pointer to match the rest of the library's paradigm
+AutoLink* link = nullptr;
+
+// Custom validation helper function
+bool verifyMyChecksum(const uint8_t* data, int len) {
+    return (data[0] ^ data[1] ^ data[2] ^ data[3]) == data[4];
+}
 
 void setup() {
     Serial.begin(115200);
 
-    // Custom allowed baud rates (it will test these during a sweep)
-    std::vector<uint32_t> myBauds = {9600, 38400, 115200, 1000000};
-    
-    // Advanced Configuration:
-    // 1. UART Number
-    // 2. RX Pin
-    // 3. TX Pin
-    // 4. Is Master? (true)
-    // 5. Allowed Bauds array
-    // 6. Error Threshold (Drop connection after 10 errors)
-    // 7. Sweep Delay (Wait 100ms between baud rate tests)
-    link.reset(new AutoLink(UART_NUM_2, 16, 17, true, myBauds, 10, 100));
+    // 1. Build the configuration object matching the first two examples
+    AutoLinkConfig cfg;
+    cfg.allowedBauds = {9600, 38400, 115200, 1000000}; // Custom allowed baud rates
+    cfg.errThreshold = 10;                              // Drop connection after 10 errors
+    cfg.delayMs      = 100;                             // Wait 100ms between baud rate tests
+    cfg.reliableMode = false;                           // Raw processing with manual checksums
+
+    // 2. Instantiate cleanly using the correct constructor signature
+    link = new AutoLink(UART_NUM_2, 16, 17, true, cfg);
+    link->begin();
 }
 
 void loop() {
+    if (!link) return;
+
     // Monitor the internal state machine
     State currentState = link->getState();
 
@@ -193,16 +201,16 @@ void loop() {
             uint8_t payload[5];
             link->read(payload, 5);
 
-            // Example: Validate your own application-level checksum
+            // Validate your own application-level checksum
             bool isDataValid = verifyMyChecksum(payload, 5);
 
             if (isDataValid) {
                 // IMPORTANT: Acknowledge good data to decay the error counter!
                 link->clearErr();
             } else {
-                // If the data is corrupt (likely due to noise), report it.
-                // If this happens 10 times (our threshold), AutoLink will 
-                // automatically sever the connection and start a new sweep.
+                // If the data is corrupt, report it.
+                // After 10 sequential errors (our threshold), AutoLink automatically
+                // triggers a hardware BREAK and drops back to State::SWP.
                 link->err();
                 Serial.printf("Corrupt packet! Warning count: %d\n", link->getErrCount());
             }
