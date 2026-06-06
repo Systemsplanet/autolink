@@ -40,8 +40,8 @@ void flash(int times = 1) {
 
 
 void setup() {
-// mutes AutoLink library logs
-//    esp_log_level_set("AutoLink", ESP_LOG_NONE); 
+    // Silence AutoLink library logs (optional)
+    // Log::getLog().setLevel(Log::NONE);
     pinMode(ledPin, OUTPUT);
     flash(2);    
     Serial.begin(115200);
@@ -117,15 +117,17 @@ void setup() {
     cfg.streamBufferSize = 2048; 
     flash(3); 
     myLink = new AutoLink(UART_NUM_1, 16, 17, false, cfg);
+    myLink->begin();
 
-    // Wait for the Master to find us and lock on!
-    while(myLink->getState() != State::OK) {
-        flash(4); 
-    }
-    
     if (!myLink->isHealthy()) {
         Serial.println("Failed to initialize UART hardware!");
         while (true) delay(1000);
+    }
+    flash(4);
+
+    // Wait for the Master to find us and lock on!
+    while(myLink->getState() != State::OK) {
+        flash(1); 
     }
     flash(5);  
 }
@@ -246,7 +248,7 @@ void initializeAutoLink() {
         Serial.println("--- Self-Healing: Deleting corrupted AutoLink instance ---");
         delete link; 
         link = nullptr;
-        delay(100); [span_1](start_span)// Give FreeRTOS tasks time to fully dismantle[span_1](end_span)
+        delay(100); // Give FreeRTOS tasks time to fully dismantle
     }
     
     Serial.println("--- Self-Healing: Initializing fresh UART peripheral stack ---");
@@ -309,26 +311,26 @@ void loop() {
         if (availableBytes >= 5) { 
             uint8_t payload[5];
             
-            // Peek at data to make sure it's not a repeating zero/garbage alignment trap
+            // Peek at data to make sure the buffer hasn't been drained by a race
             if (link->peek() == -1) {
-                link->read(); // Drop leading invalid byte if stream gets offset
-                return;
+                return; // Nothing to read after all
             }
 
             link->read(payload, 5);
 
             if (verifyMyChecksum(payload, 5)) {
-                link->clearErr(); [span_2](start_span)// Decay error count[span_2](end_span)
+                link->clearErr(); // Decay error count
                 Serial.println("Valid user data packet decoded.");
             } else {
-                [span_3](start_span)// link->err() will naturally shift internal state to State::SWP if count > 10[span_3](end_span)
+                // link->err() will naturally shift internal state to State::SWP if count > threshold
                 link->err();
                 Serial.printf("Corrupted sequence packet detected. Total Warning Count: %d\n", link->getErrCount());
             }
         }
-        // Garbage Collector: If odd trailing data fragments linger without forming a packet, clean them out
+        // Garbage Collector: If a partial fragment lingers without completing a packet, drain it
         else if (availableBytes > 0 && availableBytes < 5 && (millis() - lastStateChangeMs > 2000)) {
-            link->flush(); // Purge unaligned remainder fragments
+            uint8_t discard[8];
+            while (link->available()) link->read(discard, sizeof(discard)); // Drain stale bytes
         }
     }
     
@@ -366,7 +368,7 @@ void loop() {
 ​  + `LCK` (Lock): The master requests the best baud rate from the slave. Both ends switch to the agreed speed.
 ​  + `OK` (Connected): Raw data or Reliable Mode frames are exchanged.
 
-+ **​Reliable Mode:** When enabled via AutoLinkConfig, raw user data is encapsulated into a 3-byte frame [0xDD, Payload, CRC8]. This prevents noise from mimicking valid payload data during the OK state.
++ **​Reliable Mode:** When enabled via `AutoLinkConfig`, raw user data is encapsulated using COBS framing with a trailing CRC-8 byte. Each frame is delimited by `0x00` sentinel bytes, allowing the receiver to detect and discard corrupt or misaligned frames without desyncing the stream.
 
 + **​CRC Optimization:** We use a precomputed 256-byte Lookup Table (LUT) for O(1) CRC-8 calculations, keeping CPU utilization low even during high-throughput data streams.
 ​
