@@ -1,3 +1,6 @@
+// Host-only unit tests. Arduino/ESP32 builds skip this entire file.
+#ifndef ARDUINO
+
 #include <iostream>
 #include <iomanip>
 #include <chrono>
@@ -332,3 +335,5 @@ int main() {
     std::cout << "\n=== All Tests Completed Successfully ===" << std::endl;
     return 0;
 }
+
+#endif // ARDUINO
