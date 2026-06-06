@@ -151,8 +151,12 @@ void run_test_reliable_mode() {
     assert(rb_arr[0] == 0xAA);
     assert(rb_arr[1] == 0xBB);
     
-    uint8_t bad_cobs[] = {0x00, 0x05, 0x01, 0x02, 0x00}; 
-    slave.onRx(bad_cobs, sizeof(bad_cobs));
+    // Craft a valid COBS frame but with a wrong CRC byte so the receiver calls err().
+    // Payload: {0x01, 0x02}, correct CRC appended, then we flip the CRC.
+    // COBS encode of {0x01, 0x02, bad_crc}: all non-zero -> {0x04, 0x01, 0x02, bad_crc}
+    // Frame on wire: 0x00 0x04 0x01 0x02 0xFF 0x00  (0xFF is the deliberately wrong CRC)
+    uint8_t bad_crc_frame[] = {0x00, 0x04, 0x01, 0x02, 0xFF, 0x00};
+    slave.onRx(bad_crc_frame, sizeof(bad_crc_frame));
     assert(slave.getErrCount() > 0);
     
     std::cout << "PASS" << std::endl;
@@ -189,32 +193,31 @@ void run_test_negotiation_state_machine() {
     cfg.allowedBauds = {9600, 115200};
     ALink master(mHal, true, cfg);
     ALink slave(sHal, false, cfg);
-    
-    master.onBreak();
-    slave.onBreak();
-    
+
+    master.begin();
+    slave.begin();
+
     assert(master.getState() == State::SWP);
     assert(slave.getState() == State::SWP);
     assert(master.getCurrentSpdIndex() == 0);
-    
+
+    // Master sweeps: 2 bauds -> 2 PING ticks then LCK
     master.onTimer();
-    pipe_data(mHal, sHal);
+    pipe_data(mHal, sHal); // slave scores PING@9600
     assert(master.getCurrentSpdIndex() == 1);
-    
+
     master.onTimer();
-    pipe_data(mHal, sHal);
+    pipe_data(mHal, sHal); // slave scores PING@115200, master -> LCK
     assert(master.getCurrentSpdIndex() == 2);
-    
-    master.onTimer();
+
     assert(master.getState() == State::LCK);
-    
-    slave.onTimer(); slave.onTimer(); slave.onTimer();
-    assert(slave.getState() == State::LCK);
-    
+
+    // Master sends REQ_CMD; slave handles it directly from SWP -> OK
     master.onTimer();
     pipe_data(mHal, sHal);
     assert(slave.getState() == State::OK);
-    
+
+    // Slave reply (baud index) arrives at master -> OK
     pipe_data(sHal, mHal);
     assert(master.getState() == State::OK);
     
@@ -287,38 +290,52 @@ void run_test_throughput_and_sizes() {
 
 void run_test_readme_usage() {
     std::cout << "\n=== Test: Real-world README Usage Simulation ===" << std::endl;
-    
-    // --- Setup Phase (Simulating what goes in setup() ) ---
+
+    // --- Setup Phase ---
     AutoLinkConfig cfg;
     cfg.reliableMode = true;
     cfg.streamBufferSize = 2048;
-    
-    // We use the core ALink logic so it compiles cleanly on desktop, 
-    // simulating the exact methods AutoLink uses on hardware.
+    cfg.allowedBauds = {9600, 115200}; // 2 bauds for deterministic negotiation
+
     MockHal txHal, rxHal;
     ALink txNode(txHal, true, cfg);
-    ALink link(rxHal, false, cfg); // "link" represents the receiving ESP32
-    
+    ALink link(rxHal, false, cfg);
+
+    // begin() sets master to SWP (via sendBreak->onBreak and direct onBreak call).
+    // MockHal::sendBreak() calls onBreak() internally, so master hits onBreak twice;
+    // this is idempotent — second call just resets the same SWP state.
+    txNode.begin(); // master: SWP, timer armed
+    link.begin();   // slave:  SWP, no timer
+
+    // Fast-forward negotiation to OK.
+    // With 2 bauds: 2 SWP timer ticks send PINGs (spdI 0->1->2 -> LCK), then
+    // 1 LCK tick sends REQ_CMD. Slave handles REQ from SWP directly -> OK.
+    txNode.onTimer(); pipe_data(txHal, rxHal); // SWP: PING@9600, spdI->1
+    txNode.onTimer(); pipe_data(txHal, rxHal); // SWP: PING@115200, spdI->2 -> LCK
+    txNode.onTimer(); pipe_data(txHal, rxHal); // LCK: REQ_CMD; slave -> OK, replies index
+    pipe_data(rxHal, txHal);                   // master receives baud index -> OK
+
+    assert(txNode.getState() == State::OK);
+    assert(link.getState()   == State::OK);
+
     // --- Execution Phase ---
-    // Simulate remote node sending 3 real bytes
+    // Simulate master sending 3 bytes
     uint8_t payload[] = {0xAB, 0xCD, 0xEF};
     txNode.write(payload, 3);
-    
-    // Simulate hardware UART interrupt dropping data into the RX buffer
+
+    // Simulate UART RX interrupt delivering bytes to slave
     pipe_data(txHal, rxHal);
-    
-    // --- Loop Phase (Simulating what goes in loop() in the README) ---
+
+    // --- Loop Phase ---
     int bytes_processed = 0;
     while (link.available()) {
         int b = link.read();
-        
-        // Simulating Serial.printf("Got: %02X\n", b);
-        std::cout << "Got: " << std::hex << std::uppercase << std::setw(2) << std::setfill('0') << b << std::dec << std::endl;
-        
+        std::cout << "Got: " << std::hex << std::uppercase
+                  << std::setw(2) << std::setfill('0') << b << std::dec << std::endl;
         assert(b == payload[bytes_processed]);
         bytes_processed++;
     }
-    
+
     assert(bytes_processed == 3);
     std::cout << "PASS" << std::endl;
 }
