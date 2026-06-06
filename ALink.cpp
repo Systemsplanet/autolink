@@ -1,15 +1,9 @@
 #include "ALink.h"
+#include "Log.h"
 #include <algorithm>
 #include <string.h>
 
-#ifdef ESP_PLATFORM
-#include "esp_log.h"
-#define ALINK_LOG(fmt, ...) ESP_LOGI("AutoLink", fmt, ##__VA_ARGS__)
-#else
-#include <stdio.h>
-#include <time.h>
-#define ALINK_LOG(fmt, ...) do { time_t _t; time(&_t); struct tm* _tm = localtime(&_t); char _tbuf[10]; if (_tm) strftime(_tbuf, sizeof(_tbuf), "%H:%M:%S", _tm); else snprintf(_tbuf, sizeof(_tbuf), "00:00:00"); printf("[%s] [AutoLink] " fmt "\n", _tbuf, ##__VA_ARGS__); } while(0)
-#endif
+static constexpr const char* ALINK_TAG = "AutoLink";
 
 namespace autolink {
 
@@ -47,12 +41,14 @@ ALink::ALink(ILink& h, bool isMasterNode, const AutoLinkConfig& config)
 {
     scores.resize(cfg.allowedBauds.size(), 0);
     hw.bind(this);
-    ALINK_LOG("Initialized as %s. Reliable Mode: %s", isMaster ? "Master" : "Slave", cfg.reliableMode ? "ON" : "OFF");
+    Log::getLog().info(ALINK_TAG, "Initialized as %s. Reliable Mode: %s",
+                       isMaster ? "Master" : "Slave", cfg.reliableMode ? "ON" : "OFF");
 }
 
 void ALink::changeState_unlocked(State newState) {
     if (state != newState) {
-        ALINK_LOG("State Transition: %s -> %s", StateToStr(state), StateToStr(newState));
+        Log::getLog().info(ALINK_TAG, "State Transition: %s -> %s",
+                           StateToStr(state), StateToStr(newState));
         state = newState;
     }
 }
@@ -119,7 +115,8 @@ void ALink::err() {
     if (state != State::OK) { hw.unlock(); return; }
     errs++;
     bool trigger = (errs > cfg.errThreshold);
-    if (trigger) ALINK_LOG("Error threshold exceeded (%d > %d). Dropping link.", errs, cfg.errThreshold);
+    if (trigger) Log::getLog().info(ALINK_TAG, "Error threshold exceeded (%d > %d). Dropping link.",
+                                    errs, cfg.errThreshold);
     hw.unlock();
 
     if (trigger) {
