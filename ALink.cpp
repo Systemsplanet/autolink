@@ -45,6 +45,29 @@ ALink::ALink(ILink& h, bool isMasterNode, const AutoLinkConfig& config)
                        isMaster ? "Master" : "Slave", cfg.reliableMode ? "ON" : "OFF");
 }
 
+void ALink::begin() {
+    // Master sends a hardware BREAK to kick off baud negotiation from a known state.
+    // Slave arms itself passively — it will receive the BREAK from the master and
+    // call onBreak() via the HAL's UART_BREAK event, but we also set state here
+    // so it is ready even if the first BREAK arrives before the HAL task starts.
+    if (isMaster) {
+        hw.sendBreak();
+        // onBreak() will be called by the HAL when the BREAK echo is detected.
+        // Call directly here too so master state is set in all code paths
+        // (host tests, and devices where sendBreak does not loop back).
+        onBreak();
+    } else {
+        hw.lock();
+        changeState_unlocked(State::SWP);
+        spdI = 0; rxIdx = 0; relRxIdx = 0;
+        for (int i = 0; i < (int)scores.size(); i++) scores[i] = 0;
+        hw.unlock();
+        hw.clearAppBuf();
+        hw.setSpd(cfg.allowedBauds[0]);
+        // Slave does NOT start the timer; only master drives the sweep clock.
+    }
+}
+
 void ALink::changeState_unlocked(State newState) {
     if (state != newState) {
         Log::getLog().info(ALINK_TAG, "State Transition: %s -> %s",
@@ -169,8 +192,12 @@ void ALink::write(const uint8_t* b, int len) {
         frame[0] = 0x00;
         size_t encLen = cobsEncode(unencoded.data(), chunk + 1, frame.data() + 1);
         frame[1 + encLen] = 0x00;
-        
+
+        // Lock spans the full tx so sendFrame() from the timer cannot interleave.
+        hw.lock();
         hw.tx(frame.data(), encLen + 2);
+        hw.unlock();
+
         offset += chunk;
         
         hw.delayMs(1); // Yield execution
@@ -221,8 +248,14 @@ void ALink::onRx(const uint8_t* data, int len) {
                             }
                         }
                     } else {
-                        if (relRxIdx < 255) relRxBuf[relRxIdx++] = b;
-                        else relRxIdx = 0; 
+                        if (relRxIdx < 255) {
+                            relRxBuf[relRxIdx++] = b;
+                        } else {
+                            // Buffer overflow — discard the corrupt partial frame.
+                            // Reset and wait for the next 0x00 frame delimiter.
+                            relRxIdx = 0;
+                            memset(relRxBuf, 0, sizeof(relRxBuf));
+                        }
                     }
                 }
             } else {
@@ -241,10 +274,27 @@ void ALink::onRx(const uint8_t* data, int len) {
                 if (calcCrc(rxBuf, 3) == rxBuf[3]) {
                     uint8_t payload = rxBuf[2];
                     if (cur_state == State::SWP) {
-                        hw.lock();
-                        if (payload == PING_CMD && spdI < (int)cfg.allowedBauds.size()) scores[spdI]++;
-                        hw.unlock();
-                    } 
+                        if (!isMaster && payload == REQ_CMD) {
+                            // Slave: master has finished its sweep and is requesting
+                            // the best baud. Reply immediately with our scored result.
+                            int best = 0;
+                            hw.lock();
+                            for (int j = 1; j < (int)cfg.allowedBauds.size(); j++) {
+                                if (scores[j] >= scores[best]) best = j;
+                            }
+                            hw.unlock();
+                            sendFrame(best);
+                            hw.setSpd(cfg.allowedBauds[best]);
+                            hw.lock();
+                            errs = 0;
+                            changeState_unlocked(State::OK);
+                            hw.unlock();
+                        } else if (payload == PING_CMD && spdI < (int)cfg.allowedBauds.size()) {
+                            hw.lock();
+                            scores[spdI]++;
+                            hw.unlock();
+                        }
+                    }
                     else if (cur_state == State::LCK) {
                         if (isMaster) {
                             if (payload < (int)cfg.allowedBauds.size()) { 
@@ -285,12 +335,14 @@ void ALink::onBreak() {
     spdI = 0;
     rxIdx = 0;
     relRxIdx = 0;
+    memset(relRxBuf, 0, sizeof(relRxBuf));
     for(int i=0; i<(int)scores.size(); i++) scores[i]=0;
     hw.unlock();
-    
+
     hw.clearAppBuf();
     hw.setSpd(cfg.allowedBauds[0]);
-    hw.startTimer(cfg.delayMs); 
+    // Only the master drives the sweep clock.
+    if (isMaster) hw.startTimer(cfg.delayMs);
 }
 
 void ALink::onTimer() {
