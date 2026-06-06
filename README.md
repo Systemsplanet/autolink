@@ -161,7 +161,6 @@ void loop() {
         }
     }
 }
-```
 
 # 🧠 Advanced Usage: The Power User API
 
