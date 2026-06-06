@@ -10,8 +10,9 @@ enum class State { OK, SWP, LCK };
 
 const char* StateToStr(State s);
 
-constexpr uint8_t PING_CMD = 0x55;
-constexpr uint8_t REQ_CMD = 0x11; // Must not collide with preamble bytes 0xAA / 0x55
+// Both command bytes must not collide with preamble bytes 0xAA or 0x55.
+constexpr uint8_t PING_CMD = 0x22;
+constexpr uint8_t REQ_CMD  = 0x11;
 
 struct AutoLinkConfig {
     std::vector<uint32_t> allowedBauds = {9600, 19200, 38400, 57600, 115200};
