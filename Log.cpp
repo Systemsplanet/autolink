@@ -1,49 +1,57 @@
 #include "Log.h"
 #include <stdio.h>
+#include <time.h>
+#include <string.h>
 
 // --------------------------------------------------------------------------
 // Log.cpp  —  autolink internal logger implementation
 //
-// On ESP_PLATFORM: routes through esp_log so output goes to the serial
-// console the same way as the rest of the firmware.
-// On host / unit-test builds: writes to stdout with a timestamp prefix.
-// All output is suppressed when level == NONE; no Stream.print* calls are
-// made at all in that case (the guard is in Log.h before emit() is called).
+// Both platforms format the message as:
+//   [HH:MM:SS] [SEV] [tag] message
+//
+// On ESP_PLATFORM the formatted line is passed to the matching ESP_LOG*
+// macro so it still appears in the IDF monitor stream, with the hhmmss
+// prefix baked in regardless of the monitor's own timestamp setting.
+//
+// On host builds the line goes straight to stdout.
+//
+// NONE suppresses all output.  ERROR level passes only error() calls.
 // --------------------------------------------------------------------------
 
 #ifdef ESP_PLATFORM
 #  include "esp_log.h"
-#else
-#  include <time.h>
-#  include <string.h>
 #endif
 
 namespace autolink {
 
+static void hhmmss(char* buf, size_t n) {
+    time_t t; time(&t);
+    struct tm* tm_ = localtime(&t);
+    if (tm_) strftime(buf, n, "%H:%M:%S", tm_);
+    else      strncpy(buf, "00:00:00", n);
+}
+
 void Log::emit(const char* sev, const char* tag,
                const char* fmt, va_list ap) const
 {
-    // Build the formatted message into a fixed buffer.
     char msg[256];
     vsnprintf(msg, sizeof(msg), fmt, ap);
 
+    char tbuf[10];
+    hhmmss(tbuf, sizeof(tbuf));
+
+    // Full line: [HH:MM:SS] [SEV] [tag] message
+    char line[320];
+    snprintf(line, sizeof(line), "[%s] [%s] [%s] %s", tbuf, sev, tag, msg);
+
 #ifdef ESP_PLATFORM
-    // Delegate to ESP-IDF logging; honours its own level filter too.
-    if (sev[0] == 'D') {
-        ESP_LOGD(tag, "%s", msg);
-    } else {
-        ESP_LOGI(tag, "%s", msg);
+    switch (sev[0]) {
+        case 'E': ESP_LOGE(tag, "%s", line); break;
+        case 'D': ESP_LOGD(tag, "%s", line); break;
+        default:  ESP_LOGI(tag, "%s", line); break;
     }
 #else
-    // Host build — write to stdout with wall-clock prefix.
-    char tbuf[10] = "00:00:00";
-    time_t t; time(&t);
-    struct tm* tm_ = localtime(&t);
-    if (tm_) strftime(tbuf, sizeof(tbuf), "%H:%M:%S", tm_);
-
-    // Gate: only reach here when lvl >= INFO (or DEBUG); NONE never calls
-    // emit() at all — so no Stream.print* equivalent is invoked.
-    printf("[%s] [%s] [%s] %s\n", tbuf, sev, tag, msg);
+    puts(line);
 #endif
 }
 
