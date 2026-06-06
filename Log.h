@@ -1,0 +1,55 @@
+#pragma once
+#include <stdarg.h>
+#include <stddef.h>
+
+// --------------------------------------------------------------------------
+// Log.h  —  autolink internal logger
+//
+// Usage:
+//   Log& LOG = Log::getLog();       // singleton
+//   LOG.setLevel(Log::DEBUG);
+//   LOG.info("tag", "format %d", 42);
+//   LOG.debug("tag", "value %s", "x");
+//   LOG.setLevel(Log::NONE);        // silence everything
+// --------------------------------------------------------------------------
+
+namespace autolink {
+
+class Log {
+public:
+    enum Level { NONE = 0, INFO = 1, DEBUG = 2 };
+
+    static Log& getLog() {
+        static Log inst;
+        return inst;
+    }
+
+    void setLevel(Level lv) { lvl = lv; }
+    Level getLevel() const  { return lvl; }
+
+    void info (const char* tag, const char* fmt, ...) const {
+        if (lvl < INFO) return;
+        va_list ap; va_start(ap, fmt);
+        emit("I", tag, fmt, ap);
+        va_end(ap);
+    }
+
+    void debug(const char* tag, const char* fmt, ...) const {
+        if (lvl < DEBUG) return;
+        va_list ap; va_start(ap, fmt);
+        emit("D", tag, fmt, ap);
+        va_end(ap);
+    }
+
+private:
+    Level lvl = INFO;   // default: INFO on, DEBUG off
+
+    Log() {}
+    Log(const Log&)            = delete;
+    Log& operator=(const Log&) = delete;
+
+    void emit(const char* sev, const char* tag,
+              const char* fmt, va_list ap) const;
+};
+
+} // namespace autolink
