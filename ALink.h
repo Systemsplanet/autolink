@@ -25,12 +25,12 @@ struct AutoLinkConfig {
     std::vector<uint32_t> allowedBauds = {9600, 19200, 38400, 57600, 115200};
     int errThreshold = 5;
     int delayMs = 50;
-    bool reliableMode = false;
+    bool reliableMode = true;          // framed bytes + message API on by default
     size_t rxBufferSize = 1024;
     size_t streamBufferSize = 2048;
-    // Largest message sendMsg()/recvMsg() will accept. Must be <= streamBufferSize
-    // so a whole message can be buffered for reassembly.
-    size_t maxMsg = 8192;
+    // Largest message send()/recv() will accept. The AutoLink facade auto-grows
+    // streamBufferSize to fit this, so you normally set only this (or nothing).
+    size_t maxMsg = 1024;
 };
 
 class ALink {
