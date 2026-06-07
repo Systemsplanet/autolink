@@ -6,415 +6,227 @@
 Ever had a UART connection drop because a motor spun up nearby? Have you ever hardcoded a baud rate, only to realize the other microcontroller reset and desynced? Raw UART is notoriously fragile in real-world applications.
 
 
-**AutoLink** fixes this. It sits on top of the standard ESP-IDF UART drivers and transforms your serial connection into a robust, auto-negotiating, self-healing lifeline. 
+**AutoLink** fixes this. It sits on top of the standard ESP-IDF UART drivers and transforms your serial connection into a robust, auto-negotiating, self-healing lifeline.
 
 
-If the line gets noisy, AutoLink drops down to a safer baud rate. If a wire gets bumped, it automatically sweeps and locks back onto the connection.
-
-It manages all the FreeRTOS background tasks, queues, and hardware interrupts automatically. You just read and write data.
+If the line gets noisy, AutoLink drops the link and re-sweeps. If a wire gets bumped, it automatically sweeps the baud spectrum and locks back onto the connection. It manages all the FreeRTOS background tasks, queues, and hardware interrupts automatically. You just send and receive data.
 
 
-# ⚡ Quick Start
-Drop the AutoLink files into your project, include the header, and let the library do the heavy lifting.
+# ⚡ What's New in 2.1
+
+AutoLink now has a **message API** on top of the byte stream. `sendMsg()` / `recvMsg()` preserve message boundaries for **arbitrary, random-sized payloads** and protect each message end-to-end with a CRC-16 — so a `write` of 4096 random bytes comes out the other side as exactly one 4096-byte message, intact or not at all. Built-in **throughput counters** let you log B/s with a single call, and the auto-baud sweep now actually retunes the slave so it selects the *fastest working* baud instead of always falling back to the slowest.
 
 
-``` cpp
-#include "AutoLink.h"
+# 🏓 Quick Start: Master / Slave Ping-Pong
 
-using namespace autolink;
+The classic use case: two boards bouncing **random-sized messages** back and forth, **logging throughput**, and **self-recovering** from any disruption — with almost no application code. The link's sweep/recovery is automatic; the app just gates on `State::OK`.
 
-// built-in blue LED on pin 2
-const int ledPin = 2;
-
-AutoLink* myLink = nullptr;
-
-void flash(int times = 1) {
-  for (int i = 0; i < times; i++) {
-    digitalWrite(ledPin, HIGH);
-    delay(100);
-    digitalWrite(ledPin, LOW);
-    delay(100);
-  }
-  if (times > 1) delay(2000);
-}
-
-
-void setup() {
-    // Silence AutoLink library logs (optional)
-    // Log::getLog().setLevel(Log::NONE);
-    pinMode(ledPin, OUTPUT);
-    flash(2);
-    Serial.begin(115200);
-
-    AutoLinkConfig cfg;
-    cfg.reliableMode = true;
-    cfg.streamBufferSize = 2048;
-    flash(3);
-    myLink = new AutoLink(UART_NUM_1, 16, 17, true, cfg);
-    myLink->begin(); // Triggers baud sweep; blocks until HAL is healthy
-    flash(4);
-
-    if (!myLink->isHealthy()) {
-        Log::getLog().error("App", "Failed to initialize UART hardware!");
-        while (true) delay(1000);
-    }
-
-    // Wait for negotiation to complete before sending user data.
-    Log::getLog().info("App", "Waiting for link...");
-    while (myLink->getState() != State::OK) delay(10);
-    flash(5);
-    Log::getLog().info("App", "Link established. Starting loop.");
-}
-
-void loop() {
-    // Only transmit when the link is healthy.
-    if (myLink->getState() == State::OK) {
-        const char* str = "Hello Slave!";
-        myLink->write((const uint8_t*)str, strlen(str)); // no null terminator
-        flash(2);
-    }
-
-    while (myLink->available()) {
-        uint8_t buffer[64];
-        int len = myLink->read(buffer, sizeof(buffer));
-        buffer[len] = '\0'; // safe: buffer has room
-        Log::getLog().info("App", "Received %d bytes: %s", len, (char*)buffer);
-        flash(1);
-    }
-
-    delay(500); // throttle ping rate
-}
-```
-
-
-
-
-# 🛠️ Simple Usage: Master & Slave
-AutoLink requires one device to act as the **Master** (initiates the baud negotiation) and one to act as the **Slave** (listens and responds to the sweep).
-
-## The Slave Node
-
-Setting up a listening device is just as easy as setting up the master. Just pass **false** for the master flag!
-
+## The Master
 
 ```cpp
 #include "AutoLink.h"
-
 using namespace autolink;
 
-// built-in blue LED on pin 2
-const int ledPin = 2;
+AutoLink* link = nullptr;
+uint8_t   buf[4096];
+uint32_t  tRound = 0, tStat = 0;
 
-AutoLink* myLink = nullptr;
-
-void flash(int times = 1) {
-  for (int i = 0; i < times; i++) {
-    digitalWrite(ledPin, HIGH);
-    delay(100);
-    digitalWrite(ledPin, LOW);
-    delay(100);
-  }
-  if (times > 1) delay(2000);
-}
+void fill(uint8_t* b, int n) { for (int i = 0; i < n; i++) b[i] = random(256); }
 
 void setup() {
-    pinMode(ledPin, OUTPUT);
-    flash(2);
     Serial.begin(115200);
+    randomSeed(esp_random());
 
     AutoLinkConfig cfg;
-    cfg.reliableMode = true;
-    cfg.streamBufferSize = 2048;
-    flash(3);
-    myLink = new AutoLink(UART_NUM_1, 16, 17, false, cfg);
-    myLink->begin(); // Arms slave in SWP — waits for master's PING sweep
+    cfg.reliableMode    = true;   // required for the message API
+    cfg.streamBufferSize = 8192;  // must exceed maxMsg
+    cfg.maxMsg          = 4096;
 
-    if (!myLink->isHealthy()) {
-        Log::getLog().error("App", "Failed to initialize UART hardware!");
-        while (true) delay(1000);
-    }
-    flash(4);
-
-    // Wait for the Master to find us and lock on.
-    // The master drives negotiation; we just wait here.
-    Log::getLog().info("App", "Waiting for master...");
-    while (myLink->getState() != State::OK) {
-        flash(1);
-        delay(200);
-    }
-    flash(5);
-    Log::getLog().info("App", "Link established. Starting loop.");
+    link = new AutoLink(UART_NUM_1, 16, 17, true, cfg); // true = master
+    link->begin();                                      // kicks off the baud sweep
 }
 
 void loop() {
-    if (myLink->available()) {
-        uint8_t buffer[64];
-        int len = myLink->read(buffer, sizeof(buffer));
-        buffer[len] = '\0'; // safe: buffer has room
-        Log::getLog().info("App", "Received %d bytes: %s", len, (char*)buffer);
-        flash(1);
+    if (link->getState() != State::OK) { delay(50); return; } // sweep self-heals
 
-        // Echo the data back — only when link is confirmed OK.
-        if (myLink->getState() == State::OK) {
-            myLink->write(buffer, len);
-            flash(2);
-        }
+    // Fire one random-sized message per round.
+    if (millis() - tRound > 20) {
+        int n = random(1, 4096);
+        fill(buf, n);
+        if (link->sendMsg(buf, n)) tRound = millis();       // false => link busy/down, retry next loop
+    }
+
+    // Drain any echoes the slave bounced back.
+    int n;
+    while ((n = link->recvMsg(buf, sizeof(buf))) > 0) { /* got a full message back */ }
+
+    // Log throughput once a second.
+    if (millis() - tStat > 1000) {
+        uint64_t tx, rx; link->getStats(tx, rx); link->resetStats();
+        Log::getLog().info("App", "TX %lu B/s   RX %lu B/s",
+                           (unsigned long)tx, (unsigned long)rx);
+        tStat = millis();
     }
 }
+```
 
-# 🧠 Advanced Usage: The Power User API
+## The Slave
 
-AutoLink isn't just a wrapper; it's a dynamic state machine. For mission-critical applications, you want fine-grained control over exactly how the system reacts to noise, which baud rates it's allowed to use, and how aggressively it can retry.
-
-
-Here is an advanced example showing how to utilize the **entire API**, including custom configurations and manual error tracking.
-
+The slave just echoes back whatever complete messages arrive. Pass **false** for the master flag.
 
 ```cpp
 #include "AutoLink.h"
-#include <vector>
-
 using namespace autolink;
 
-// Allocate globally via standard pointer to match the rest of the library's paradigm
 AutoLink* link = nullptr;
-
-// Custom validation helper function
-bool verifyMyChecksum(const uint8_t* data, int len) {
-    return (data[0] ^ data[1] ^ data[2] ^ data[3]) == data[4];
-}
+uint8_t   buf[4096];
+uint32_t  tStat = 0;
 
 void setup() {
     Serial.begin(115200);
 
-    // 1. Build the configuration object matching the first two examples
     AutoLinkConfig cfg;
-    cfg.allowedBauds = {9600, 38400, 115200, 1000000}; // Custom allowed baud rates
-    cfg.errThreshold = 10;                              // Drop connection after 10 errors
-    cfg.delayMs      = 100;                             // Wait 100ms between baud rate tests
-    cfg.reliableMode = false;                           // Raw processing with manual checksums
+    cfg.reliableMode    = true;
+    cfg.streamBufferSize = 8192;
+    cfg.maxMsg          = 4096;
 
-    // 2. Instantiate cleanly using the correct constructor signature
-    link = new AutoLink(UART_NUM_2, 16, 17, true, cfg);
-    link->begin();
+    link = new AutoLink(UART_NUM_1, 16, 17, false, cfg); // false = slave
+    link->begin();                                       // arms in SWP, waits for master
 }
 
 void loop() {
-    if (!link) return;
+    if (link->getState() != State::OK) { delay(50); return; }
 
-    // Monitor the internal state machine
-    State currentState = link->getState();
-
-    if (currentState == State::SWP) {
-        Log::getLog().info("App", "Connection lost. Sweeping for device...");
-    } 
-    else if (currentState == State::LCK) {
-        Log::getLog().info("App", "Device found! Locking baud rate...");
-    } 
-    else if (currentState == State::OK) {
-        
-        // We are connected. Let's process some incoming data.
-        if (link->available() >= 5) { 
-            uint8_t payload[5];
-            link->read(payload, 5);
-
-            // Validate your own application-level checksum
-            bool isDataValid = verifyMyChecksum(payload, 5);
-
-            if (isDataValid) {
-                // IMPORTANT: Acknowledge good data to decay the error counter!
-                link->clearErr();
-            } else {
-                // If the data is corrupt, report it.
-                // After 10 sequential errors (our threshold), AutoLink automatically
-                // triggers a hardware BREAK and drops back to State::SWP.
-                link->err();
-                Log::getLog().error("App", "Corrupt packet! Warning count: %d", link->getErrCount());
-            }
-        }
+    int n;
+    while ((n = link->recvMsg(buf, sizeof(buf))) > 0) {
+        link->sendMsg(buf, n); // echo it straight back
     }
-    
-    delay(10);
-}
 
+    if (millis() - tStat > 1000) {
+        uint64_t tx, rx; link->getStats(tx, rx); link->resetStats();
+        Log::getLog().info("App", "TX %lu B/s   RX %lu B/s",
+                           (unsigned long)tx, (unsigned long)rx);
+        tStat = millis();
+    }
+}
 ```
 
-## Robust recovery
-``` cpp
-#include "AutoLink.h"
+That's the whole thing. No manual reconnect logic, no checksums, no framing in your sketch. If the cable is yanked mid-stream, both ends fall back to `SWP`, re-negotiate, and the loops resume on their own the moment `getState()` returns `OK` again. A `recvMsg()` of `-1` means a corrupt/desynced message was rejected and the buffer flushed — you can ignore it and keep looping.
 
-using namespace autolink;
 
-AutoLink* link = nullptr;
-AutoLinkConfig globalCfg; // Keep config global so we can recreate the object identically
+# 📨 The Message API
 
-// Track timing for structural self-healing
-unsigned long lastStateChangeMs = 0;
-State lastKnownState = State::OK;
-const unsigned long SWEEP_TIMEOUT_MS = 15000; // Force hard reset if stuck sweeping for 15 seconds
+| Call | Returns | Notes |
+|------|---------|-------|
+| `bool sendMsg(const uint8_t* b, int len)` | `true` if the whole message was queued | `len` must be `1..maxMsg`. Returns `false` if the link isn't `OK`. |
+| `int recvMsg(uint8_t* b, int max)` | `>0` message length, `0` nothing ready, `-1` rejected/dropped | `max` should be `>= maxMsg`. On `-1` the bad message is drained and an error is counted. |
+| `void getStats(uint64_t& tx, uint64_t& rx)` | — | App-stream bytes since the last reset. |
+| `void resetStats()` | — | Zero the counters (call after each sample to get B/s). |
 
-bool verifyMyChecksum(const uint8_t* data, int len) {
-    return (data[0] ^ data[1] ^ data[2] ^ data[3]) == data[4];
+Each message goes out as a 6-byte header (`len` + `crc16`) followed by the payload, chunked into ≤250-byte COBS frames, each guarded by a per-frame CRC-8. The receiver only hands you a message once the **whole** payload arrives and its CRC-16 verifies — so you never see a half-message or a corrupted one.
+
+> **Sizing rule:** `maxMsg <= streamBufferSize`. A whole message is buffered for reassembly, so the stream buffer must be able to hold the largest message you send. AutoLink logs an error at construction if you get this backwards.
+
+
+# 🔌 Raw Byte Streaming
+
+If you don't need message boundaries, AutoLink is still a drop-in `Stream`. Leave `reliableMode` off for an unframed pass-through, or on for COBS+CRC-8 framed bytes:
+
+```cpp
+const char* str = "Hello Slave!";
+link->write((const uint8_t*)str, strlen(str));
+
+while (link->available()) {
+    uint8_t b[64];
+    int len = link->read(b, sizeof(b));
+    Log::getLog().info("App", "Got %d bytes", len);
 }
-
-// Dedicated hardware instantiation routine for clean reboots
-void initializeAutoLink() {
-    if (link != nullptr) {
-        Log::getLog().info("App", "Self-Healing: Deleting corrupted AutoLink instance");
-        delete link; 
-        link = nullptr;
-        delay(100); // Give FreeRTOS tasks time to fully dismantle
-    }
-    
-    Log::getLog().info("App", "Self-Healing: Initializing fresh UART peripheral stack");
-    link = new AutoLink(UART_NUM_2, 16, 17, true, globalCfg);
-    link->begin();
-    
-    lastKnownState = State::OK;
-    lastStateChangeMs = millis();
-}
-
-void setup() {
-    Serial.begin(115200);
-
-    // Populate global configurations
-    globalCfg.allowedBauds = {9600, 38400, 115200}; 
-    globalCfg.errThreshold = 10;                     
-    globalCfg.delayMs      = 100;                    
-    globalCfg.reliableMode = false;                  
-
-    initializeAutoLink();
-    Log::getLog().info("App", "System initialized successfully.");
-}
-
-void loop() {
-    // 1. Critical Safe Check: If instantiation failed, retry immediately
-    if (!link) {
-        initializeAutoLink();
-        return;
-    }
-
-    State currentState = link->getState();
-
-    // 2. Monitor State Machine Health Transitions
-    if (currentState != lastKnownState) {
-        lastKnownState = currentState;
-        lastStateChangeMs = millis(); // Reset timeout watchdog timer on any state transition
-    }
-
-    // 3. The Watchdog Recovery Engine
-    // If stuck in Sweep mode for too long, the physical bus or transceiver is locked up.
-    if (currentState == State::SWP && (millis() - lastStateChangeMs > SWEEP_TIMEOUT_MS)) {
-        Log::getLog().error("App", "Sweep timeout exceeded! Hardware/Line deadlock suspected.");
-        initializeAutoLink(); // Destroy and recreate the entire peripheral stack
-        return;
-    }
-
-    // 4. State Machine Execution
-    if (currentState == State::SWP) {
-        Log::getLog().info("App", "Connection dropped or noisy. Sweeping available spectrum...");
-        delay(500); // Reduce monitoring spam on terminal
-    } 
-    else if (currentState == State::LCK) {
-        Log::getLog().info("App", "Handshake target identified. Locking baud rate parameters...");
-    } 
-    else if (currentState == State::OK) {
-        
-        // Actively process synchronized incoming streams
-        int availableBytes = link->available();
-        
-        if (availableBytes >= 5) { 
-            uint8_t payload[5];
-            
-            // Peek at data to make sure the buffer hasn't been drained by a race
-            if (link->peek() == -1) {
-                return; // Nothing to read after all
-            }
-
-            link->read(payload, 5);
-
-            if (verifyMyChecksum(payload, 5)) {
-                link->clearErr(); // Decay error count
-                Log::getLog().info("App", "Valid user data packet decoded.");
-            } else {
-                // link->err() will naturally shift internal state to State::SWP if count > threshold
-                link->err();
-                Log::getLog().error("App", "Corrupted packet detected. Warning count: %d", link->getErrCount());
-            }
-        }
-        // Garbage Collector: If a partial fragment lingers without completing a packet, drain it
-        else if (availableBytes > 0 && availableBytes < 5 && (millis() - lastStateChangeMs > 2000)) {
-            uint8_t discard[8];
-            while (link->available()) link->read(discard, sizeof(discard)); // Drain stale bytes
-        }
-    }
-    
-    delay(10); // FreeRTOS CPU yield
-}
-
 ```
+
+`write()` returns the number of bytes actually accepted (0 if the link isn't `OK`), so you always know whether your data made it onto the wire.
+
+
+# 🧠 Advanced: Manual Error Control
+
+For raw-mode applications doing their own validation, you can drive the error counter yourself. Exceeding `errThreshold` automatically issues a hardware BREAK and drops the link back to `SWP`.
+
+```cpp
+if (link->getState() == State::OK && link->available() >= 5) {
+    uint8_t p[5];
+    link->read(p, 5);
+    if ((p[0]^p[1]^p[2]^p[3]) == p[4]) link->clearErr();      // good data decays the counter
+    else {
+        link->err();                                          // bad data; after errThreshold -> SWP
+        Log::getLog().error("App", "Corrupt! count=%d", link->getErrCount());
+    }
+}
+```
+
 
 # 📦 Features Under the Hood
 
 
-+ **100% Non-Blocking:** AutoLink relies on a dedicated FreeRTOS task, hardware interrupts, and `StreamBuffers`. Your `loop()` will never get blocked by a full TX buffer or a stalled RX line.
++ **Working Auto-Baud:** During the sweep the master steps through each allowed baud sending `PING`; the slave **retunes in lockstep**, scoring every baud it can actually decode, then both lock onto the *fastest* one that worked. (Pre-2.1 the slave never retuned and always degraded to the slowest baud — fixed in 2.1.)
 
++ **Boundary-Preserving Messages:** `sendMsg`/`recvMsg` frame arbitrary-length payloads with a length header and an end-to-end CRC-16, independent of the per-frame CRC-8.
 
-+ **Smart Framing:** When in a negotiation state (`SWP` or `LCK`), AutoLink wraps commands in a multi-byte, CRC8-validated frame. Electrical noise physically cannot trigger a false-positive state change. Only the Master can initiate state transitions.
++ **Built-in Throughput Metering:** TX/RX byte counters with `getStats()` / `resetStats()` — log B/s without instrumenting your app.
 
-+ **Namespace Isolation:** Everything lives cleanly inside `namespace autolink`, preventing frustrating naming collisions with standard Arduino or ESP-IDF libraries.
++ **Non-Blocking Core:** A dedicated FreeRTOS task, hardware interrupts, and `StreamBuffers` keep `loop()` responsive. The reliable writer no longer inserts artificial per-chunk delays, so throughput tracks the actual baud rate.
 
++ **Smart Framing:** In `SWP`/`LCK`, commands are wrapped in CRC-8-validated frames behind a `0xAA 0x55` preamble; electrical noise cannot trigger a false state change. Only the master initiates transitions.
 
-+ **Test-Driven Core:** The core state machine (`ALink`) is completely decoupled from the ESP32 hardware via Dependency Injection. Run `make test` to compile and verify the mathematical logic native to your build machine.
++ **Namespace Isolation:** Everything lives in `namespace autolink`, avoiding collisions with Arduino or ESP-IDF.
 
-
++ **Test-Driven Core:** `ALink` is fully decoupled from hardware via the `ILink` interface. Run `make test` to compile and verify the protocol, negotiation, message round-tripping, and CRC handling natively on your build machine.
 
 
 # 🛠️ Developer Notes
-​If you are contributing to or maintaining this library, keep the following architectural decisions in mind:
 
-+ **​Hardware Abstraction (Dependency Injection):** The core protocol logic (ALink.cpp) is entirely decoupled from the ESP32 hardware (EspHal.cpp) via the ILink interface. Do not put ESP-IDF or FreeRTOS headers inside ALink.cpp.
++ **Hardware Abstraction (Dependency Injection):** Core logic (`ALink.cpp`) is decoupled from the ESP32 (`EspHal.h`) via the `ILink` interface. Keep ESP-IDF / FreeRTOS headers out of `ALink.cpp`.
 
++ **Native PC Testing:** Because of that abstraction, the entire state machine and message layer run on your computer. `make test` builds and runs the mock-hardware tests in `test.cpp`.
 
-+ ​**Native PC Testing:** Because of the abstraction mentioned above, the entire state machine and negotiation logic can be tested locally on your computer. Run make test to compile and execute the mock hardware tests in test.cpp.
-  
-+ **​State Machine Mechanics:**
-  + ​`SWP` (Sweep): The master iterates through the allowed baud rates sending PING. The slave listens and calculates an RSSI-like score based on successful reads.
-​  + `LCK` (Lock): The master requests the best baud rate from the slave. Both ends switch to the agreed speed.
-​  + `OK` (Connected): Raw data or Reliable Mode frames are exchanged.
++ **State Machine:**
+  + `SWP` (Sweep): master iterates allowed bauds sending `PING`; the slave retunes per ping and scores each baud it decodes.
+  + `LCK` (Lock): master requests the best baud; the slave replies with the fastest scored index and both switch.
+  + `OK` (Connected): raw bytes or reliable frames / messages are exchanged.
 
-+ **​Reliable Mode:** When enabled via `AutoLinkConfig`, raw user data is encapsulated using COBS framing with a trailing CRC-8 byte. Each frame is delimited by `0x00` sentinel bytes, allowing the receiver to detect and discard corrupt or misaligned frames without desyncing the stream.
++ **Reliable Mode:** User data is encapsulated in COBS frames (≤250 B payload each) with a trailing CRC-8, delimited by `0x00` sentinels, so the receiver can discard a corrupt frame without losing stream sync. Note that "reliable" means *detected-and-dropped*, not retransmitted — for guaranteed delivery, layer an ack/retry on top (the ping-pong echo pattern above is one).
 
-+ **​CRC Optimization:** We use a precomputed 256-byte Lookup Table (LUT) for O(1) CRC-8 calculations, keeping CPU utilization low even during high-throughput data streams.
-​
++ **CRC:** A precomputed 256-byte LUT gives O(1) CRC-8 for frames; messages add a CRC-16/CCITT computed over the full payload.
 
++ **Buffer Sizing:** `MAX_CHUNK` (250) drives the static frame buffers via `static_assert`. Keep `maxMsg <= streamBufferSize`.
 
 
 # 📅 Revision History
 
-**​v2.0.0 (Production-Ready)**
+**v2.1.1**
 
-+ **​API Enhancement:** Inherited AutoLink from the standard Arduino Stream class, unlocking native compatibility with standard functions like .println(), .parseInt(), and other third-party libraries.
-+ **​Reliable Mode Added:** Added an opt-in cfg.reliableMode that wraps standard user data in CRC-8 validated frames, completely shielding the application layer from corrupted bytes.
-​+ **Performance Optimization:** Replaced bitwise nested loops in the CRC calculator with an O(1) 256-byte Lookup Table (LUT).
-+ **​Concurrency Fixes:**
-  + ​Fixed a teardown trap in the FreeRTOS uart_event_task by replacing portMAX_DELAY with pdMS_TO_TICKS(100), ensuring clean thread exits during destruction.
-  + Held the mutex lock throughout the entirety of hardware TX sequences in ALink::write() to prevent interleaved transmissions from multiple tasks.
-+ ​**Memory Safety:** Transitioned resource allocations to std::make_unique and patched memory leaks occurring during failed UART hardware initializations.
++ **Auto-Baud Fix (critical):** the slave now retunes its baud in lockstep with the master during the sweep, so scoring works on real hardware and the link selects the fastest working baud instead of always collapsing to `allowedBauds[0]`.
++ **Message API:** added `sendMsg()` / `recvMsg()` — boundary-preserving, length-framed, CRC-16-protected transfer of arbitrary random-sized payloads.
++ **Throughput Counters:** `getStats()` / `resetStats()` expose TX/RX byte totals for one-call B/s logging.
++ **Write Feedback:** `write()` now returns the bytes actually accepted (0 when the link is down) instead of silently claiming success.
++ **Throughput Ceiling Removed:** dropped the artificial 1 ms per-chunk delay in the reliable writer; throughput now follows the real baud rate.
++ **Memory & Safety:** replaced per-chunk heap allocations in the writer with static scratch buffers; added `static_assert` coupling between `MAX_CHUNK` and the frame buffers; construction warns if `maxMsg > streamBufferSize`.
 
-+ **​Developer Ergonomics:** Consolidated long constructor parameter signatures into a clean AutoLinkConfig struct.
+**v2.0.0 (Production-Ready)**
 
-**​v1.0.0 (Initial Prototype)**
++ Inherited `AutoLink` from the Arduino `Stream` class for native `.println()` / `.parseInt()` compatibility.
++ Added opt-in `reliableMode` (COBS + CRC-8 framing).
++ Replaced bitwise CRC loops with an O(1) 256-byte LUT.
++ Concurrency fixes: bounded `uart_event_task` waits for clean teardown; held the TX mutex across full transmissions.
++ Memory safety: `std::make_unique` allocations and patched init-failure leaks.
++ Consolidated the constructor into an `AutoLinkConfig` struct.
 
-+ ​Initial Master/Slave auto-baud negotiation logic.
+**v1.0.0 (Initial Prototype)**
 
-+ ​Basic FreeRTOS stream buffer and hardware interrupt integration.
-
-
++ Initial master/slave auto-baud negotiation.
++ Basic FreeRTOS stream buffer and hardware interrupt integration.
 
 
 # 📜 License
 
-MIT License. 
+MIT License.
 
 Build something awesome.
