@@ -24,6 +24,7 @@ class AutoLink : public Stream {
 private:
     std::unique_ptr<EspHal> hal;
     std::unique_ptr<ALink> link;
+    int ledPin;
 
 public:
     // Construct on the stack as a global — no new/pointer needed. Everything past
@@ -35,11 +36,27 @@ public:
         size_t need = cfg.maxMsg + MSG_HDR + 64;
         if (cfg.streamBufferSize < need) cfg.streamBufferSize = need;
 
+        ledPin = cfg.ledPin;
         hal = std::make_unique<EspHal>(u_num, rx_pin, tx_pin, cfg);
         link = std::make_unique<ALink>(*hal, isMasterNode, cfg);
     }
 
-    void begin() { hal->begin(); }
+    void begin() {
+        pinMode(ledPin, OUTPUT);
+        digitalWrite(ledPin, LOW);
+        hal->begin();
+    }
+
+    // Blink the status LED n times (blocking, active-high). Handy for marking a
+    // bring-up phase and for a one-blink-per-packet heartbeat. Tune the on/off
+    // milliseconds if you want shorter/longer flashes.
+    void blink(int n, int onMs = 60, int offMs = 60) {
+        for (int i = 0; i < n; i++) {
+            digitalWrite(ledPin, HIGH); delay(onMs);
+            digitalWrite(ledPin, LOW);
+            if (i < n - 1) delay(offMs);
+        }
+    }
 
     // ======================= Simple API (recommended) =======================
     // Boundary-preserving, CRC-checked, self-healing. Just send and recv every
