@@ -7,6 +7,9 @@ static constexpr const char* ALINK_TAG = "AutoLink";
 
 namespace autolink {
 
+// Scratch buffers must hold one max chunk after COBS + CRC8 + delimiters.
+static_assert(MAX_CHUNK + 5 <= 256, "MAX_CHUNK too large for 256-byte frame buffers");
+
 static const uint8_t crc8_lut[256] = {
     0x00, 0x07, 0x0E, 0x09, 0x1C, 0x1B, 0x12, 0x15, 0x38, 0x3F, 0x36, 0x31, 0x24, 0x23, 0x2A, 0x2D,
     0x70, 0x77, 0x7E, 0x79, 0x6C, 0x6B, 0x62, 0x65, 0x48, 0x4F, 0x46, 0x41, 0x54, 0x53, 0x5A, 0x5D,
@@ -37,34 +40,37 @@ const char* StateToStr(State s) {
 
 ALink::ALink(ILink& h, bool isMasterNode, const AutoLinkConfig& config)
     : hw(h), isMaster(isMasterNode), cfg(config),
-      state(State::OK), errs(0), spdI(0), rxIdx(0), relRxIdx(0)
+      state(State::OK), errs(0), spdI(0), rxIdx(0), relRxIdx(0),
+      rxMsgLen(-1), rxMsgCrc(0), txBytes(0), rxBytes(0)
 {
     scores.resize(cfg.allowedBauds.size(), 0);
     hw.bind(this);
     Log::getLog().info(ALINK_TAG, "Initialized as %s. Reliable Mode: %s",
                        isMaster ? "Master" : "Slave", cfg.reliableMode ? "ON" : "OFF");
+    if (cfg.maxMsg > cfg.streamBufferSize) {
+        Log::getLog().error(ALINK_TAG,
+            "maxMsg (%u) > streamBufferSize (%u): large messages cannot be reassembled",
+            (unsigned)cfg.maxMsg, (unsigned)cfg.streamBufferSize);
+    }
 }
 
 void ALink::begin() {
     if (isMaster) {
-        // sendBreak() delivers onBreak() synchronously on MockHal (via bind) and
-        // asynchronously via the UART_BREAK event on EspHal. Either way we must not
-        // call onBreak() a second time here — that would reset spdI after the first
-        // timer tick has already fired.
+        // sendBreak() delivers onBreak() (sync on MockHal, async via UART_BREAK on
+        // EspHal). Do not call onBreak() here too — it would reset spdI after the
+        // first timer tick.
         hw.sendBreak();
     } else {
-        // Slave arms itself passively in SWP. The HAL will call onBreak() when it
-        // detects the BREAK signal from the master, but we set state here too so the
-        // slave is ready even before the first byte arrives.
         hw.lock();
         changeState_unlocked(State::SWP);
         spdI = 0; rxIdx = 0; relRxIdx = 0;
+        rxMsgLen = -1;
         memset(relRxBuf, 0, sizeof(relRxBuf));
         for (int i = 0; i < (int)scores.size(); i++) scores[i] = 0;
         hw.unlock();
         hw.clearAppBuf();
         hw.setSpd(cfg.allowedBauds[0]);
-        // Slave does NOT start the timer; only master drives the sweep clock.
+        // Slave does not run the sweep clock; the master drives it.
     }
 }
 
@@ -76,33 +82,44 @@ void ALink::changeState_unlocked(State newState) {
     }
 }
 
+// Pick the fastest baud (highest index) the slave actually decoded a PING on.
+// Falls back to index 0 if nothing scored. Caller must hold the lock.
+int ALink::bestSpd_unlocked() const {
+    int best = 0;
+    for (int j = 1; j < (int)cfg.allowedBauds.size(); j++) {
+        if (scores[j] > 0) best = j;
+    }
+    return best;
+}
+
 uint8_t ALink::calcCrc(const uint8_t* data, int len) const {
     uint8_t crc = 0;
+    for (int i = 0; i < len; i++) crc = crc8_lut[crc ^ data[i]];
+    return crc;
+}
+
+// CRC-16/CCITT-FALSE: end-to-end integrity for whole messages, independent of
+// the per-frame CRC8. Catches errors a single 8-bit frame check could miss.
+uint16_t ALink::calcCrc16(const uint8_t* data, int len) const {
+    uint16_t crc = 0xFFFF;
     for (int i = 0; i < len; i++) {
-        crc = crc8_lut[crc ^ data[i]];
+        crc ^= (uint16_t)data[i] << 8;
+        for (int b = 0; b < 8; b++)
+            crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021) : (uint16_t)(crc << 1);
     }
     return crc;
 }
 
 size_t ALink::cobsEncode(const uint8_t *ptr, size_t length, uint8_t *dst) const {
-    size_t read_index = 0;
-    size_t write_index = 1;
-    size_t code_index = 0;
+    size_t read_index = 0, write_index = 1, code_index = 0;
     uint8_t code = 1;
     while(read_index < length) {
         if(ptr[read_index] == 0) {
-            dst[code_index] = code;
-            code = 1;
-            code_index = write_index++;
-            read_index++;
+            dst[code_index] = code; code = 1;
+            code_index = write_index++; read_index++;
         } else {
-            dst[write_index++] = ptr[read_index++];
-            code++;
-            if(code == 0xFF) {
-                dst[code_index] = code;
-                code = 1;
-                code_index = write_index++;
-            }
+            dst[write_index++] = ptr[read_index++]; code++;
+            if(code == 0xFF) { dst[code_index] = code; code = 1; code_index = write_index++; }
         }
     }
     dst[code_index] = code;
@@ -110,17 +127,13 @@ size_t ALink::cobsEncode(const uint8_t *ptr, size_t length, uint8_t *dst) const 
 }
 
 size_t ALink::cobsDecode(const uint8_t *ptr, size_t length, uint8_t *dst) const {
-    size_t read_index = 0;
-    size_t write_index = 0;
-    uint8_t code;
-    uint8_t i;
+    size_t read_index = 0, write_index = 0;
+    uint8_t code, i;
     while(read_index < length) {
         code = ptr[read_index];
         if(read_index + code > length && code != 1) return 0;
         read_index++;
-        for(i = 1; i < code; i++) {
-            dst[write_index++] = ptr[read_index++];
-        }
+        for(i = 1; i < code; i++) dst[write_index++] = ptr[read_index++];
         if(code < 0xFF && read_index < length) dst[write_index++] = 0;
     }
     return write_index;
@@ -143,12 +156,7 @@ void ALink::err() {
     if (trigger) Log::getLog().info(ALINK_TAG, "Error threshold exceeded (%d > %d). Dropping link.",
                                     errs, cfg.errThreshold);
     hw.unlock();
-
-    if (trigger) {
-        // sendBreak() delivers onBreak() via the HAL (sync on MockHal,
-        // async via UART_BREAK event on EspHal). Do not call onBreak() directly.
-        hw.sendBreak();
-    }
+    if (trigger) hw.sendBreak();
 }
 
 void ALink::clearErr() {
@@ -160,131 +168,179 @@ void ALink::clearErr() {
 int ALink::available() const { return hw.appBufAvailable(); }
 int ALink::peek() { return hw.peekAppBuf(); }
 
-// FIXED: Implemented the missing no-argument read() method
 int ALink::read() {
-    uint8_t single_byte;
-    if (hw.popAppBuf(&single_byte, 1) == 1) {
-        return single_byte;
+    uint8_t b;
+    return hw.popAppBuf(&b, 1) == 1 ? b : -1;
+}
+
+int ALink::read(uint8_t* b, int max_len) { return hw.popAppBuf(b, max_len); }
+
+int ALink::readStream(uint8_t* b, int n) {
+    int got = 0;
+    while (got < n) {
+        int r = hw.popAppBuf(b + got, n - got);
+        if (r <= 0) break;
+        got += r;
     }
-    return -1;
+    return got;
 }
 
-int ALink::read(uint8_t* b, int max_len) {
-    return hw.popAppBuf(b, max_len);
-}
+int ALink::write(const uint8_t* b, int len) {
+    if (len <= 0) return 0;
 
-void ALink::write(const uint8_t* b, int len) {
     if (!cfg.reliableMode) {
-        hw.lock(); State s = state; hw.unlock();
-        if (s == State::OK) hw.tx(b, len); 
-        return;
+        hw.lock();
+        State s = state;
+        if (s == State::OK) hw.tx(b, len);
+        hw.unlock();
+        if (s != State::OK) return 0;
+        hw.lock(); txBytes += len; hw.unlock();
+        return len;
     }
-    
+
     int offset = 0;
+    uint8_t unenc[MAX_CHUNK + 1];
+    uint8_t frame[MAX_CHUNK + 5];
     while(offset < len) {
         hw.lock(); State s = state; hw.unlock();
         if (s != State::OK) break;
 
-        int chunk = std::min(len - offset, 250);
-        std::vector<uint8_t> unencoded(chunk + 1);
-        std::vector<uint8_t> frame(chunk + 6);
-        
-        memcpy(unencoded.data(), b + offset, chunk);
-        unencoded[chunk] = calcCrc(unencoded.data(), chunk);
-        
+        int chunk = std::min(len - offset, MAX_CHUNK);
+        memcpy(unenc, b + offset, chunk);
+        unenc[chunk] = calcCrc(unenc, chunk);
+
         frame[0] = 0x00;
-        size_t encLen = cobsEncode(unencoded.data(), chunk + 1, frame.data() + 1);
+        size_t encLen = cobsEncode(unenc, chunk + 1, frame + 1);
         frame[1 + encLen] = 0x00;
 
-        // Lock spans the full tx so sendFrame() from the timer cannot interleave.
+        // Hold the lock across the whole frame so a concurrent writer cannot
+        // interleave bytes. Each frame is <= 255 B, well under the TX FIFO.
         hw.lock();
-        hw.tx(frame.data(), encLen + 2);
+        hw.tx(frame, encLen + 2);
         hw.unlock();
 
         offset += chunk;
-        
-        hw.delayMs(1); // Yield execution
     }
+    hw.lock(); txBytes += offset; hw.unlock();
+    return offset;
 }
 
-void ALink::flush() {
-    hw.flushTx();
+void ALink::flush() { hw.flushTx(); }
+
+bool ALink::sendMsg(const uint8_t* b, int len) {
+    if (len <= 0 || (size_t)len > cfg.maxMsg) return false;
+    { hw.lock(); State s = state; hw.unlock(); if (s != State::OK) return false; }
+
+    uint16_t c = calcCrc16(b, len);
+    uint8_t hdr[MSG_HDR] = {
+        (uint8_t)(len), (uint8_t)(len >> 8), (uint8_t)(len >> 16), (uint8_t)(len >> 24),
+        (uint8_t)(c), (uint8_t)(c >> 8)
+    };
+    if (write(hdr, MSG_HDR) != MSG_HDR) return false;
+    return write(b, len) == len;
 }
 
-State ALink::getState() const { 
-    hw.lock(); State s = state; hw.unlock(); return s;
+int ALink::recvMsg(uint8_t* out, int max_len) {
+    if (rxMsgLen < 0) {
+        if (hw.appBufAvailable() < MSG_HDR) return 0;
+        uint8_t h[MSG_HDR];
+        readStream(h, MSG_HDR);
+        uint32_t L = (uint32_t)h[0] | ((uint32_t)h[1] << 8) |
+                     ((uint32_t)h[2] << 16) | ((uint32_t)h[3] << 24);
+        rxMsgCrc = (uint16_t)h[4] | ((uint16_t)h[5] << 8);
+        if (L == 0 || L > cfg.maxMsg) {
+            // Garbage length: stream is desynced. Flush and signal an error so
+            // the link can drop and re-negotiate.
+            hw.clearAppBuf();
+            rxMsgLen = -1;
+            err();
+            return -1;
+        }
+        rxMsgLen = (int)L;
+    }
+
+    if (hw.appBufAvailable() < rxMsgLen) return 0; // wait for the full payload
+
+    int len = rxMsgLen;
+    rxMsgLen = -1;
+
+    if (len > max_len) {
+        // Caller's buffer is too small: drain to stay in sync, report error.
+        uint8_t sink[256];
+        int left = len;
+        while (left > 0) left -= readStream(sink, std::min(left, (int)sizeof(sink)));
+        err();
+        return -1;
+    }
+
+    readStream(out, len);
+    if (calcCrc16(out, len) != rxMsgCrc) { err(); return -1; }
+    return len;
 }
 
-int ALink::getErrCount() const {
-    hw.lock(); int e = errs; hw.unlock(); return e;
+void ALink::getStats(uint64_t& tx, uint64_t& rx) const {
+    hw.lock(); tx = txBytes; rx = rxBytes; hw.unlock();
+}
+void ALink::resetStats() {
+    hw.lock(); txBytes = 0; rxBytes = 0; hw.unlock();
 }
 
-int ALink::getCurrentSpdIndex() const {
-    hw.lock(); int idx = spdI; hw.unlock(); return idx;
-}
+State ALink::getState() const { hw.lock(); State s = state; hw.unlock(); return s; }
+int ALink::getErrCount() const { hw.lock(); int e = errs; hw.unlock(); return e; }
+int ALink::getCurrentSpdIndex() const { hw.lock(); int idx = spdI; hw.unlock(); return idx; }
 
 void ALink::onRx(const uint8_t* data, int len) {
     int i = 0;
     while (i < len) {
-        hw.lock();
-        State cur_state = state;
-        hw.unlock();
+        hw.lock(); State cur_state = state; hw.unlock();
 
         if (cur_state == State::OK) {
             if (cfg.reliableMode) {
+                uint8_t decoded[MAX_CHUNK + 2];
                 for (; i < len; i++) {
                     uint8_t b = data[i];
                     if (b == 0x00) {
                         if (relRxIdx > 0) {
-                            std::vector<uint8_t> decoded(256);
-                            size_t decLen = cobsDecode(relRxBuf, relRxIdx, decoded.data());
+                            size_t decLen = cobsDecode(relRxBuf, relRxIdx, decoded);
                             relRxIdx = 0;
                             if (decLen > 1) {
-                                uint8_t crc = calcCrc(decoded.data(), decLen - 1);
+                                uint8_t crc = calcCrc(decoded, decLen - 1);
                                 if (crc == decoded[decLen - 1]) {
-                                    hw.pushAppBuf(decoded.data(), decLen - 1);
-                                } else {
-                                    err(); break;
-                                }
-                            } else if (decLen > 0) {
-                                 err(); break;
-                            }
+                                    hw.pushAppBuf(decoded, decLen - 1);
+                                    hw.lock(); rxBytes += (decLen - 1); hw.unlock();
+                                } else { err(); break; }
+                            } else if (decLen > 0) { err(); break; }
                         }
                     } else {
                         if (relRxIdx < (int)sizeof(relRxBuf)) {
                             relRxBuf[relRxIdx++] = b;
                         } else {
-                            // Buffer overflow — discard the corrupt partial frame.
-                            // Reset and wait for the next 0x00 frame delimiter.
                             relRxIdx = 0;
                             memset(relRxBuf, 0, sizeof(relRxBuf));
                         }
                     }
                 }
             } else {
-                hw.pushAppBuf(data + i, len - i);
+                int n = len - i;
+                hw.pushAppBuf(data + i, n);
+                hw.lock(); rxBytes += n; hw.unlock();
                 i = len;
             }
-        } 
+        }
         else {
             uint8_t b = data[i++];
             if (rxIdx == 0 && b != 0xAA) continue;
             if (rxIdx == 1 && b != 0x55) { rxIdx = 0; continue; }
             rxBuf[rxIdx++] = b;
-            
+
             if (rxIdx == 4) {
-                rxIdx = 0; 
+                rxIdx = 0;
                 if (calcCrc(rxBuf, 3) == rxBuf[3]) {
                     uint8_t payload = rxBuf[2];
                     if (cur_state == State::SWP) {
                         if (!isMaster && payload == REQ_CMD) {
-                            // Slave: master has finished its sweep and is requesting
-                            // the best baud. Reply immediately with our scored result.
-                            int best = 0;
                             hw.lock();
-                            for (int j = 1; j < (int)cfg.allowedBauds.size(); j++) {
-                                if (scores[j] >= scores[best]) best = j;
-                            }
+                            int best = bestSpd_unlocked();
                             hw.unlock();
                             sendFrame(best);
                             hw.setSpd(cfg.allowedBauds[best]);
@@ -295,13 +351,18 @@ void ALink::onRx(const uint8_t* data, int len) {
                         } else if (payload == PING_CMD && spdI < (int)cfg.allowedBauds.size()) {
                             hw.lock();
                             scores[spdI]++;
-                            spdI++; // Advance slot: each PING corresponds to one baud step
+                            spdI++;
+                            // Retune in lockstep with the master so the next PING,
+                            // sent at the next baud, can actually be decoded. This is
+                            // what makes scoring (and auto-baud) work on real hardware.
+                            int next = (spdI < (int)cfg.allowedBauds.size()) ? spdI : 0;
                             hw.unlock();
+                            hw.setSpd(cfg.allowedBauds[next]); // baud[0] readies us for REQ
                         }
                     }
                     else if (cur_state == State::LCK) {
                         if (isMaster) {
-                            if (payload < (int)cfg.allowedBauds.size()) { 
+                            if (payload < (int)cfg.allowedBauds.size()) {
                                 hw.setSpd(cfg.allowedBauds[payload]);
                                 hw.lock();
                                 errs = 0;
@@ -309,17 +370,12 @@ void ALink::onRx(const uint8_t* data, int len) {
                                 hw.unlock();
                             }
                         } else {
-                            if (payload == REQ_CMD) { 
-                                int best = 0;
+                            if (payload == REQ_CMD) {
                                 hw.lock();
-                                for(int j=1; j<(int)cfg.allowedBauds.size(); j++) {
-                                    if (scores[j] >= scores[best]) best = j;
-                                }
+                                int best = bestSpd_unlocked();
                                 hw.unlock();
-                                
                                 sendFrame(best);
                                 hw.setSpd(cfg.allowedBauds[best]);
-                                
                                 hw.lock();
                                 errs = 0;
                                 changeState_unlocked(State::OK);
@@ -339,13 +395,13 @@ void ALink::onBreak() {
     spdI = 0;
     rxIdx = 0;
     relRxIdx = 0;
+    rxMsgLen = -1;
     memset(relRxBuf, 0, sizeof(relRxBuf));
     for(int i=0; i<(int)scores.size(); i++) scores[i]=0;
     hw.unlock();
 
     hw.clearAppBuf();
     hw.setSpd(cfg.allowedBauds[0]);
-    // Only the master drives the sweep clock.
     if (isMaster) hw.startTimer(cfg.delayMs);
 }
 
@@ -354,15 +410,15 @@ void ALink::onTimer() {
     State s = state;
     int curSpd = spdI;
     hw.unlock();
-    
+
     if (s == State::SWP) {
         if (isMaster && curSpd < (int)cfg.allowedBauds.size()) sendFrame(PING_CMD);
-        
+
         hw.lock();
         spdI++;
         curSpd = spdI;
         hw.unlock();
-        
+
         if (curSpd < (int)cfg.allowedBauds.size()) {
             hw.setSpd(cfg.allowedBauds[curSpd]);
             hw.startTimer(cfg.delayMs);
@@ -370,15 +426,13 @@ void ALink::onTimer() {
             hw.lock();
             changeState_unlocked(State::LCK);
             hw.unlock();
-            
             hw.setSpd(cfg.allowedBauds[0]);
-            if (isMaster) hw.startTimer(cfg.delayMs); 
+            if (isMaster) hw.startTimer(cfg.delayMs);
         }
-    } 
+    }
     else if (s == State::LCK && isMaster) {
         sendFrame(REQ_CMD);
     }
 }
 
 } // namespace autolink
-
