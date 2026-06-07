@@ -26,17 +26,36 @@ private:
     std::unique_ptr<ALink> link;
 
 public:
-    AutoLink(uart_port_t u_num, int rx_pin, int tx_pin, bool isMasterNode, const AutoLinkConfig& cfg = AutoLinkConfig())
+    // Construct on the stack as a global — no new/pointer needed. Everything past
+    // the role flag is optional; sane defaults cover the common case.
+    AutoLink(uart_port_t u_num, int rx_pin, int tx_pin, bool isMasterNode, AutoLinkConfig cfg = AutoLinkConfig())
     {
+        // Auto-size the reassembly buffer so a whole message always fits. The user
+        // never has to reason about the maxMsg/streamBufferSize relationship.
+        size_t need = cfg.maxMsg + MSG_HDR + 64;
+        if (cfg.streamBufferSize < need) cfg.streamBufferSize = need;
+
         hal = std::make_unique<EspHal>(u_num, rx_pin, tx_pin, cfg);
         link = std::make_unique<ALink>(*hal, isMasterNode, cfg);
     }
 
     void begin() { hal->begin(); }
 
+    // ======================= Simple API (recommended) =======================
+    // Boundary-preserving, CRC-checked, self-healing. Just send and recv every
+    // loop; both are safe to call when the link is down (send returns 0, recv 0).
+    int  send(const uint8_t* b, int len) { return link->sendMsg(b, len) ? len : 0; }
+    int  recv(uint8_t* b, int max_len)   { return link->recvMsg(b, max_len); }
+    bool ready() const { return link->getState() == State::OK; }
+
+    // Optional: app-stream throughput since the last reset.
+    void getStats(uint64_t& tx, uint64_t& rx) const { link->getStats(tx, rx); }
+    void resetStats() { link->resetStats(); }
+
+    // ======================= Advanced =======================
     bool isHealthy() const { return hal->isHealthy(); }
 
-    // ---- Stream byte API ----
+    // Raw Stream byte API (unframed/framed bytes, no message boundaries).
     int available() override { return link->available(); }
     int read() override { return link->read(); }
     int peek() override { return link->peek(); }
@@ -45,15 +64,11 @@ public:
     void flush() override { link->flush(); }
     int read(uint8_t* b, int max_len) { return link->read(b, max_len); }
 
-    // ---- Message API (boundary-preserving, CRC16-checked) ----
+    // Explicit message verbs (send()/recv() above are the same thing).
     bool sendMsg(const uint8_t* b, int len) { return link->sendMsg(b, len); }
     int  recvMsg(uint8_t* b, int max_len)   { return link->recvMsg(b, max_len); }
 
-    // ---- Throughput ----
-    void getStats(uint64_t& tx, uint64_t& rx) const { link->getStats(tx, rx); }
-    void resetStats() { link->resetStats(); }
-
-    // ---- Error / state ----
+    // Manual error control / raw state for custom validation.
     void err() { link->err(); }
     void clearErr() { link->clearErr(); }
     int  getErrCount() const { return link->getErrCount(); }
