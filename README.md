@@ -46,15 +46,15 @@ void setup() {
 
 void loop() {
     // --- Status on the blue LED ---
-    // Still searching for the link: one slow heartbeat blink per pass.
-    if (!comm.ready()) { comm.blink(1, 30, 0); delay(300); wasReady = false; return; }
+    // Still searching for the link: one slow heartbeat blink, then a 300 ms pause.
+    if (!comm.ready()) { comm.blink(1, 30, 0, 300); wasReady = false; return; }
     // The instant we connect: a 3-blink burst, once.
     if (!wasReady) { comm.blink(3); wasReady = true; }
 
     // --- Linked: one packet per pass, one blink per packet ---
     int n = random(1, 1024);
     fill(buf, n);
-    if (comm.send(buf, n)) comm.blink(1);  // blink once for each packet sent
+    if (comm.send(buf, n)) comm.blink(1, 60, 60, 200); // flash + pace the packet rate
 
     while ((n = comm.recv(buf, sizeof buf)) > 0) { /* drain echoes */ }
 
@@ -65,8 +65,6 @@ void loop() {
                            (unsigned long)tx, (unsigned long)rx);
         tStat = millis();
     }
-
-    delay(200);                            // keep the packet rate visible to the eye
 }
 ```
 
@@ -90,7 +88,7 @@ void setup() {
 void loop() {
     // Same LED scheme as the master: heartbeat while searching, a 3-blink burst
     // on connect, then one blink per packet handled.
-    if (!comm.ready()) { comm.blink(1, 30, 0); delay(300); wasReady = false; return; }
+    if (!comm.ready()) { comm.blink(1, 30, 0, 300); wasReady = false; return; }
     if (!wasReady) { comm.blink(3); wasReady = true; }
 
     int n;
@@ -113,7 +111,7 @@ That's the whole thing. No manual reconnect logic, no checksums, no framing, and
 | A quick burst of **3** | Just connected |
 | One blink per flash | One packet sent (master) / echoed (slave) |
 
-The LED defaults to **GPIO 2** (the blue LED on most ESP32 dev boards). Point it elsewhere with `cfg.ledPin`, and tune the flash length with `blink(n, onMs, offMs)`. `blink()` is blocking, but the UART runs on its own FreeRTOS task, so flashing in `loop()` never drops incoming data.
+The LED defaults to **GPIO 2** (the blue LED on most ESP32 dev boards). Point it elsewhere with `cfg.ledPin`, tune the flash length with `blink(n, onMs, offMs)`, and pass an optional `delayMs` to pause after the flash — `blink(1, 60, 60, 200)` flashes once then waits 200 ms, handy for pacing a send loop. `blink()` is blocking, but the UART runs on its own FreeRTOS task, so flashing in `loop()` never drops incoming data.
 
 
 # 📨 The Message API
@@ -211,7 +209,7 @@ if (comm.ready() && comm.available() >= 5) {
 
 **v2.3.0**
 
-+ **Status LED:** added `blink(n, onMs, offMs)` to flash the onboard blue LED for at-a-glance link state. Configurable pin via `cfg.ledPin` (default GPIO 2). The master/slave examples now show a searching heartbeat, a 3-blink connect burst, and one blink per packet.
++ **Status LED:** added `blink(n, onMs, offMs, delayMs)` to flash the onboard blue LED for at-a-glance link state, with an optional trailing `delayMs` pause to pace a loop. Configurable pin via `cfg.ledPin` (default GPIO 2). The master/slave examples now show a searching heartbeat, a 3-blink connect burst, and one blink per packet.
 
 **v2.2.0**
 
