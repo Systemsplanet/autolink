@@ -12,6 +12,10 @@ Ever had a UART connection drop because a motor spun up nearby? Have you ever ha
 If the line gets noisy, AutoLink drops the link and re-sweeps. If a wire gets bumped, it automatically sweeps the baud spectrum and locks back onto the connection. It manages all the FreeRTOS background tasks, queues, and hardware interrupts automatically. You just send and receive data.
 
 
+# ⚡ What's New in 2.2
+
+The public API is now **one object and two verbs**. Construct an `AutoLink` as a global, call `begin()`, then `send()` / `recv()` — reliable framing, CRC protection, buffer sizing, and link recovery are all on by default and handled under the covers. No config struct, no `new`, no state machine to gate on in your sketch. The old `sendMsg`/`recvMsg`, the raw `Stream` byte API, and manual error control are still there under **Advanced** for anyone who wants them.
+
 # ⚡ What's New in 2.1
 
 AutoLink now has a **message API** on top of the byte stream. `sendMsg()` / `recvMsg()` preserve message boundaries for **arbitrary, random-sized payloads** and protect each message end-to-end with a CRC-16 — so a `write` of 4096 random bytes comes out the other side as exactly one 4096-byte message, intact or not at all. Built-in **throughput counters** let you log B/s with a single call, and the auto-baud sweep now actually retunes the slave so it selects the *fastest working* baud instead of always falling back to the slowest.
@@ -27,42 +31,31 @@ The classic use case: two boards bouncing **random-sized messages** back and for
 #include "AutoLink.h"
 using namespace autolink;
 
-AutoLink* link = nullptr;
-uint8_t   buf[4096];
-uint32_t  tRound = 0, tStat = 0;
+AutoLink comm(UART_NUM_1, 16, 17, true);  // true = master. That's the whole setup.
+uint8_t   buf[1024];
+uint32_t  tStat = 0;
 
 void fill(uint8_t* b, int n) { for (int i = 0; i < n; i++) b[i] = random(256); }
 
 void setup() {
     Serial.begin(115200);
     randomSeed(esp_random());
-
-    AutoLinkConfig cfg;
-    cfg.reliableMode    = true;   // required for the message API
-    cfg.streamBufferSize = 8192;  // must exceed maxMsg
-    cfg.maxMsg          = 4096;
-
-    link = new AutoLink(UART_NUM_1, 16, 17, true, cfg); // true = master
-    link->begin();                                      // kicks off the baud sweep
+    comm.begin();                          // kicks off the baud sweep
 }
 
 void loop() {
-    if (link->getState() != State::OK) { delay(50); return; } // sweep self-heals
-
-    // Fire one random-sized message per round.
-    if (millis() - tRound > 20) {
-        int n = random(1, 4096);
-        fill(buf, n);
-        if (link->sendMsg(buf, n)) tRound = millis();       // false => link busy/down, retry next loop
-    }
+    // Fire one random-sized message; send() is a no-op (returns 0) while the link
+    // is still negotiating, so there is no state to gate on yourself.
+    int n = random(1, 1024);
+    fill(buf, n);
+    comm.send(buf, n);
 
     // Drain any echoes the slave bounced back.
-    int n;
-    while ((n = link->recvMsg(buf, sizeof(buf))) > 0) { /* got a full message back */ }
+    while ((n = comm.recv(buf, sizeof buf)) > 0) { /* got a full message back */ }
 
-    // Log throughput once a second.
+    // Optional: log throughput once a second.
     if (millis() - tStat > 1000) {
-        uint64_t tx, rx; link->getStats(tx, rx); link->resetStats();
+        uint64_t tx, rx; comm.getStats(tx, rx); comm.resetStats();
         Log::getLog().info("App", "TX %lu B/s   RX %lu B/s",
                            (unsigned long)tx, (unsigned long)rx);
         tStat = millis();
@@ -78,86 +71,75 @@ The slave just echoes back whatever complete messages arrive. Pass **false** for
 #include "AutoLink.h"
 using namespace autolink;
 
-AutoLink* link = nullptr;
-uint8_t   buf[4096];
-uint32_t  tStat = 0;
+AutoLink comm(UART_NUM_1, 16, 17, false); // false = slave
+uint8_t   buf[1024];
 
 void setup() {
     Serial.begin(115200);
-
-    AutoLinkConfig cfg;
-    cfg.reliableMode    = true;
-    cfg.streamBufferSize = 8192;
-    cfg.maxMsg          = 4096;
-
-    link = new AutoLink(UART_NUM_1, 16, 17, false, cfg); // false = slave
-    link->begin();                                       // arms in SWP, waits for master
+    comm.begin();                          // arms in SWP, waits for master
 }
 
 void loop() {
-    if (link->getState() != State::OK) { delay(50); return; }
-
     int n;
-    while ((n = link->recvMsg(buf, sizeof(buf))) > 0) {
-        link->sendMsg(buf, n); // echo it straight back
-    }
-
-    if (millis() - tStat > 1000) {
-        uint64_t tx, rx; link->getStats(tx, rx); link->resetStats();
-        Log::getLog().info("App", "TX %lu B/s   RX %lu B/s",
-                           (unsigned long)tx, (unsigned long)rx);
-        tStat = millis();
+    while ((n = comm.recv(buf, sizeof buf)) > 0) {
+        comm.send(buf, n);                 // echo it straight back
     }
 }
 ```
 
-That's the whole thing. No manual reconnect logic, no checksums, no framing in your sketch. If the cable is yanked mid-stream, both ends fall back to `SWP`, re-negotiate, and the loops resume on their own the moment `getState()` returns `OK` again. A `recvMsg()` of `-1` means a corrupt/desynced message was rejected and the buffer flushed — you can ignore it and keep looping.
+That's the whole thing. No manual reconnect logic, no checksums, no framing, and no state machine to babysit in your sketch. If the cable is yanked mid-stream, both ends fall back to a baud re-sweep and the loops resume on their own — `send()` simply returns `0` until the link is back. A `recv()` of `-1` means a corrupt/desynced message was rejected and the buffer flushed; you can ignore it and keep looping.
 
 
 # 📨 The Message API
 
+This is the whole public surface for normal use:
+
 | Call | Returns | Notes |
 |------|---------|-------|
-| `bool sendMsg(const uint8_t* b, int len)` | `true` if the whole message was queued | `len` must be `1..maxMsg`. Returns `false` if the link isn't `OK`. |
-| `int recvMsg(uint8_t* b, int max)` | `>0` message length, `0` nothing ready, `-1` rejected/dropped | `max` should be `>= maxMsg`. On `-1` the bad message is drained and an error is counted. |
+| `int send(const uint8_t* b, int len)` | `len` if queued, `0` if the link is down/busy | `len` must be `1..maxMsg` (default 1024). Safe to call every loop. |
+| `int recv(uint8_t* b, int max)` | `>0` message length, `0` nothing ready, `-1` rejected/dropped | `max` should be `>= maxMsg`. On `-1` the bad message is drained and an error is counted. |
+| `bool ready()` | `true` once negotiated | Optional — `send`/`recv` already gate themselves, so you rarely need this. |
 | `void getStats(uint64_t& tx, uint64_t& rx)` | — | App-stream bytes since the last reset. |
 | `void resetStats()` | — | Zero the counters (call after each sample to get B/s). |
 
 Each message goes out as a 6-byte header (`len` + `crc16`) followed by the payload, chunked into ≤250-byte COBS frames, each guarded by a per-frame CRC-8. The receiver only hands you a message once the **whole** payload arrives and its CRC-16 verifies — so you never see a half-message or a corrupted one.
 
-> **Sizing rule:** `maxMsg <= streamBufferSize`. A whole message is buffered for reassembly, so the stream buffer must be able to hold the largest message you send. AutoLink logs an error at construction if you get this backwards.
+> **No sizing to worry about:** set `cfg.maxMsg` to the largest message you'll send and the reassembly buffer is grown to fit automatically. Leave it alone for the 1 KB default.
 
 
-# 🔌 Raw Byte Streaming
+# 🔌 Advanced
 
-If you don't need message boundaries, AutoLink is still a drop-in `Stream`. Leave `reliableMode` off for an unframed pass-through, or on for COBS+CRC-8 framed bytes:
+Most sketches never need anything below this line. The simple `send`/`recv`/`ready` API above covers the common case.
+
+### Raw Byte Streaming
+
+If you don't need message boundaries, `AutoLink` is still a drop-in `Stream`. Set `cfg.reliableMode = false` for an unframed pass-through, or leave it on for COBS+CRC-8 framed bytes:
 
 ```cpp
 const char* str = "Hello Slave!";
-link->write((const uint8_t*)str, strlen(str));
+comm.write((const uint8_t*)str, strlen(str));
 
-while (link->available()) {
+while (comm.available()) {
     uint8_t b[64];
-    int len = link->read(b, sizeof(b));
+    int len = comm.read(b, sizeof(b));
     Log::getLog().info("App", "Got %d bytes", len);
 }
 ```
 
-`write()` returns the number of bytes actually accepted (0 if the link isn't `OK`), so you always know whether your data made it onto the wire.
+`write()` returns the number of bytes actually accepted (0 if the link isn't ready), so you always know whether your data made it onto the wire.
 
+### Manual Error Control
 
-# 🧠 Advanced: Manual Error Control
-
-For raw-mode applications doing their own validation, you can drive the error counter yourself. Exceeding `errThreshold` automatically issues a hardware BREAK and drops the link back to `SWP`.
+For raw-mode applications doing their own validation, you can drive the error counter yourself. Exceeding `errThreshold` automatically issues a hardware BREAK and drops the link into a re-sweep.
 
 ```cpp
-if (link->getState() == State::OK && link->available() >= 5) {
+if (comm.ready() && comm.available() >= 5) {
     uint8_t p[5];
-    link->read(p, 5);
-    if ((p[0]^p[1]^p[2]^p[3]) == p[4]) link->clearErr();      // good data decays the counter
+    comm.read(p, 5);
+    if ((p[0]^p[1]^p[2]^p[3]) == p[4]) comm.clearErr();      // good data decays the counter
     else {
-        link->err();                                          // bad data; after errThreshold -> SWP
-        Log::getLog().error("App", "Corrupt! count=%d", link->getErrCount());
+        comm.err();                                          // bad data; after errThreshold -> re-sweep
+        Log::getLog().error("App", "Corrupt! count=%d", comm.getErrCount());
     }
 }
 ```
@@ -200,6 +182,14 @@ if (link->getState() == State::OK && link->available() >= 5) {
 
 
 # 📅 Revision History
+
+**v2.2.0**
+
++ **One-object API:** construct `AutoLink` on the stack (no `new`/pointer), call `begin()`, then `send()` / `recv()`. Added `ready()` so `State` never has to appear in user code.
++ **Reliable by default:** `reliableMode` now defaults on, so the message API is protected out of the box.
++ **Auto-sized buffers:** the reassembly buffer grows from `maxMsg` automatically; the old `maxMsg <= streamBufferSize` rule (and its construction-time error, which the *default* config used to trip) is gone.
++ **Saner defaults:** `maxMsg` defaults to 1 KB instead of 8 KB, so a default-constructed link no longer over-allocates.
++ Raw `Stream` byte API, explicit `sendMsg`/`recvMsg`, and manual error control retained under **Advanced** — no behavior change.
 
 **v2.1.1**
 
