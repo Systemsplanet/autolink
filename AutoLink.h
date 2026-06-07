@@ -49,13 +49,15 @@ public:
 
     // Blink the status LED n times (blocking, active-high). Handy for marking a
     // bring-up phase and for a one-blink-per-packet heartbeat. Tune the on/off
-    // milliseconds if you want shorter/longer flashes.
-    void blink(int n, int onMs = 60, int offMs = 60) {
+    // milliseconds if you want shorter/longer flashes. If delayMs > 0, pause that
+    // long after the last flash before returning (e.g. to pace a packet loop).
+    void blink(int n, int onMs = 60, int offMs = 60, long delayMs = 0) {
         for (int i = 0; i < n; i++) {
             digitalWrite(ledPin, HIGH); delay(onMs);
             digitalWrite(ledPin, LOW);
             if (i < n - 1) delay(offMs);
         }
+        if (delayMs > 0) delay(delayMs);
     }
 
     // ======================= Simple API (recommended) =======================
