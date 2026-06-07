@@ -8,6 +8,7 @@
 #include <queue>
 #include <mutex>
 #include <vector>
+#include <cstdlib>
 #include "ALink.h"
 
 using namespace autolink;
@@ -342,6 +343,143 @@ void run_test_readme_usage() {
     std::cout << "PASS" << std::endl;
 }
 
+void run_test_message_roundtrip() {
+    std::cout << "\n=== Test: Message API Round-Trip (random sizes) ===" << std::endl;
+    MockHal mHal, sHal;
+    AutoLinkConfig cfg;
+    cfg.reliableMode = true;
+    cfg.streamBufferSize = 70000;
+    cfg.maxMsg = 65535;
+    ALink a(mHal, true, cfg);
+    ALink b(sHal, false, cfg);
+
+    srand(1234);
+    std::vector<int> sizes = {1, 2, 3, 7, 250, 251, 500, 1000, 4096, 9001, 65535};
+    for (int sz : sizes) {
+        std::vector<uint8_t> tx(sz), rx(sz + 16);
+        for (int i = 0; i < sz; i++) tx[i] = (uint8_t)(rand() & 0xFF);
+
+        assert(a.sendMsg(tx.data(), sz));
+        pipe_data(mHal, sHal);
+
+        int got = b.recvMsg(rx.data(), rx.size());
+        assert(got == sz);
+        for (int i = 0; i < sz; i++) assert(rx[i] == tx[i]);
+        // boundary preserved: nothing extra waiting
+        assert(b.recvMsg(rx.data(), rx.size()) == 0);
+    }
+    std::cout << "PASS" << std::endl;
+}
+
+void run_test_message_boundaries_back_to_back() {
+    std::cout << "\n=== Test: Back-to-Back Messages Keep Boundaries ===" << std::endl;
+    MockHal mHal, sHal;
+    AutoLinkConfig cfg; cfg.reliableMode = true; cfg.streamBufferSize = 8192;
+    ALink a(mHal, true, cfg);
+    ALink b(sHal, false, cfg);
+
+    uint8_t m1[] = {1, 2, 3};
+    uint8_t m2[] = {9, 8, 7, 6, 5};
+    assert(a.sendMsg(m1, 3));
+    assert(a.sendMsg(m2, 5));
+    pipe_data(mHal, sHal); // both messages arrive together
+
+    uint8_t rx[32];
+    assert(b.recvMsg(rx, sizeof(rx)) == 3);
+    assert(rx[0] == 1 && rx[2] == 3);
+    assert(b.recvMsg(rx, sizeof(rx)) == 5);
+    assert(rx[0] == 9 && rx[4] == 5);
+    assert(b.recvMsg(rx, sizeof(rx)) == 0);
+    std::cout << "PASS" << std::endl;
+}
+
+void run_test_message_crc_reject() {
+    std::cout << "\n=== Test: Corrupt Message Rejected (CRC16) ===" << std::endl;
+    MockHal mHal, sHal;
+    AutoLinkConfig cfg; cfg.reliableMode = true; cfg.streamBufferSize = 8192;
+    ALink a(mHal, true, cfg);
+    ALink b(sHal, false, cfg);
+
+    uint8_t msg[] = {0x10, 0x20, 0x30, 0x40};
+    assert(a.sendMsg(msg, 4));
+    // Flip a payload bit somewhere in the wire stream before delivery.
+    assert(!mHal.txBuf.empty());
+    mHal.txBuf[mHal.txBuf.size() / 2] ^= 0x01;
+    pipe_data(mHal, sHal);
+
+    uint8_t rx[32];
+    int r = b.recvMsg(rx, sizeof(rx));
+    // Either the per-frame CRC8 dropped the frame (nothing complete -> 0)
+    // or the message CRC16 caught it (-1). Both are correct rejections.
+    assert(r <= 0);
+    assert(b.getErrCount() > 0);
+    std::cout << "PASS" << std::endl;
+}
+
+void run_test_stats() {
+    std::cout << "\n=== Test: Throughput Counters ===" << std::endl;
+    MockHal mHal, sHal;
+    AutoLinkConfig cfg; cfg.reliableMode = true; cfg.streamBufferSize = 8192;
+    ALink a(mHal, true, cfg);
+    ALink b(sHal, false, cfg);
+
+    uint8_t msg[100];
+    for (int i = 0; i < 100; i++) msg[i] = i;
+    assert(a.sendMsg(msg, 100));
+    pipe_data(mHal, sHal);
+    uint8_t rx[128];
+    assert(b.recvMsg(rx, sizeof(rx)) == 100);
+
+    uint64_t atx, arx, btx, brx;
+    a.getStats(atx, arx);
+    b.getStats(btx, brx);
+    assert(atx == 100 + MSG_HDR); // header + payload queued
+    assert(brx == 100 + MSG_HDR); // header + payload delivered to app buffer
+
+    a.resetStats();
+    a.getStats(atx, arx);
+    assert(atx == 0 && arx == 0);
+    std::cout << "PASS" << std::endl;
+}
+
+void run_test_best_baud_selection() {
+    std::cout << "\n=== Test: Best-Baud Picks Highest Working Index ===" << std::endl;
+    // 4 bauds. Feed the slave 3 PINGs (it scores indices 0,1,2) then a REQ.
+    // It must reply with index 2 (fastest baud that scored), not 3.
+    MockHal sHal;
+    AutoLinkConfig cfg; cfg.allowedBauds = {9600, 19200, 38400, 57600};
+    ALink slave(sHal, false, cfg);
+    slave.begin();
+    assert(slave.getState() == State::SWP);
+
+    auto frame = [&](uint8_t cmd, uint8_t* out) {
+        out[0] = 0xAA; out[1] = 0x55; out[2] = cmd;
+        uint8_t crc = 0;
+        static const auto c8 = [](uint8_t crc, uint8_t d) {
+            crc ^= d;
+            for (int i = 0; i < 8; i++) crc = (crc & 0x80) ? (crc << 1) ^ 0x07 : crc << 1;
+            return crc;
+        };
+        crc = c8(crc, out[0]); crc = c8(crc, out[1]); crc = c8(crc, out[2]);
+        out[3] = crc;
+    };
+
+    uint8_t pf[4]; frame(PING_CMD, pf);
+    slave.onRx(pf, 4); // scores[0]++, spdI->1
+    slave.onRx(pf, 4); // scores[1]++, spdI->2
+    slave.onRx(pf, 4); // scores[2]++, spdI->3
+    assert(slave.getCurrentSpdIndex() == 3);
+
+    uint8_t rf[4]; frame(REQ_CMD, rf);
+    slave.onRx(rf, 4); // slave replies best index and goes OK
+    assert(slave.getState() == State::OK);
+
+    // Reply frame is {0xAA,0x55,best,crc}; best must be 2.
+    assert(sHal.txBuf.size() == 4);
+    assert(sHal.txBuf[2] == 2);
+    std::cout << "PASS" << std::endl;
+}
+
 int main() {
     std::cout << "=== Running AutoLink Core Tests ===" << std::endl;
     run_test_hal_methods();
@@ -351,6 +489,11 @@ int main() {
     run_test_negotiation_state_machine();
     run_test_throughput_and_sizes();
     run_test_readme_usage();
+    run_test_message_roundtrip();
+    run_test_message_boundaries_back_to_back();
+    run_test_message_crc_reject();
+    run_test_stats();
+    run_test_best_baud_selection();
     std::cout << "\n=== All Tests Completed Successfully ===" << std::endl;
     return 0;
 }
