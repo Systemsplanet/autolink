@@ -31,6 +31,7 @@ struct AutoLinkConfig {
     // Largest message send()/recv() will accept. The AutoLink facade auto-grows
     // streamBufferSize to fit this, so you normally set only this (or nothing).
     size_t maxMsg = 1024;
+    int ledPin = 2;   // status LED used by AutoLink::blink(); GPIO2 = onboard blue LED
 };
 
 class ALink {
