@@ -33,6 +33,7 @@ using namespace autolink;
 
 AutoLink comm(UART_NUM_1, 16, 17, true);  // true = master. That's the whole setup.
 uint8_t   buf[1024];
+bool      wasReady = false;
 uint32_t  tStat = 0;
 
 void fill(uint8_t* b, int n) { for (int i = 0; i < n; i++) b[i] = random(256); }
@@ -40,18 +41,22 @@ void fill(uint8_t* b, int n) { for (int i = 0; i < n; i++) b[i] = random(256); }
 void setup() {
     Serial.begin(115200);
     randomSeed(esp_random());
-    comm.begin();                          // kicks off the baud sweep
+    comm.begin();                          // kicks off the baud sweep; sets up the LED
 }
 
 void loop() {
-    // Fire one random-sized message; send() is a no-op (returns 0) while the link
-    // is still negotiating, so there is no state to gate on yourself.
+    // --- Status on the blue LED ---
+    // Still searching for the link: one slow heartbeat blink per pass.
+    if (!comm.ready()) { comm.blink(1, 30, 0); delay(300); wasReady = false; return; }
+    // The instant we connect: a 3-blink burst, once.
+    if (!wasReady) { comm.blink(3); wasReady = true; }
+
+    // --- Linked: one packet per pass, one blink per packet ---
     int n = random(1, 1024);
     fill(buf, n);
-    comm.send(buf, n);
+    if (comm.send(buf, n)) comm.blink(1);  // blink once for each packet sent
 
-    // Drain any echoes the slave bounced back.
-    while ((n = comm.recv(buf, sizeof buf)) > 0) { /* got a full message back */ }
+    while ((n = comm.recv(buf, sizeof buf)) > 0) { /* drain echoes */ }
 
     // Optional: log throughput once a second.
     if (millis() - tStat > 1000) {
@@ -60,6 +65,8 @@ void loop() {
                            (unsigned long)tx, (unsigned long)rx);
         tStat = millis();
     }
+
+    delay(200);                            // keep the packet rate visible to the eye
 }
 ```
 
@@ -73,6 +80,7 @@ using namespace autolink;
 
 AutoLink comm(UART_NUM_1, 16, 17, false); // false = slave
 uint8_t   buf[1024];
+bool      wasReady = false;
 
 void setup() {
     Serial.begin(115200);
@@ -80,14 +88,32 @@ void setup() {
 }
 
 void loop() {
+    // Same LED scheme as the master: heartbeat while searching, a 3-blink burst
+    // on connect, then one blink per packet handled.
+    if (!comm.ready()) { comm.blink(1, 30, 0); delay(300); wasReady = false; return; }
+    if (!wasReady) { comm.blink(3); wasReady = true; }
+
     int n;
     while ((n = comm.recv(buf, sizeof buf)) > 0) {
         comm.send(buf, n);                 // echo it straight back
+        comm.blink(1);                     // blink once for each packet handled
     }
 }
 ```
 
 That's the whole thing. No manual reconnect logic, no checksums, no framing, and no state machine to babysit in your sketch. If the cable is yanked mid-stream, both ends fall back to a baud re-sweep and the loops resume on their own — `send()` simply returns `0` until the link is back. A `recv()` of `-1` means a corrupt/desynced message was rejected and the buffer flushed; you can ignore it and keep looping.
+
+## 🔵 Status LED
+
+`blink(n)` flashes the onboard blue LED `n` times so you can read the link's state at a glance, no serial monitor needed. The examples above use a simple convention:
+
+| What you see | Meaning |
+|---|---|
+| One slow blink, repeating | Searching / negotiating baud (`ready()` is false) |
+| A quick burst of **3** | Just connected |
+| One blink per flash | One packet sent (master) / echoed (slave) |
+
+The LED defaults to **GPIO 2** (the blue LED on most ESP32 dev boards). Point it elsewhere with `cfg.ledPin`, and tune the flash length with `blink(n, onMs, offMs)`. `blink()` is blocking, but the UART runs on its own FreeRTOS task, so flashing in `loop()` never drops incoming data.
 
 
 # 📨 The Message API
@@ -182,6 +208,10 @@ if (comm.ready() && comm.available() >= 5) {
 
 
 # 📅 Revision History
+
+**v2.3.0**
+
++ **Status LED:** added `blink(n, onMs, offMs)` to flash the onboard blue LED for at-a-glance link state. Configurable pin via `cfg.ledPin` (default GPIO 2). The master/slave examples now show a searching heartbeat, a 3-blink connect burst, and one blink per packet.
 
 **v2.2.0**
 
