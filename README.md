@@ -16,9 +16,7 @@ If the line gets noisy, AutoLink drops the link and re-sweeps. If a wire gets bu
 
 The public API is now **one object and two verbs**. Construct an `AutoLink` as a global, call `begin()`, then `send()` / `recv()` — reliable framing, CRC protection, buffer sizing, and link recovery are all on by default and handled under the covers. No config struct, no `new`, no state machine to gate on in your sketch. The old `sendMsg`/`recvMsg`, the raw `Stream` byte API, and manual error control are still there under **Advanced** for anyone who wants them.
 
-# ⚡ What's New in 2.1
 
-AutoLink now has a **message API** on top of the byte stream. `sendMsg()` / `recvMsg()` preserve message boundaries for **arbitrary, random-sized payloads** and protect each message end-to-end with a CRC-16 — so a `write` of 4096 random bytes comes out the other side as exactly one 4096-byte message, intact or not at all. Built-in **throughput counters** let you log B/s with a single call, and the auto-baud sweep now actually retunes the slave so it selects the *fastest working* baud instead of always falling back to the slowest.
 
 
 # 🏓 Quick Start: Master / Slave Ping-Pong
@@ -41,16 +39,16 @@ void fill(uint8_t* b, int n) { for (int i = 0; i < n; i++) b[i] = random(256); }
 void setup() {
     Serial.begin(115200);
     randomSeed(esp_random());
-    comm.begin();                          // kicks off the baud sweep; sets up the LED
-    comm.blink(4, 100, 100, 2000);         // 4 blinks = starting up; 2 s pause before loop
+    comm.blink(1, 100, 100, 2000);
+    comm.begin();  // baud sweep; 
+    comm.blink(2, 100, 100, 2000);  
 }
 
 void loop() {
-    // --- Status on the blue LED ---
-    // Still searching for the link: one slow heartbeat blink, then a 300 ms pause.
-    if (!comm.ready()) { comm.blink(1, 30, 0, 300); wasReady = false; return; }
-    // The instant we connect: a 3-blink burst, once.
-    if (!wasReady) { comm.blink(3); wasReady = true; }
+    // search for link:
+    if (!comm.ready()) { comm.blink(3, 100, 100, 2000); wasReady = false; return; }
+    // connected
+    if (!wasReady) { comm.blink(4); wasReady = true; }
 
     // --- Linked: one packet per pass, one blink per packet ---
     int n = random(1, 1024);
@@ -83,20 +81,19 @@ bool      wasReady = false;
 
 void setup() {
     Serial.begin(115200);
-    comm.begin();                          // arms in SWP, waits for master
-    comm.blink(4, 100, 100, 2000);         // 4 blinks = starting up; 2 s pause before loop
+    comm.blink(1, 100, 100, 2000)
+    comm.begin(); // SWP, waits for master
+    comm.blink(2, 100, 100, 2000); 
 }
 
 void loop() {
-    // Same LED scheme as the master: heartbeat while searching, a 3-blink burst
-    // on connect, then one blink per packet handled.
-    if (!comm.ready()) { comm.blink(1, 30, 0, 300); wasReady = false; return; }
-    if (!wasReady) { comm.blink(3); wasReady = true; }
+    if (!comm.ready()) { comm.blink(3, 100, 100, 2000); wasReady = false; return; }
+    if (!wasReady) { comm.blink(4); wasReady = true; }
 
     int n;
     while ((n = comm.recv(buf, sizeof buf)) > 0) {
-        comm.send(buf, n);                 // echo it straight back
-        comm.blink(1);                     // blink once for each packet handled
+        comm.send(buf, n); // echo 
+        comm.blink(1);                     
     }
 }
 ```
