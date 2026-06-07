@@ -42,6 +42,7 @@ void setup() {
     Serial.begin(115200);
     randomSeed(esp_random());
     comm.begin();                          // kicks off the baud sweep; sets up the LED
+    comm.blink(4, 100, 100, 2000);         // 4 blinks = starting up; 2 s pause before loop
 }
 
 void loop() {
@@ -83,6 +84,7 @@ bool      wasReady = false;
 void setup() {
     Serial.begin(115200);
     comm.begin();                          // arms in SWP, waits for master
+    comm.blink(4, 100, 100, 2000);         // 4 blinks = starting up; 2 s pause before loop
 }
 
 void loop() {
