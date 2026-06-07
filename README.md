@@ -29,7 +29,7 @@ The classic use case: two boards bouncing **random-sized messages** back and for
 #include "AutoLink.h"
 using namespace autolink;
 
-AutoLink comm(UART_NUM_1, 16, 17, true);  // true = master. That's the whole setup.
+AutoLink comm(UART_NUM_1, 16, 17, true); 
 uint8_t   buf[1024];
 bool      wasReady = false;
 uint32_t  tStat = 0;
@@ -40,20 +40,20 @@ void setup() {
     Serial.begin(115200);
     randomSeed(esp_random());
     comm.blink(1, 100, 100, 2000);
-    comm.begin();  // baud sweep; 
+    comm.begin();  // baud sweep
     comm.blink(2, 100, 100, 2000);  
 }
 
 void loop() {
-    // search for link:
+    // search for link
     if (!comm.ready()) { comm.blink(3, 100, 100, 2000); wasReady = false; return; }
     // connected
     if (!wasReady) { comm.blink(4); wasReady = true; }
 
-    // --- Linked: one packet per pass, one blink per packet ---
+    // linked
     int n = random(1, 1024);
     fill(buf, n);
-    if (comm.send(buf, n)) comm.blink(1, 60, 60, 200); // flash + pace the packet rate
+    if (comm.send(buf, n)) comm.blink(1); 
 
     while ((n = comm.recv(buf, sizeof buf)) > 0) { /* drain echoes */ }
 
@@ -75,13 +75,13 @@ The slave just echoes back whatever complete messages arrive. Pass **false** for
 #include "AutoLink.h"
 using namespace autolink;
 
-AutoLink comm(UART_NUM_1, 16, 17, false); // false = slave
+AutoLink comm(UART_NUM_1, 16, 17, false);
 uint8_t   buf[1024];
 bool      wasReady = false;
 
 void setup() {
     Serial.begin(115200);
-    comm.blink(1, 100, 100, 2000)
+    comm.blink(1, 100, 100, 2000);
     comm.begin(); // SWP, waits for master
     comm.blink(2, 100, 100, 2000); 
 }
