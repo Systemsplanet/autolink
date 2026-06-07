@@ -113,8 +113,9 @@ void run_test_hal_methods() {
 void run_test_basic_io() {
     std::cout << "\n=== Test: Basic Write/Read/Peek/Flush/Available ===" << std::endl;
     MockHal mHal, sHal;
-    ALink master(mHal, true);
-    ALink slave(sHal, false);
+    AutoLinkConfig cfg; cfg.reliableMode = false; // this test exercises the raw byte path
+    ALink master(mHal, true, cfg);
+    ALink slave(sHal, false, cfg);
     // Both nodes start in State::OK by constructor default. begin() is deliberately
     // not called here so this test exercises only the data path in isolation,
     // without negotiation. This mirrors a known-good-baud scenario (e.g. fixed config).
