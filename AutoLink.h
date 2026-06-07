@@ -37,13 +37,13 @@ public:
         if (cfg.streamBufferSize < need) cfg.streamBufferSize = need;
 
         ledPin = cfg.ledPin;
+        pinMode(ledPin, OUTPUT);
+        digitalWrite(ledPin, LOW);
         hal = std::make_unique<EspHal>(u_num, rx_pin, tx_pin, cfg);
         link = std::make_unique<ALink>(*hal, isMasterNode, cfg);
     }
 
     void begin() {
-        pinMode(ledPin, OUTPUT);
-        digitalWrite(ledPin, LOW);
         hal->begin();
     }
 
