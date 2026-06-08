@@ -28,8 +28,8 @@ The classic use case: two boards bouncing **random-sized messages** back and for
 ```cpp
 #include "AutoLink.h"
 using namespace autolink;
-//pin 38=rcv 37=tx. was UART_NUM_1 
-AutoLink comm(SERIAL_8N1, 38, 37, true); 
+//pin 38=rcv 37=tx. was  SERIAL_8N1
+AutoLink comm(UART_NUM_1, 38, 37, true); 
 uint8_t   buf[1024];
 bool      wasReady = false;
 uint32_t  tStat = 0;
@@ -74,8 +74,8 @@ The slave just echoes back whatever complete messages arrive. Pass **false** for
 ```cpp
 #include "AutoLink.h"
 using namespace autolink;
-//pin 3=rcv 1=tx. was UART_NUM_1 
-AutoLink comm(SERIAL_8N1, 3, 1, false);
+//pin 3=rcv 1=tx. was SERIAL_8N1 
+AutoLink comm(UART_NUM_1, 3, 1, false);
 uint8_t   buf[1024];
 bool      wasReady = false;
 
