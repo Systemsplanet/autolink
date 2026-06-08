@@ -11,7 +11,7 @@
 #include "freertos/stream_buffer.h"
 #include "freertos/semphr.h"
 #include <vector>
-#include <string.h> // FIXED: Included for memset
+#include <string.h> // memset, alloca
 
 namespace autolink {
 
@@ -38,16 +38,20 @@ class EspHal : public ILink {
     static void uart_event_task(void *pvParameters) {
         EspHal* hal = (EspHal*)pvParameters;
         uart_event_t event;
-        std::vector<uint8_t> rx_buf(hal->cfg.rxBufferSize);
-        
+        // Static scratch buffer sized to the per-event read cap. Avoids the
+        // std::vector alloc/ctor churn of the previous version on a 4 KB stack
+        // task that runs forever.
+        size_t rx_cap = hal->cfg.rxBufferSize;
+        uint8_t* rx_buf = (uint8_t*)alloca(rx_cap);
+
         while(hal->running) {
             if(xQueueReceive(hal->uart_queue, (void * )&event, pdMS_TO_TICKS(100))) {
                 if (!hal->running) break;
                 if(event.type == UART_DATA) {
-                    size_t read_len = (event.size > hal->cfg.rxBufferSize) ? hal->cfg.rxBufferSize : event.size;
-                    int len = uart_read_bytes(hal->uart_num, rx_buf.data(), read_len, portMAX_DELAY);
-                    if(hal->link && len > 0) hal->link->onRx(rx_buf.data(), len);
-                } 
+                    size_t read_len = (event.size > rx_cap) ? rx_cap : event.size;
+                    int len = uart_read_bytes(hal->uart_num, rx_buf, read_len, portMAX_DELAY);
+                    if(hal->link && len > 0) hal->link->onRx(rx_buf, len);
+                }
                 else if(event.type == UART_BREAK) {
                     uart_flush_input(hal->uart_num);
                     if(hal->link) hal->link->onBreak();
@@ -71,10 +75,10 @@ public:
         task_exit_sem = xSemaphoreCreateBinary();
         stream_buf = xStreamBufferCreate(cfg.streamBufferSize, 1);
         
-        // FIX: Zero the structure to avoid garbage data for newer ESP-IDF v5 variables
+        // Zero the struct first so any field added in newer ESP-IDF versions
+        // (e.g. use_ref_tick was removed in v5) starts from a known value.
         memset(&uart_config, 0, sizeof(uart_config_t));
-        
-        // FIX: Standard struct assignment instead of C99 designated initializers
+
         uart_config.baud_rate = 9600;
         uart_config.data_bits = UART_DATA_8_BITS;
         uart_config.parity = UART_PARITY_DISABLE;
