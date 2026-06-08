@@ -28,8 +28,8 @@ The classic use case: two boards bouncing **random-sized messages** back and for
 ```cpp
 #include "AutoLink.h"
 using namespace autolink;
-
-AutoLink comm(UART_NUM_1, 16, 17, true); 
+//pin 38=rcv 37=tx. was UART_NUM_1 
+AutoLink comm(SERIAL_8N1, 38, 37, true); 
 uint8_t   buf[1024];
 bool      wasReady = false;
 uint32_t  tStat = 0;
@@ -58,7 +58,7 @@ void loop() {
     while ((n = comm.recv(buf, sizeof buf)) > 0) { /* drain echoes */ }
 
     // Optional: log throughput once a second.
-    if (millis() - tStat > 1000) {
+    if (millis() - tStat > 1000)
         uint64_t tx, rx; comm.getStats(tx, rx); comm.resetStats();
         Log::getLog().info("App", "TX %lu B/s   RX %lu B/s",
                            (unsigned long)tx, (unsigned long)rx);
@@ -74,8 +74,8 @@ The slave just echoes back whatever complete messages arrive. Pass **false** for
 ```cpp
 #include "AutoLink.h"
 using namespace autolink;
-
-AutoLink comm(UART_NUM_1, 16, 17, false);
+//pin 3=rcv 1=tx. was UART_NUM_1 
+AutoLink comm(SERIAL_8N1, 3, 1, false);
 uint8_t   buf[1024];
 bool      wasReady = false;
 
