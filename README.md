@@ -58,7 +58,7 @@ void loop() {
     while ((n = comm.recv(buf, sizeof buf)) > 0) { /* drain echoes */ }
 
     // Optional: log throughput once a second.
-    if (millis() - tStat > 1000)
+    if (millis() - tStat > 1000) {
         uint64_t tx, rx; comm.getStats(tx, rx); comm.resetStats();
         Log::getLog().info("App", "TX %lu B/s   RX %lu B/s",
                            (unsigned long)tx, (unsigned long)rx);
