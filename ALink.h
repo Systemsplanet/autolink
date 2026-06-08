@@ -31,7 +31,7 @@ struct AutoLinkConfig {
     // Largest message send()/recv() will accept. The AutoLink facade auto-grows
     // streamBufferSize to fit this, so you normally set only this (or nothing).
     size_t maxMsg = 1024;
-    int ledPin = 2;   // status LED used by AutoLink::blink(); GPIO2 = onboard blue LED
+    int ledPin = 2;   // status LED used by AutoLink::blinkWait(); GPIO2 = onboard blue LED
 };
 
 class ALink {
@@ -60,7 +60,13 @@ class ALink {
 
     uint8_t  calcCrc(const uint8_t* data, int len) const;
     uint16_t calcCrc16(const uint8_t* data, int len) const;
+
+    // CRC LUTs. constexpr -> live in flash. The data is defined in ALink.cpp
+    // because the 512 bytes of table blow up compile times in the header.
+    static const uint8_t  crc8_lut[256];
+    static const uint16_t crc16_lut[256];
     void sendFrame(uint8_t payload);
+    void sendFrame_unlocked(uint8_t payload);  // caller holds the lock
     void changeState_unlocked(State newState);
     int  bestSpd_unlocked() const;        // highest baud index that scored > 0
     int  readStream(uint8_t* b, int n);   // pull up to n bytes from the app buffer
@@ -74,6 +80,7 @@ public:
     void begin(); // Kicks off baud negotiation; must be called after HAL begin()
 
     void err();
+    bool err_unlocked();           // caller holds the lock; returns threshold-tripped
     void clearErr();
 
     // Byte-stream API (Stream-compatible).
@@ -82,6 +89,7 @@ public:
     int  read();
     int  read(uint8_t* b, int max_len);
     int  write(const uint8_t* b, int len);   // returns bytes accepted while OK
+    int  writeLocked(const uint8_t* b, int len); // caller holds hw.lock()
     void flush();
 
     // Message API (length + CRC16 framed; preserves boundaries). Requires
