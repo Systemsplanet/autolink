@@ -39,21 +39,21 @@ void fill(uint8_t* b, int n) { for (int i = 0; i < n; i++) b[i] = random(256); }
 void setup() {
     Serial.begin(115200);
     randomSeed(esp_random());
-    comm.blink(1, 100, 100, 2000);
+    comm.blinkWait(1, 100, 100, 2000);
     comm.begin();  // baud sweep
-    comm.blink(2, 100, 100, 2000);  
+    comm.blinkWait(2, 100, 100, 2000);
 }
 
 void loop() {
     // search for link
-    if (!comm.ready()) { comm.blink(3, 100, 100, 2000); wasReady = false; return; }
+    if (!comm.ready()) { comm.blinkWait(3, 100, 100, 2000); wasReady = false; return; }
     // connected
-    if (!wasReady) { comm.blink(4); wasReady = true; }
+    if (!wasReady) { comm.blinkWait(4); wasReady = true; }
 
     // linked
     int n = random(1, 1024);
     fill(buf, n);
-    if (comm.send(buf, n)) comm.blink(1); 
+    if (comm.send(buf, n)) comm.blinkWait(1);
 
     while ((n = comm.recv(buf, sizeof buf)) > 0) { /* drain echoes */ }
 
@@ -81,19 +81,19 @@ bool      wasReady = false;
 
 void setup() {
     Serial.begin(115200);
-    comm.blink(1, 100, 100, 2000);
+    comm.blinkWait(1, 100, 100, 2000);
     comm.begin(); // SWP, waits for master
-    comm.blink(2, 100, 100, 2000); 
+    comm.blinkWait(2, 100, 100, 2000);
 }
 
 void loop() {
-    if (!comm.ready()) { comm.blink(3, 100, 100, 2000); wasReady = false; return; }
-    if (!wasReady) { comm.blink(4); wasReady = true; }
+    if (!comm.ready()) { comm.blinkWait(3, 100, 100, 2000); wasReady = false; return; }
+    if (!wasReady) { comm.blinkWait(4); wasReady = true; }
 
     int n;
     while ((n = comm.recv(buf, sizeof buf)) > 0) {
-        comm.send(buf, n); // echo 
-        comm.blink(1);                     
+        comm.send(buf, n); // echo
+        comm.blinkWait(1);
     }
 }
 ```
@@ -102,7 +102,7 @@ That's the whole thing. No manual reconnect logic, no checksums, no framing, and
 
 ## 🔵 Status LED
 
-`blink(n)` flashes the onboard blue LED `n` times so you can read the link's state at a glance, no serial monitor needed. The examples above use a simple convention:
+`blinkWait(n)` flashes the onboard blue LED `n` times so you can read the link's state at a glance, no serial monitor needed. The examples above use a simple convention:
 
 | What you see | Meaning |
 |---|---|
@@ -110,7 +110,7 @@ That's the whole thing. No manual reconnect logic, no checksums, no framing, and
 | A quick burst of **3** | Just connected |
 | One blink per flash | One packet sent (master) / echoed (slave) |
 
-The LED defaults to **GPIO 2** (the blue LED on most ESP32 dev boards). Point it elsewhere with `cfg.ledPin`, tune the flash length with `blink(n, onMs, offMs)`, and pass an optional `delayMs` to pause after the flash — `blink(1, 60, 60, 200)` flashes once then waits 200 ms, handy for pacing a send loop. `blink()` is blocking, but the UART runs on its own FreeRTOS task, so flashing in `loop()` never drops incoming data.
+The LED defaults to **GPIO 2** (the blue LED on most ESP32 dev boards). Point it elsewhere with `cfg.ledPin`, tune the flash length with `blinkWait(n, onMs, offMs)`, and pass an optional `delayMs` to pause after the flash — `blinkWait(1, 60, 60, 200)` flashes once then waits 200 ms, handy for pacing a send loop. `blinkWait()` is blocking, so it holds `loop()` for the full flash + delay duration; the UART keeps receiving into the app buffer, but your own code won't drain it until `blinkWait()` returns. Use it for one-shot bring-up markings and short pacing delays, not for a per-packet heartbeat at speed.
 
 
 # 📨 The Message API
@@ -206,9 +206,18 @@ if (comm.ready() && comm.available() >= 5) {
 
 # 📅 Revision History
 
+**v2.4.0**
+
++ **Thread safety:** `recvMsg()` and the reliable-mode `onRx` path now hold the protocol mutex for the full reassembly / frame-parse sequence, eliminating a data race between the UART task and the app loop that the host tests could not exercise. `err_unlocked()` was added so the parser can count errors without re-entering the lock.
++ **Reliable RX parser hardening:** bad CRC, malformed COBS, and buffer overflow no longer `break` out of the event (which could leave the parser mid-frame on the next call). They now `err_unlocked()` and keep scanning, so back-to-back frames in one event are processed.
++ **COBS decode speed:** inner loop replaced with `memcpy`, ~5–10× faster on ESP32 at high baud. CRC-16/CCITT inner loop replaced with a 256-entry LUT (constexpr, lives in flash) for O(1) per byte.
++ **Write/sendMsg locking:** a single mutex acquisition per frame in `write()`, and `sendMsg()` now holds the lock across header + payload so the link can't drop between them. New private `writeLocked()` / `sendFrame_unlocked()` helpers back the new flow.
++ **UART event task:** `std::vector<uint8_t> rx_buf` replaced with an `alloca`-backed scratch buffer to avoid per-iteration alloc/ctor churn on a 4 KB stack task.
++ **Status LED rename:** `blink()` → `blinkWait()` to make the blocking behavior obvious at the call site. No behavior change.
+
 **v2.3.0**
 
-+ **Status LED:** added `blink(n, onMs, offMs, delayMs)` to flash the onboard blue LED for at-a-glance link state, with an optional trailing `delayMs` pause to pace a loop. Configurable pin via `cfg.ledPin` (default GPIO 2). The master/slave examples now show a searching heartbeat, a 3-blink connect burst, and one blink per packet.
++ **Status LED:** added `blink(n, onMs, offMs, delayMs)` to flash the onboard blue LED for at-a-glance link state, with an optional trailing `delayMs` pause to pace a loop. Configurable pin via `cfg.ledPin` (default GPIO 2). The master/slave examples now show a searching heartbeat, a 3-blink connect burst, and one blink per packet. (Renamed to `blinkWait()` in 2.4.0; behavior unchanged.)
 
 **v2.2.0**
 
