@@ -28,8 +28,8 @@ The classic use case: two boards bouncing **random-sized messages** back and for
 ```cpp
 #include "AutoLink.h"
 using namespace autolink;
-//pin 38=rcv 37=tx. was  SERIAL_8N1
-AutoLink comm(UART_NUM_1, 38, 37, true); 
+//pin 3=rcv 1=tx
+AutoLink comm(UART_NUM_1, 3, 1, true); 
 uint8_t   buf[1024];
 bool      wasReady = false;
 uint32_t  tStat = 0;
