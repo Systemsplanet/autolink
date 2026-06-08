@@ -47,11 +47,15 @@ public:
         hal->begin();
     }
 
-    // Blink the status LED n times (blocking, active-high). Handy for marking a
-    // bring-up phase and for a one-blink-per-packet heartbeat. Tune the on/off
-    // milliseconds if you want shorter/longer flashes. If delayMs > 0, pause that
-    // long after the last flash before returning (e.g. to pace a packet loop).
-    void blink(int n, int onMs = 60, int offMs = 60, long delayMs = 0) {
+    // Flash the status LED n times, then wait delayMs. Blocking: the LED
+    // pattern holds the CPU for (n * (onMs + offMs) + delayMs) ms, so use
+    // this to mark a one-shot bring-up phase or to pace a low-rate send loop.
+    // The UART runs on its own FreeRTOS task, so bytes keep flowing into
+    // the app buffer while you flash -- but your own loop() won't be calling
+    // send/recv, so newly arrived messages will sit unread until you return.
+    // For a per-packet heartbeat at speed, drive the LED from a non-blocking
+    // pattern in your own loop() instead of calling this every iteration.
+    void blinkWait(int n, int onMs = 60, int offMs = 60, long delayMs = 0) {
         for (int i = 0; i < n; i++) {
             digitalWrite(ledPin, HIGH); delay(onMs);
             digitalWrite(ledPin, LOW);
