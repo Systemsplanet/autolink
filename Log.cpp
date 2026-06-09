@@ -31,9 +31,7 @@ void Log::emit(const char* sev, const char* tag,
         default:  ESP_LOGI(tag, "%s", msg); break;
     }
 #else
-    // Host build: print "<L> [<tag>] <msg>" so the test runner output is
-    // self-explanatory. The original puts(line) referenced an undefined
-    // variable and silently swallowed every log line on the host.
+    // Host build: "<L> [<tag>] <msg>" to stdout for the test runner.
     fprintf(stdout, "%c [%s] %s\n", sev[0], tag, msg);
     fflush(stdout);
 #endif
