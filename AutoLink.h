@@ -26,14 +26,42 @@ private:
     std::unique_ptr<ALink> link;
     int ledPin;
 
+    // Async LED pattern engine (esp_timer driven). Last call wins.
+    esp_timer_handle_t blinkTimer = nullptr;
+    volatile int  blinkLeft = 0;
+    volatile bool blinkOn   = false;
+    int blinkOnMs = 60, blinkOffMs = 60;
+
+    static void blinkCb(void* arg) { ((AutoLink*)arg)->blinkStep(); }
+    void blinkStep() {
+        if (blinkOn) {
+            digitalWrite(ledPin, LOW);
+            blinkOn = false;
+            if (blinkLeft > 0 && blinkTimer)
+                esp_timer_start_once(blinkTimer, (uint64_t)blinkOffMs * 1000);
+        } else if (blinkLeft > 0) {
+            blinkLeft = blinkLeft - 1;
+            digitalWrite(ledPin, HIGH);
+            blinkOn = true;
+            if (blinkTimer) esp_timer_start_once(blinkTimer, (uint64_t)blinkOnMs * 1000);
+        }
+    }
+    void blinkCancel() {
+        if (blinkTimer) esp_timer_stop(blinkTimer);
+        blinkLeft = 0;
+        blinkOn = false;
+        digitalWrite(ledPin, LOW);
+    }
+
 public:
     // Construct on the stack as a global — no new/pointer needed. Everything past
     // the role flag is optional; sane defaults cover the common case.
     AutoLink(uart_port_t u_num, int rx_pin, int tx_pin, bool isMasterNode, AutoLinkConfig cfg = AutoLinkConfig())
     {
-        // Auto-size the reassembly buffer so a whole message always fits. The user
-        // never has to reason about the maxMsg/streamBufferSize relationship.
-        size_t need = cfg.maxMsg + MSG_HDR + 64;
+        // Auto-size the reassembly buffer to two full messages so RX keeps
+        // flowing while the app is briefly busy. The user never has to reason
+        // about the maxMsg/streamBufferSize relationship.
+        size_t need = 2 * (cfg.maxMsg + MSG_HDR);
         if (cfg.streamBufferSize < need) cfg.streamBufferSize = need;
 
         ledPin = cfg.ledPin;
@@ -47,21 +75,39 @@ public:
         hal->begin();
     }
 
-    // Flash the status LED n times, then wait delayMs. Blocking: the LED
-    // pattern holds the CPU for (n * (onMs + offMs) + delayMs) ms, so use
-    // this to mark a one-shot bring-up phase or to pace a low-rate send loop.
-    // The UART runs on its own FreeRTOS task, so bytes keep flowing into
-    // the app buffer while you flash -- but your own loop() won't be calling
-    // send/recv, so newly arrived messages will sit unread until you return.
-    // For a per-packet heartbeat at speed, drive the LED from a non-blocking
-    // pattern in your own loop() instead of calling this every iteration.
+    ~AutoLink() {
+        if (blinkTimer) { esp_timer_stop(blinkTimer); esp_timer_delete(blinkTimer); }
+    }
+
+    // Flash the status LED n times.
+    //   delayMs == 0 (default): asynchronous. Returns immediately; the
+    //     pattern runs on an esp_timer, so blinkWait(1) per packet costs
+    //     nothing. A new call replaces any pattern still running.
+    //   delayMs > 0: blocking. Flashes, then pauses delayMs -- holds the CPU
+    //     for n * (onMs + offMs) + delayMs ms. Use it to pace a loop.
     void blinkWait(int n, int onMs = 60, int offMs = 60, long delayMs = 0) {
-        for (int i = 0; i < n; i++) {
-            digitalWrite(ledPin, HIGH); delay(onMs);
-            digitalWrite(ledPin, LOW);
-            if (i < n - 1) delay(offMs);
+        if (n <= 0) return;
+        if (delayMs > 0) {
+            blinkCancel();
+            for (int i = 0; i < n; i++) {
+                digitalWrite(ledPin, HIGH); delay(onMs);
+                digitalWrite(ledPin, LOW);
+                if (i < n - 1) delay(offMs);
+            }
+            delay(delayMs);
+            return;
         }
-        if (delayMs > 0) delay(delayMs);
+        if (!blinkTimer) {
+            esp_timer_create_args_t a = {};
+            a.callback = &AutoLink::blinkCb;
+            a.arg = this;
+            a.name = "alink_blink";
+            esp_timer_create(&a, &blinkTimer);
+        }
+        blinkCancel();
+        blinkOnMs = onMs; blinkOffMs = offMs;
+        blinkLeft = n;
+        blinkStep();   // light up now; the timer drives the rest
     }
 
     // ======================= Simple API (recommended) =======================
