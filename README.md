@@ -29,7 +29,7 @@ The classic use case: two boards bouncing **random-sized messages** back and for
 #include "AutoLink.h"
 using namespace autolink;
 //pin 16=rcv 17=tx
-AutoLink comm(UART_NUM_1, 16, 17, true); 
+AutoLink comm(UART_NUM_2, 16, 17, true); 
 uint8_t   buf[1024];
 bool      wasReady = false;
 uint32_t  tStat = 0;
@@ -75,7 +75,7 @@ The slave just echoes back whatever complete messages arrive. Pass **false** for
 #include "AutoLink.h"
 using namespace autolink;
 //pin 16=rcv 17=tx
-AutoLink comm(UART_NUM_1, 16, 17, false);
+AutoLink comm(UART_NUM_2, 16, 17, false);
 uint8_t   buf[1024];
 bool      wasReady = false;
 
