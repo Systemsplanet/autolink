@@ -3,6 +3,15 @@
 #include <algorithm>
 #include <string.h>
 
+// Arduino's millis() is declared via Arduino.h on the device build, but the
+// host test build doesn't pull Arduino. nowMs() routes around that with a
+// platform ifdef, but the symbol has to be visible at the call site too.
+#if defined(ARDUINO)
+#  include <Arduino.h>
+#elif defined(ESP_PLATFORM)
+#  include "esp_timer.h"
+#endif
+
 static constexpr const char* ALINK_TAG = "AutoLink";
 
 namespace autolink {
