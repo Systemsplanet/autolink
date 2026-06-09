@@ -6,16 +6,9 @@
 // --------------------------------------------------------------------------
 // Log.cpp  —  autolink internal logger implementation
 //
-// Both platforms format the message as:
-//   [HH:MM:SS] [SEV] [tag] message
-//
 // On ESP_PLATFORM the formatted line is passed to the matching ESP_LOG*
-// macro so it still appears in the IDF monitor stream, with the hhmmss
-// prefix baked in regardless of the monitor's own timestamp setting.
-//
+// macro so it still appears in the IDF monitor stream, 
 // On host builds the line goes straight to stdout.
-//
-// NONE suppresses all output.  ERROR level passes only error() calls.
 // --------------------------------------------------------------------------
 
 #ifdef ESP_PLATFORM
