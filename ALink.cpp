@@ -3,15 +3,6 @@
 #include <algorithm>
 #include <string.h>
 
-// Arduino's millis() is declared via Arduino.h on the device build, but the
-// host test build doesn't pull Arduino. nowMs() routes around that with a
-// platform ifdef, but the symbol has to be visible at the call site too.
-#if defined(ARDUINO)
-#  include <Arduino.h>
-#elif defined(ESP_PLATFORM)
-#  include "esp_timer.h"
-#endif
-
 static constexpr const char* ALINK_TAG = "AutoLink";
 
 namespace autolink {
@@ -60,16 +51,11 @@ const uint16_t ALink::crc16_lut[256] = {
     0xEF1F, 0xFF3E, 0xCF5D, 0xDF7C, 0xAF9B, 0xBFBA, 0x8FD9, 0x9FF8, 0x6E17, 0x7E36, 0x4E55, 0x5E74, 0x2E93, 0x3EB2, 0x0ED1, 0x1EF0
 };
 
-uint32_t ALink::nowMs() {
-#if defined(ARDUINO)
-    return (uint32_t)millis();
-#elif defined(ESP_PLATFORM)
-    return (uint32_t)(esp_timer_get_time() / 1000);
-#else
-    // Host test build: any monotonic source will do; idleTimeoutMs is not
-    // exercised in the unit tests (no peer-death scenario there).
-    return 0;
-#endif
+// Watchdog/keepalive poll interval while in OK: a third of the timeout so a
+// keepalive always lands well before the peer's window closes.
+int ALink::okTickMs() const {
+    int t = cfg.idleTimeoutMs / 3;
+    return t < 50 ? 50 : t;
 }
 
 const char* StateToStr(State s) {
@@ -84,7 +70,7 @@ const char* StateToStr(State s) {
 ALink::ALink(ILink& h, bool isMasterNode, const AutoLinkConfig& config)
     : hw(h), isMaster(isMasterNode), cfg(config),
       state(State::OK), errs(0), spdI(0), rxIdx(0), relRxIdx(0),
-      rxMsgLen(-1), rxMsgCrc(0), lckRetries(0), lastRxMs(0), txBytes(0), rxBytes(0)
+      rxMsgLen(-1), rxMsgCrc(0), lckRetries(0), lastRxMs(0), lastTxMs(0), txBytes(0), rxBytes(0)
 {
     scores.resize(cfg.allowedBauds.size(), 0);
     hw.bind(this);
@@ -99,14 +85,7 @@ ALink::ALink(ILink& h, bool isMasterNode, const AutoLinkConfig& config)
 
 void ALink::begin() {
     if (isMaster) {
-        // Do the local SWP/retune/timer-arm by hand, then sendBreak() to
-        // notify the peer. v2.4's MockHal::sendBreak() happened to deliver
-        // onBreak() to *self*, which masked the fact that the master never
-        // did its own local state transition -- the test relied on the mock
-        // side effect. On real hardware sendBreak() puts a break on TX and
-        // the sender does NOT receive its own TX, so the local onBreak path
-        // must run explicitly here. Without it, the master would stay in OK
-        // and the very first onTimer() would be a no-op.
+        // Run the local drop explicitly: a sender never receives its own BREAK.
         onBreak();
         hw.sendBreak();
     } else {
@@ -147,9 +126,8 @@ uint8_t ALink::calcCrc(const uint8_t* data, int len) const {
     return crc;
 }
 
-// CRC-16/CCITT-FALSE: end-to-end integrity for whole messages, independent of
-// the per-frame CRC8. Catches errors a single 8-bit frame check could miss.
-// Uses a 256-entry LUT (constexpr, lives in flash) for O(1) per byte.
+// CRC-16/CCITT-FALSE: end-to-end integrity for whole messages, independent
+// of the per-frame CRC8. LUT-driven, O(1) per byte.
 uint16_t ALink::calcCrc16(const uint8_t* data, int len) const {
     uint16_t crc = 0xFFFF;
     for (int i = 0; i < len; i++) {
@@ -174,10 +152,8 @@ size_t ALink::cobsEncode(const uint8_t *ptr, size_t length, uint8_t *dst) const 
     return write_index;
 }
 
-// COBS decode using memcpy for the run of non-zero bytes between zero-overhead
-// codes. The original byte-by-byte loop is correct but ~5-10x slower on ESP32
-// at high baud. The extra emitted zero between runs is written inline, so
-// the hot path is one memcpy per code group.
+// COBS decode: one memcpy per code group; the implied zero between groups
+// is written inline.
 size_t ALink::cobsDecode(const uint8_t *ptr, size_t length, uint8_t *dst) const {
     size_t read_index = 0, write_index = 0;
     while (read_index < length) {
@@ -221,12 +197,8 @@ void ALink::err() {
     if (trigger) hw.sendBreak();
 }
 
-// Caller must hold the lock. Returns whether the threshold was tripped. On
-// trip we do the local state reset (SWP, 9600, scores cleared) right here,
-// in addition to whatever the caller does (send a BREAK to the peer, etc).
-// Previously the local state transition was only done by onBreak() and only
-// on the side that *received* a break -- meaning a side that tripped its
-// own err counter never re-armed itself and the link deadlocked.
+// Caller must hold the lock. Returns whether the threshold was tripped; on
+// trip the local link is dropped here (caller sends the BREAK to the peer).
 bool ALink::err_unlocked() {
     if (state != State::OK) return false;
     errs++;
@@ -271,8 +243,7 @@ int ALink::write(const uint8_t* b, int len) {
     if (!cfg.reliableMode) {
         hw.lock();
         bool ok = (state == State::OK);
-        if (ok) hw.tx(b, len);
-        if (ok) txBytes += len;
+        if (ok) { hw.tx(b, len); txBytes += len; lastTxMs = hw.nowMs(); }
         hw.unlock();
         return ok ? len : 0;
     }
@@ -302,6 +273,7 @@ int ALink::write(const uint8_t* b, int len) {
         // the app) is what blocks until the physical TX drains.
         hw.tx(frame, encLen + 2);
         txBytes += chunk;
+        lastTxMs = hw.nowMs();
         hw.unlock();
 
         offset += chunk;
@@ -319,6 +291,7 @@ int ALink::writeLocked(const uint8_t* b, int len) {
     if (!cfg.reliableMode) {
         hw.tx(b, len);
         txBytes += len;
+        lastTxMs = hw.nowMs();
         return len;
     }
 
@@ -335,6 +308,7 @@ int ALink::writeLocked(const uint8_t* b, int len) {
         frame[1 + encLen] = 0x00;
         hw.tx(frame, encLen + 2);
         txBytes += chunk;
+        lastTxMs = hw.nowMs();
         offset += chunk;
     }
     return offset;
@@ -433,17 +407,9 @@ void ALink::onRx(const uint8_t* data, int len) {
     // Any RX activity in OK means the peer is alive; bump the idle watchdog.
     // Errors alone don't count -- the link is "alive enough to fail" and
     // only true silence should drop us.
-    lastRxMs = nowMs();
-    // Latched when err_unlocked() trips the threshold during this event. The
-    // parser can't send a BREAK itself (we still hold the lock, and BREAK
-    // is a wire-level side effect that belongs outside the lock), so we
-    // remember the trip and emit the BREAK after the lock is released below.
-    // Without this, a side whose parser trips its own err counter would do
-    // the local state reset but never tell the peer -- the peer keeps
-    // transmitting on the dead link, and the just-recovered side never
-    // sees a re-sweep PING. (The public err() API has the same
-    // responsibility and has always sent the BREAK; the parser path
-    // previously did not.)
+    lastRxMs = hw.nowMs();
+    // Set when err_unlocked() trips during this event; the BREAK is a wire
+    // side effect and is emitted after the lock is released below.
     bool needSendBreak = false;
     while (i < len) {
         State cur_state = state;
@@ -460,38 +426,40 @@ void ALink::onRx(const uint8_t* data, int len) {
                             if (decLen > 1) {
                                 uint8_t crc = calcCrc(decoded, decLen - 1);
                                 if (crc == decoded[decLen - 1]) {
-                                    hw.pushAppBuf(decoded, (int)(decLen - 1));
-                                    rxBytes += (decLen - 1);
+                                    int acc = hw.pushAppBuf(decoded, (int)(decLen - 1));
+                                    rxBytes += acc;
+                                    if (acc < (int)(decLen - 1)) {
+                                        // App buffer full: bytes lost, stream
+                                        // desynced. Count and (on trip) drop.
+                                        if (err_unlocked()) { needSendBreak = true; break; }
+                                    }
                                 } else {
-                                    // Bad CRC: don't break out of the event --
-                                    // keep parsing. err_unlocked() is called
-                                    // under the lock so it bumps the threshold
-                                    // atomically with the parser state.
-                                    if (err_unlocked()) needSendBreak = true;
+                                    // Bad CRC: count, keep scanning frames.
+                                    if (err_unlocked()) { needSendBreak = true; break; }
                                 }
                             } else {
-                                // 0 bytes = malformed COBS (likely desync).
-                                // 1 byte  = a CRC with no payload.
-                                // Both are desync signals; count them.
-                                if (err_unlocked()) needSendBreak = true;
+                                // Malformed COBS or CRC-only frame: desync.
+                                if (err_unlocked()) { needSendBreak = true; break; }
                             }
                         }
-                        // else: stray zero between frames, keep going.
+                        // else: stray zero between frames (keepalive), skip.
                     } else if (relRxIdx < (int)sizeof(relRxBuf)) {
                         relRxBuf[relRxIdx++] = b;
                     } else {
-                        // Buffer overflow: don't silently drop. Reset and count
-                        // the error so persistent oversize frames will trip the
-                        // threshold and re-sweep the link.
+                        // Oversize frame: reset and count so persistence trips
+                        // the threshold.
                         relRxIdx = 0;
                         memset(relRxBuf, 0, sizeof(relRxBuf));
-                        if (err_unlocked()) needSendBreak = true;
+                        if (err_unlocked()) { needSendBreak = true; break; }
                     }
                 }
+                // A threshold trip dropped us to SWP; the outer loop re-reads
+                // state and hands the rest of the event to the command parser.
             } else {
                 int n = len - i;
-                hw.pushAppBuf(data + i, n);
-                rxBytes += n;
+                int acc = hw.pushAppBuf(data + i, n);
+                rxBytes += acc;
+                if (acc < n && err_unlocked()) needSendBreak = true;
                 i = len;
             }
         }
@@ -509,41 +477,38 @@ void ALink::onRx(const uint8_t* data, int len) {
                         if (!isMaster && payload == REQ_CMD) {
                             int best = bestSpd_unlocked();
                             sendFrame_unlocked(best);
-                            hw.unlock();  // release before setSpd (HAL call OK unlocked)
                             hw.setSpd(cfg.allowedBauds[best]);
-                            hw.lock();
                             errs = 0;
+                            lastRxMs = lastTxMs = hw.nowMs();
                             changeState_unlocked(State::OK);
+                            if (cfg.idleTimeoutMs > 0) hw.startTimer(okTickMs());
                         } else if (payload == PING_CMD && spdI < (int)cfg.allowedBauds.size()) {
                             scores[spdI]++;
                             spdI++;
-                            // Retune in lockstep with the master so the next PING,
-                            // sent at the next baud, can actually be decoded. This is
-                            // what makes scoring (and auto-baud) work on real hardware.
+                            // Retune in lockstep with the master so the next
+                            // PING (at the next baud) can be decoded.
                             int next = (spdI < (int)cfg.allowedBauds.size()) ? spdI : 0;
-                            hw.unlock();
                             hw.setSpd(cfg.allowedBauds[next]); // baud[0] readies us for REQ
-                            hw.lock();
                         }
                     }
                     else if (cur_state == State::LCK) {
                         if (isMaster) {
                             if (payload < (int)cfg.allowedBauds.size()) {
-                                hw.unlock();
                                 hw.setSpd(cfg.allowedBauds[payload]);
-                                hw.lock();
                                 errs = 0;
+                                lastRxMs = lastTxMs = hw.nowMs();
                                 changeState_unlocked(State::OK);
+                                if (cfg.idleTimeoutMs > 0) hw.startTimer(okTickMs());
                             }
                         } else {
                             if (payload == REQ_CMD) {
                                 int best = bestSpd_unlocked();
                                 sendFrame_unlocked(best);
-                                hw.unlock();
                                 hw.setSpd(cfg.allowedBauds[best]);
-                                hw.lock();
                                 errs = 0;
+                                lastRxMs = lastTxMs = hw.nowMs();
                                 changeState_unlocked(State::OK);
+                                if (cfg.idleTimeoutMs > 0) hw.startTimer(okTickMs());
                             }
                         }
                     }
@@ -559,9 +524,9 @@ void ALink::onRx(const uint8_t* data, int len) {
     if (needSendBreak) hw.sendBreak();
 }
 
-// Local equivalent of onBreak(): reset all the per-link state and retune
-// to allowedBauds[0]. Idempotent. Caller must hold the lock. Master arms
-// the sweep timer; slave waits passively.
+// Reset all per-link state and retune to allowedBauds[0]. Idempotent.
+// Caller must hold the lock; it is held throughout (HAL calls never take it).
+// Master arms the sweep timer; slave waits passively.
 void ALink::dropLink_unlocked() {
     changeState_unlocked(State::SWP);
     spdI = 0;
@@ -572,14 +537,11 @@ void ALink::dropLink_unlocked() {
     for (int i = 0; i < (int)scores.size(); i++) scores[i] = 0;
     errs = 0;
     lckRetries = 0;
-    lastRxMs = nowMs();
-    hw.unlock();
-
+    lastRxMs = hw.nowMs();
     hw.clearAppBuf();
     hw.setSpd(cfg.allowedBauds[0]);
     if (isMaster) hw.startTimer(cfg.delayMs);
-
-    hw.lock();
+    else hw.stopTimer();
 }
 
 void ALink::onBreak() {
@@ -594,22 +556,35 @@ void ALink::onTimer() {
     State s = state;
     int curSpd = spdI;
 
-    // Idle watchdog: in OK with no RX for too long, assume the peer is gone.
-    // The master's RX pin goes silent when the slave powers off, so this is
-    // the only way the master notices at all in the originator-of-traffic
-    // case. We bump errs past the threshold so dropLink_unlocked() runs.
-    if (s == State::OK && cfg.idleTimeoutMs > 0) {
-        uint32_t now = nowMs();
-        if ((uint32_t)(now - lastRxMs) > (uint32_t)cfg.idleTimeoutMs) {
-            Log::getLog().info(ALINK_TAG, "Idle for %u ms (limit %d) -> dropping link",
-                               (unsigned)(now - lastRxMs), cfg.idleTimeoutMs);
-            errs = cfg.errThreshold + 1;
-            dropLink_unlocked();   // releases + re-acquires the lock
+    // OK: idle watchdog + keepalive, then re-arm the tick. The watchdog is
+    // how the master notices a silently dead slave (its RX pin just goes
+    // quiet); the keepalive is what stops a healthy-but-quiet link from
+    // tripping the peer's watchdog.
+    if (s == State::OK) {
+        if (cfg.idleTimeoutMs > 0) {
+            uint32_t now = hw.nowMs();
+            if ((uint32_t)(now - lastRxMs) > (uint32_t)cfg.idleTimeoutMs) {
+                Log::getLog().info(ALINK_TAG, "Idle for %u ms (limit %d) -> dropping link",
+                                   (unsigned)(now - lastRxMs), cfg.idleTimeoutMs);
+                dropLink_unlocked();
+                hw.unlock();
+                hw.sendBreak();   // tell the peer to re-sweep too
+                return;
+            }
+            // Keepalive: a lone 0x00 the peer's reliable parser skips as a
+            // stray inter-frame zero, but which still feeds its watchdog.
+            // Raw mode would see it as data, so it only runs in reliable mode.
+            if (cfg.reliableMode && (uint32_t)(now - lastTxMs) >= (uint32_t)okTickMs()) {
+                uint8_t z = 0;
+                hw.tx(&z, 1);
+                lastTxMs = now;
+            }
             hw.unlock();
-            // Tell the peer too, so it doesn't sit there in OK wondering.
-            hw.sendBreak();
+            hw.startTimer(okTickMs());
             return;
         }
+        hw.unlock();
+        return;
     }
     hw.unlock();
 
