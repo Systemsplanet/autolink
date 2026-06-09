@@ -17,26 +17,12 @@
 #endif
 
 namespace autolink {
-/*
-static void hhmmss(char* buf, size_t n) {
-    time_t t; time(&t);
-    struct tm* tm_ = localtime(&t);
-    if (tm_) strftime(buf, n, "%H:%M:%S", tm_);
-    else      strncpy(buf, "00:00:00", n);
-}
-*/
+
 void Log::emit(const char* sev, const char* tag,
                const char* fmt, va_list ap) const
 {
     char msg[256];
     vsnprintf(msg, sizeof(msg), fmt, ap);
-
-    //char tbuf[10];
-    //hhmmss(tbuf, sizeof(tbuf));
-
-    // Full line: [HH:MM:SS] [SEV] [tag] message
-    //char line[320];
-    //snprintf(line, sizeof(line), "[%s] [%s] [%s] %s", tbuf, sev, tag, msg);
 
 #ifdef ESP_PLATFORM
     switch (sev[0]) {
