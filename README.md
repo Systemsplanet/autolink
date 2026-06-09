@@ -45,10 +45,10 @@ AutoLink comm(UART_NUM_2, 16, 17, true);
 uint8_t   buf[1024];
 uint8_t   sent[1024];   // stash the last payload so we can compare with the echo
 int       sentLen = 0;  // length of the stashed payload; 0 = nothing in flight
+uint32_t  sentSeq = 0;  // sequence number of the stashed payload
 bool      wasReady = false;
 uint32_t  tStat = 0;
-uint32_t  msgSeq = 0;   // monotonically increasing, included in the payload so
-                        // mismatches are easy to spot in the log
+uint32_t  msgSeq = 0;   // monotonically increasing send sequence
 Log&      LOG = Log::getLog();
 void fill(uint8_t* b, int n) { for (int i = 0; i < n; i++) b[i] = random(256); }
 
@@ -60,6 +60,51 @@ void setup() {
     comm.blinkWait(1, 100, 100, 2000);
     comm.begin();  // baud sweep
     comm.blinkWait(2, 100, 100, 2000);
+}
+
+// Drain every complete echo the slave has sent back, comparing each against
+// the most recent stashed send. Echoes are FIFO: the first one out is the
+// echo of the first message we put in. If only one message is in flight at
+// a time (this example) the first echo is the matching one. If we ever sent
+// more than one before the first echo came back, we compare in order and
+// the seq number is just for log readability -- the byte comparison is the
+// ground truth.
+void drainAndCompare() {
+    int got;
+    while ((got = comm.recv(buf, sizeof buf)) > 0) {
+        if (sentLen == 0) {
+            // Echo arrived with nothing in flight. Could be a stale echo
+            // from before a link drop -- the dropLink_unlocked path clears
+            // the app buffer, so this should be rare. Don't error, just log.
+            LOG.warn("Main", "recv %d bytes with no in-flight send", got);
+            continue;
+        }
+        LOG.debug("Main", "recv %d bytes  sentSeq=%lu", got, (unsigned long)sentSeq);
+        if (got != sentLen) {
+            LOG.error("Main",
+                "MISMATCH sentSeq=%lu  sent=%d bytes  echoed=%d bytes",
+                (unsigned long)sentSeq, sentLen, got);
+        } else if (memcmp(buf, sent, got) != 0) {
+            int firstBad = -1;
+            for (int i = 0; i < got; i++) {
+                if (buf[i] != sent[i]) { firstBad = i; break; }
+            }
+            LOG.error("Main",
+                "MISMATCH sentSeq=%lu  %d bytes differ, first bad offset=%d  "
+                "expected 0x%02X got 0x%02X",
+                (unsigned long)sentSeq, got, firstBad,
+                sent[firstBad >= 0 ? firstBad : 0],
+                buf[firstBad >= 0 ? firstBad : 0]);
+        }
+        sentLen = 0;
+    }
+    // got == -1 is a CRC reject -- the bad message was drained and counted.
+    // Leave sentLen alone in that case so a clean retry is possible.
+    if (got < 0) {
+        LOG.error("Main", "recv rejected (CRC/desync) sentSeq=%lu",
+                  (unsigned long)sentSeq);
+        sentLen = 0;
+    }
 }
 
 void loop() {
@@ -74,52 +119,34 @@ void loop() {
     // connected
     if (!wasReady) {
        LOG.debug("Main", "ready");
+       // After a (re)connect, drain anything the slave queued during the
+       // gap -- the peer usually has at least one message for us.
+       drainAndCompare();
        comm.blinkWait(4);
        wasReady = true;
     }
 
-    // linked: send a fresh random payload. Stash it for the echo check below.
-    int n = random(1, 1024);
-    fill(buf, n);
-    if (comm.send(buf, n)) {
-        sentLen   = n;
-        memcpy(sent, buf, n);
-        LOG.debug("Main", "sent %d bytes  seq=%lu", n, (unsigned long)msgSeq);
-        comm.blinkWait(1);
-    } else {
-        LOG.error("Main", "send failed (link dropped mid-send)");
-        sentLen = 0;
+    // linked: send a fresh random payload, then wait for its echo before
+    // sending the next one. This keeps the round-trip "in flight" count at
+    // 1, which makes the byte compare unambiguous. (Faster apps that want
+    // pipelining should track a queue of pending sends, not just one.)
+    if (sentLen == 0) {
+        int n = random(1, 1024);
+        fill(buf, n);
+        if (comm.send(buf, n)) {
+            sentLen  = n;
+            sentSeq  = msgSeq++;
+            memcpy(sent, buf, n);
+            LOG.debug("Main", "sent %d bytes  sentSeq=%lu", n, (unsigned long)sentSeq);
+        } else {
+            LOG.error("Main", "send failed (link dropped mid-send)");
+        }
     }
 
-    // Drain one echo, compare against the stashed send, and log the byte count.
-    int got = comm.recv(buf, sizeof buf);
-    if (got > 0) {
-        LOG.debug("Main", "recv %d bytes  seq=%lu", got, (unsigned long)msgSeq);
-        if (got != sentLen) {
-            LOG.error("Main",
-                "MISMATCH seq=%lu  sent=%d bytes  echoed=%d bytes",
-                (unsigned long)msgSeq, sentLen, got);
-        } else if (memcmp(buf, sent, got) != 0) {
-            int firstBad = -1;
-            for (int i = 0; i < got; i++) {
-                if (buf[i] != sent[i]) { firstBad = i; break; }
-            }
-            LOG.error("Main",
-                "MISMATCH seq=%lu  %d bytes differ, first bad offset=%d  "
-                "expected 0x%02X got 0x%02X",
-                (unsigned long)msgSeq, got, firstBad,
-                sent[firstBad >= 0 ? firstBad : 0],
-                buf[firstBad >= 0 ? firstBad : 0]);
-        }
-        msgSeq++;
-        sentLen = 0;
-    } else if (got < 0) {
-        // -1 = CRC reject / desync; the bad message was drained by recvMsg.
-        // Don't bump msgSeq -- the round trip is incomplete.
-        LOG.error("Main", "recv rejected (CRC/desync) seq=%lu",
-                  (unsigned long)msgSeq);
-        sentLen = 0;
-    }
+    // Drain any echo that's already arrived. If the echo isn't back yet
+    // we'll just loop on the next iteration -- comm.ready() will keep us
+    // from sending a new one until the previous round trip completes.
+    drainAndCompare();
 
     // log throughput once a second.
     if (millis() - tStat > 1000) {
