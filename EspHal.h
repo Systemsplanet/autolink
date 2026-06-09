@@ -17,6 +17,12 @@
 
 namespace autolink {
 
+// ----------------------------------------------------------------------------
+// EspHal — the ESP32 implementation of ILink: ESP-IDF UART driver with a
+// dedicated FreeRTOS event task (data + BREAK with debounce), a FreeRTOS
+// software timer for the protocol clock, a mutex for the protocol lock, and
+// a stream buffer for the app-side bytes.
+// ----------------------------------------------------------------------------
 class EspHal : public ILink {
     static constexpr const char* HAL_TAG = "EspHal";
 
