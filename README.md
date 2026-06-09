@@ -37,9 +37,10 @@ uint32_t  tStat = 0;
 void fill(uint8_t* b, int n) { for (int i = 0; i < n; i++) b[i] = random(256); }
 
 void setup() {
+  esp_log_level_set("*",ESP_LOG_VERBOSE);  
     Serial.begin(115200);
     Log::getLog().setLevel(Log::DEBUG); 
-    Log::getLog().info("Setup", "starting!!!");
+    Log::getLog().info("Main", "starting");
     randomSeed(esp_random());
     comm.blinkWait(1, 100, 100, 2000);
     comm.begin();  // baud sweep
@@ -49,14 +50,14 @@ void setup() {
 void loop() {
     // search for link
     if (!comm.ready()) {
-       Log::getLog().info("Loop", "comm not ready");
+       Log::getLog().info("Main", "comm not ready");
        comm.blinkWait(3, 100, 100, 2000);
        wasReady = false;
        return;
     }
     // connected
     if (!wasReady) {
-       Log::getLog().info("Loop", "comm ready");
+       Log::getLog().info("Main", "comm ready");
        comm.blinkWait(4);
        wasReady = true;
     }
@@ -65,15 +66,15 @@ void loop() {
     int n = random(1, 1024);
     fill(buf, n);
     if (comm.send(buf, n)) {
-       Log::getLog().info("Loop", "sent");
+       Log::getLog().info("Main", "sent");
        comm.blinkWait(1);
     }
     while ((n = comm.recv(buf, sizeof buf)) > 0) { /* drain echoes */ }
-    Log::getLog().info("Loop", "recv");
+    Log::getLog().info("Main", "recv");
     // Optional: log throughput once a second.
     if (millis() - tStat > 1000) {
         uint64_t tx, rx; comm.getStats(tx, rx); comm.resetStats();
-        Log::getLog().info("App", "TX %lu B/s   RX %lu B/s",
+        Log::getLog().info("Main", "TX %lu B/s   RX %lu B/s",
                            (unsigned long)tx, (unsigned long)rx);
         tStat = millis();
     }
