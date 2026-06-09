@@ -3,7 +3,8 @@
 #include <stddef.h>
 
 // --------------------------------------------------------------------------
-// Log.h  —  autolink internal logger
+// Log — leveled singleton logger for the AutoLink stack: ESP_LOG* on device,
+// stdout on host builds.
 //
 // Usage:
 //   Log& LOG = Log::getLog();        // singleton
