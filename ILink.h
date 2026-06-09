@@ -5,6 +5,13 @@ namespace autolink {
 
 class ALink;
 
+// ----------------------------------------------------------------------------
+// ILink — the hardware seam between the protocol core (ALink) and the world:
+// UART TX/break/baud, the sweep timer, a monotonic clock, a mutex, and the
+// app-side byte buffer. EspHal implements it on the ESP32; MockHal implements
+// it in the host test suite, which is what makes the protocol natively
+// testable.
+// ----------------------------------------------------------------------------
 class ILink {
 public:
     ALink* link = nullptr;
