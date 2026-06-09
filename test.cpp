@@ -13,6 +13,11 @@
 
 using namespace autolink;
 
+// ----------------------------------------------------------------------------
+// MockHal — host-side ILink: records TX bytes/breaks/baud changes, exposes an
+// injectable clock and an optional app-buffer capacity, and can deliver
+// BREAKs to a peer MockHal to mirror real wire semantics.
+// ----------------------------------------------------------------------------
 class MockHal : public ILink {
 public:
     uint32_t spd = 9600;
@@ -48,7 +53,7 @@ public:
     void flushTx() override {}
     void startTimer(int ms) override { timerStartCalls++; timerActive = true; lastTimerMs = ms; }
     void stopTimer() override { timerActive = false; }
-    void delayMs(int ms) override {}
+    void delayMs(int) override {}
     void clearTx() { txBuf.clear(); }
 
     // Injectable clock so host tests can drive the idle watchdog/keepalive.
