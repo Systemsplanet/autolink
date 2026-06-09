@@ -81,6 +81,9 @@ void drainAndCompare() {
             continue;
         }
         LOG.debug("Main", "recv %d bytes  sentSeq=%lu", got, (unsigned long)sentSeq);
+        // Flash the LED so the link is visually symmetric: master blinks
+        // on each echo it receives, matching the slave's per-echo blink.
+        comm.blinkWait(1);
         if (got != sentLen) {
             LOG.error("Main",
                 "MISMATCH sentSeq=%lu  sent=%d bytes  echoed=%d bytes",
