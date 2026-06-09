@@ -12,7 +12,8 @@
 #include "freertos/stream_buffer.h"
 #include "freertos/semphr.h"
 #include <vector>
-#include <string.h> // memset, alloca
+#include <string.h> // memset
+#include <stdlib.h>  // malloc/free
 
 namespace autolink {
 
@@ -39,18 +40,20 @@ class EspHal : public ILink {
     static void uart_event_task(void *pvParameters) {
         EspHal* hal = (EspHal*)pvParameters;
         uart_event_t event;
-        // Static scratch buffer sized to the per-event read cap. Avoids the
-        // std::vector alloc/ctor churn of the previous version on a 4 KB stack
-        // task that runs forever.
+        // Heap scratch buffer sized to the per-event read cap. Allocated once
+        // for the task's lifetime; alloca here would overflow the 4 KB stack
+        // for large rxBufferSize configs.
         size_t rx_cap = hal->cfg.rxBufferSize;
-        uint8_t* rx_buf = (uint8_t*)alloca(rx_cap);
+        uint8_t* rx_buf = (uint8_t*)malloc(rx_cap);
+        if (!rx_buf) {
+            Log::getLog().error(HAL_TAG, "RX scratch alloc failed (%u B)", (unsigned)rx_cap);
+            if (hal->task_exit_sem) xSemaphoreGive(hal->task_exit_sem);
+            vTaskDelete(NULL);
+            return;
+        }
 
-        // BREAK debounce: a line glitch can fire UART_BREAK for a few hundred
-        // microseconds. Two breaks closer than this many ms apart are
-        // collapsed into one onBreak() so a single noise burst can't bounce
-        // the link. 50 ms is well below the master's sweep tick (>= delayMs)
-        // and below any human-initiated power-cycle, so legitimate breaks
-        // always make it through.
+        // BREAK debounce: collapse breaks closer than 50 ms so a noise burst
+        // can't bounce the link; legitimate peer breaks always pass.
         constexpr uint32_t BREAK_DEBOUNCE_MS = 50;
         uint32_t last_break_ms = 0;
 
@@ -77,6 +80,7 @@ class EspHal : public ILink {
                 }
             }
         }
+        free(rx_buf);
         if (hal->task_exit_sem) xSemaphoreGive(hal->task_exit_sem);
         vTaskDelete(NULL);
     }
@@ -94,8 +98,7 @@ public:
         task_exit_sem = xSemaphoreCreateBinary();
         stream_buf = xStreamBufferCreate(cfg.streamBufferSize, 1);
         
-        // Zero the struct first so any field added in newer ESP-IDF versions
-        // (e.g. use_ref_tick was removed in v5) starts from a known value.
+        // Zero first so fields added/removed across ESP-IDF versions start known.
         memset(&uart_config, 0, sizeof(uart_config_t));
 
         uart_config.baud_rate = 9600;
@@ -104,9 +107,6 @@ public:
         uart_config.stop_bits = UART_STOP_BITS_1;
         uart_config.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
         uart_config.rx_flow_ctrl_thresh = 122;
-        
-        // Note: 'use_ref_tick' is intentionally omitted here as it was removed in ESP-IDF v5+.
-        // Using memset above guarantees the struct is properly initialized without it.
     }
     
     void begin() override {
@@ -160,11 +160,8 @@ public:
     bool isHealthy() const { return healthy; }
 
     void setSpd(uint32_t spd) override {
-        // Flush stale RX samples before retuning. The protocol expects the
-        // RX FIFO to contain only bytes received at the new baud; otherwise
-        // the first bytes after a setSpd are at the old baud and parse as
-        // garbage, which fires err_unlocked() on the very first byte of the
-        // new sweep and trips the err threshold on a clean re-negotiation.
+        // Flush stale old-baud samples so they don't parse as garbage and
+        // trip the err threshold on a clean re-negotiation.
         uart_flush_input(uart_num);
         uart_set_baudrate(uart_num, spd);
     }
@@ -185,6 +182,14 @@ public:
     void delayMs(int ms) override {
         vTaskDelay(pdMS_TO_TICKS(ms));
     }
+
+    uint32_t nowMs() override {
+#ifdef ARDUINO
+        return (uint32_t)millis();
+#else
+        return (uint32_t)(esp_timer_get_time() / 1000);
+#endif
+    }
     
     void lock() const override { 
         if(mutex) xSemaphoreTake(mutex, portMAX_DELAY); 
@@ -196,8 +201,11 @@ public:
     void pushAppBuf(uint8_t b) override { 
         if(stream_buf) xStreamBufferSend(stream_buf, &b, 1, 0); 
     }
-    void pushAppBuf(const uint8_t* b, int n) override {
-        if(stream_buf && n > 0) xStreamBufferSend(stream_buf, b, n, 0);
+    int pushAppBuf(const uint8_t* b, int n) override {
+        if (!stream_buf || n <= 0) return 0;
+        // Returns bytes accepted; a shortfall means the app buffer is full
+        // and the caller counts the loss as a link error.
+        return (int)xStreamBufferSend(stream_buf, b, n, 0);
     }
     
     int popAppBuf() override {
