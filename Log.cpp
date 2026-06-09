@@ -19,6 +19,7 @@
 // --------------------------------------------------------------------------
 
 #ifdef ESP_PLATFORM
+#  define LOG_LOCAL_LEVEL ESP_LOG_VERBOSE
 #  include "esp_log.h"
 #endif
 
@@ -47,11 +48,8 @@ void Log::emit(const char* sev, const char* tag,
 #ifdef ESP_PLATFORM
     switch (sev[0]) {
         case 'E': ESP_LOGE(tag, "%s", line); break;
-        case 'D': Serial.printf("%s\n", line); break;  // bypass ESP_LOGD
-        default:  Serial.printf("%s\n", line); break;  // bypass ESP_LOGI
-
-    //    case 'D': ESP_LOGD(tag, "%s", line); break;
-    //    default:  ESP_LOGI(tag, "%s", line); break;
+        case 'D': ESP_LOGD(tag, "%s", line); break;
+        default:  ESP_LOGI(tag, "%s", line); break;
     }
 #else
     puts(line);
