@@ -51,6 +51,18 @@ const uint16_t ALink::crc16_lut[256] = {
     0xEF1F, 0xFF3E, 0xCF5D, 0xDF7C, 0xAF9B, 0xBFBA, 0x8FD9, 0x9FF8, 0x6E17, 0x7E36, 0x4E55, 0x5E74, 0x2E93, 0x3EB2, 0x0ED1, 0x1EF0
 };
 
+uint32_t ALink::nowMs() {
+#if defined(ARDUINO)
+    return (uint32_t)millis();
+#elif defined(ESP_PLATFORM)
+    return (uint32_t)(esp_timer_get_time() / 1000);
+#else
+    // Host test build: any monotonic source will do; idleTimeoutMs is not
+    // exercised in the unit tests (no peer-death scenario there).
+    return 0;
+#endif
+}
+
 const char* StateToStr(State s) {
     switch(s) {
         case State::OK: return "OK";
@@ -63,7 +75,7 @@ const char* StateToStr(State s) {
 ALink::ALink(ILink& h, bool isMasterNode, const AutoLinkConfig& config)
     : hw(h), isMaster(isMasterNode), cfg(config),
       state(State::OK), errs(0), spdI(0), rxIdx(0), relRxIdx(0),
-      rxMsgLen(-1), rxMsgCrc(0), txBytes(0), rxBytes(0)
+      rxMsgLen(-1), rxMsgCrc(0), lckRetries(0), lastRxMs(0), txBytes(0), rxBytes(0)
 {
     scores.resize(cfg.allowedBauds.size(), 0);
     hw.bind(this);
@@ -194,14 +206,19 @@ void ALink::err() {
     if (trigger) hw.sendBreak();
 }
 
-// Caller must hold the lock. Returns whether the threshold was tripped so
-// the public err() can decide whether to send a BREAK outside the lock.
+// Caller must hold the lock. Returns whether the threshold was tripped. On
+// trip we do the local state reset (SWP, 9600, scores cleared) right here,
+// in addition to whatever the caller does (send a BREAK to the peer, etc).
+// Previously the local state transition was only done by onBreak() and only
+// on the side that *received* a break -- meaning a side that tripped its
+// own err counter never re-armed itself and the link deadlocked.
 bool ALink::err_unlocked() {
     if (state != State::OK) return false;
     errs++;
     if (errs > cfg.errThreshold) {
         Log::getLog().info(ALINK_TAG, "Error threshold exceeded (%d > %d). Dropping link.",
                            errs, cfg.errThreshold);
+        dropLink_unlocked();   // local SWP + retune; we still hold the lock
         return true;
     }
     return false;
@@ -398,6 +415,10 @@ void ALink::onRx(const uint8_t* data, int len) {
     // against the app side is the simplest way to make the parser race-free.
     hw.lock();
     int i = 0;
+    // Any RX activity in OK means the peer is alive; bump the idle watchdog.
+    // Errors alone don't count -- the link is "alive enough to fail" and
+    // only true silence should drop us.
+    lastRxMs = nowMs();
     while (i < len) {
         State cur_state = state;
 
@@ -507,26 +528,58 @@ void ALink::onRx(const uint8_t* data, int len) {
     hw.unlock();
 }
 
-void ALink::onBreak() {
-    hw.lock();
+// Local equivalent of onBreak(): reset all the per-link state and retune
+// to allowedBauds[0]. Idempotent. Caller must hold the lock. Master arms
+// the sweep timer; slave waits passively.
+void ALink::dropLink_unlocked() {
     changeState_unlocked(State::SWP);
     spdI = 0;
     rxIdx = 0;
     relRxIdx = 0;
     rxMsgLen = -1;
     memset(relRxBuf, 0, sizeof(relRxBuf));
-    for(int i=0; i<(int)scores.size(); i++) scores[i]=0;
+    for (int i = 0; i < (int)scores.size(); i++) scores[i] = 0;
+    errs = 0;
+    lckRetries = 0;
+    lastRxMs = nowMs();
     hw.unlock();
 
     hw.clearAppBuf();
     hw.setSpd(cfg.allowedBauds[0]);
     if (isMaster) hw.startTimer(cfg.delayMs);
+
+    hw.lock();
+}
+
+void ALink::onBreak() {
+    hw.lock();
+    Log::getLog().info(ALINK_TAG, "BREAK received -> re-sweep");
+    dropLink_unlocked();
+    hw.unlock();
 }
 
 void ALink::onTimer() {
     hw.lock();
     State s = state;
     int curSpd = spdI;
+
+    // Idle watchdog: in OK with no RX for too long, assume the peer is gone.
+    // The master's RX pin goes silent when the slave powers off, so this is
+    // the only way the master notices at all in the originator-of-traffic
+    // case. We bump errs past the threshold so dropLink_unlocked() runs.
+    if (s == State::OK && cfg.idleTimeoutMs > 0) {
+        uint32_t now = nowMs();
+        if ((uint32_t)(now - lastRxMs) > (uint32_t)cfg.idleTimeoutMs) {
+            Log::getLog().info(ALINK_TAG, "Idle for %u ms (limit %d) -> dropping link",
+                               (unsigned)(now - lastRxMs), cfg.idleTimeoutMs);
+            errs = cfg.errThreshold + 1;
+            dropLink_unlocked();   // releases + re-acquires the lock
+            hw.unlock();
+            // Tell the peer too, so it doesn't sit there in OK wondering.
+            hw.sendBreak();
+            return;
+        }
+    }
     hw.unlock();
 
     if (s == State::SWP) {
@@ -543,6 +596,7 @@ void ALink::onTimer() {
         } else {
             hw.lock();
             changeState_unlocked(State::LCK);
+            lckRetries = 0;
             hw.unlock();
             hw.setSpd(cfg.allowedBauds[0]);
             if (isMaster) hw.startTimer(cfg.delayMs);
@@ -550,6 +604,22 @@ void ALink::onTimer() {
     }
     else if (s == State::LCK && isMaster) {
         sendFrame(REQ_CMD);
+        hw.lock();
+        lckRetries++;
+        hw.unlock();
+        // If we've sent REQ too many times with no slave response, the peer
+        // is gone -- restart the sweep from scratch. The next sweep will
+        // either find a freshly-booted slave at 9600 or give up again.
+        if (lckRetries > (int)cfg.allowedBauds.size() * 2) {
+            Log::getLog().info(ALINK_TAG, "LCK timeout: no peer reply after %d REQs -> re-sweep",
+                               lckRetries);
+            hw.lock();
+            dropLink_unlocked();
+            hw.unlock();
+            hw.sendBreak();
+            return;
+        }
+        hw.startTimer(cfg.delayMs);
     }
 }
 
