@@ -44,6 +44,15 @@ class EspHal : public ILink {
         size_t rx_cap = hal->cfg.rxBufferSize;
         uint8_t* rx_buf = (uint8_t*)alloca(rx_cap);
 
+        // BREAK debounce: a line glitch can fire UART_BREAK for a few hundred
+        // microseconds. Two breaks closer than this many ms apart are
+        // collapsed into one onBreak() so a single noise burst can't bounce
+        // the link. 50 ms is well below the master's sweep tick (>= delayMs)
+        // and below any human-initiated power-cycle, so legitimate breaks
+        // always make it through.
+        constexpr uint32_t BREAK_DEBOUNCE_MS = 50;
+        uint32_t last_break_ms = 0;
+
         while(hal->running) {
             if(xQueueReceive(hal->uart_queue, (void * )&event, pdMS_TO_TICKS(100))) {
                 if (!hal->running) break;
@@ -53,6 +62,15 @@ class EspHal : public ILink {
                     if(hal->link && len > 0) hal->link->onRx(rx_buf, len);
                 }
                 else if(event.type == UART_BREAK) {
+                    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+                    if ((uint32_t)(now - last_break_ms) < BREAK_DEBOUNCE_MS) {
+                        // Spurious: drop the event but still drain the FIFO so
+                        // any noise that arrived in the same burst doesn't
+                        // get parsed as data after the new baud takes hold.
+                        uart_flush_input(hal->uart_num);
+                        continue;
+                    }
+                    last_break_ms = now;
                     uart_flush_input(hal->uart_num);
                     if(hal->link) hal->link->onBreak();
                 }
@@ -140,7 +158,15 @@ public:
     
     bool isHealthy() const { return healthy; }
 
-    void setSpd(uint32_t spd) override { uart_set_baudrate(uart_num, spd); }
+    void setSpd(uint32_t spd) override {
+        // Flush stale RX samples before retuning. The protocol expects the
+        // RX FIFO to contain only bytes received at the new baud; otherwise
+        // the first bytes after a setSpd are at the old baud and parse as
+        // garbage, which fires err_unlocked() on the very first byte of the
+        // new sweep and trips the err threshold on a clean re-negotiation.
+        uart_flush_input(uart_num);
+        uart_set_baudrate(uart_num, spd);
+    }
     void sendBreak() override { uart_write_bytes_with_break(uart_num, " ", 1, 15); }
     void tx(const uint8_t* b, int n) override { uart_write_bytes(uart_num, (const char*)b, n); }
     void flushTx() override { uart_wait_tx_done(uart_num, pdMS_TO_TICKS(100)); }
