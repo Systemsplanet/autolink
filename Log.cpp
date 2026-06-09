@@ -31,6 +31,7 @@ void Log::emit(const char* sev, const char* tag,
         default:  ESP_LOGI(tag, "%s", msg); break;
     }
 #else
+  //todo: format line line esp32 logger
     puts(line);
 #endif
 }
