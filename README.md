@@ -94,9 +94,10 @@ uint8_t   buf[1024];
 bool      wasReady = false;
 
 void setup() {
+  esp_log_level_set("*",ESP_LOG_VERBOSE);  
     Serial.begin(115200);
     Log::getLog().setLevel(Log::DEBUG); 
-    Log::getLog().info("Setup", "starting!!!");
+    Log::getLog().info("Main", "starting");
     comm.blinkWait(1, 100, 100, 2000);
     comm.begin(); // SWP, waits for master
     comm.blinkWait(2, 100, 100, 2000);
@@ -104,10 +105,10 @@ void setup() {
 
 void loop() {
     if (!comm.ready()) {
-Log::getLog().info("Loop", "comm not ready");
+Log::getLog().info("Main", "comm not ready");
 comm.blinkWait(3, 100, 100, 2000); wasReady = false; return; }
     if (!wasReady) {
-       Log::getLog().info("Loop", "comm ready");
+       Log::getLog().info("Main", "comm ready");
        comm.blinkWait(4, 100, 100, 2000);
        wasReady = true;
    }
@@ -115,9 +116,9 @@ comm.blinkWait(3, 100, 100, 2000); wasReady = false; return; }
 
     int n;
     while ((n = comm.recv(buf, sizeof buf)) > 0) {
-        Log::getLog().info("Loop", "recv");
+        Log::getLog().info("Main", "recv");
         comm.send(buf, n); // echo
-        Log::getLog().info("Loop", "send");
+        Log::getLog().info("Main", "send");
         comm.blinkWait(1);
     }
 }
