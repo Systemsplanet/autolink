@@ -46,17 +46,31 @@ public:
         txBuf.insert(txBuf.end(), b, b+n);
     }
     void flushTx() override {}
-    void startTimer(int ms) override { timerStartCalls++; timerActive = true; }
+    void startTimer(int ms) override { timerStartCalls++; timerActive = true; lastTimerMs = ms; }
     void stopTimer() override { timerActive = false; }
     void delayMs(int ms) override {}
     void clearTx() { txBuf.clear(); }
+
+    // Injectable clock so host tests can drive the idle watchdog/keepalive.
+    uint32_t now = 0;
+    int lastTimerMs = 0;
+    uint32_t nowMs() override { return now; }
+
+    // Optional app-buffer capacity to simulate stream-buffer overflow.
+    size_t appBufCap = (size_t)-1;
     
     void lock() const override { mtx.lock(); }
     void unlock() const override { mtx.unlock(); }
     
     void pushAppBuf(uint8_t b) override { appBuf.push(b); }
-    void pushAppBuf(const uint8_t* b, int n) override {
-        for(int i=0; i<n; i++) appBuf.push(b[i]);
+    int pushAppBuf(const uint8_t* b, int n) override {
+        int acc = 0;
+        for (int i = 0; i < n; i++) {
+            if (appBuf.size() >= appBufCap) break;
+            appBuf.push(b[i]);
+            acc++;
+        }
+        return acc;
     }
     int popAppBuf() override {
         if (appBuf.empty()) return -1;
@@ -735,6 +749,170 @@ void run_test_asymmetric_peer_death_recovery() {
     std::cout << "PASS" << std::endl;
 }
 
+
+// Bring a master/slave MockHal pair to OK. Shared by the watchdog tests.
+static void negotiate_to_ok(ALink& master, ALink& slave, MockHal& mHal, MockHal& sHal) {
+    master.begin();
+    slave.begin();
+    master.onTimer(); pipe_data(mHal, sHal);   // PING@baud[0]
+    master.onTimer(); pipe_data(mHal, sHal);   // PING@baud[1] -> LCK
+    master.onTimer(); pipe_data(mHal, sHal);   // REQ -> slave OK, replies index
+    pipe_data(sHal, mHal);                      // master receives index -> OK
+    assert(master.getState() == State::OK);
+    assert(slave.getState() == State::OK);
+}
+
+// Idle watchdog: with the clock advanced past idleTimeoutMs and no RX, the
+// master must drop to SWP and BREAK the peer. Also checks the OK tick was
+// armed on entering OK (the v2.5 watchdog never re-armed and so never fired).
+void run_test_idle_watchdog() {
+    std::cout << "\n=== Test: Idle Watchdog Drops a Silent Link ===" << std::endl;
+    AutoLinkConfig cfg;
+    cfg.allowedBauds = {9600, 115200};
+    cfg.idleTimeoutMs = 3000;
+    MockHal mHal, sHal;
+    mHal.peer = &sHal; sHal.peer = &mHal;
+    ALink master(mHal, true, cfg);
+    ALink slave(sHal, false, cfg);
+    negotiate_to_ok(master, slave, mHal, sHal);
+
+    // Entering OK must arm the watchdog tick.
+    assert(mHal.timerActive);
+    assert(sHal.timerActive);
+    assert(mHal.lastTimerMs == 1000);   // idleTimeoutMs / 3
+
+    // Quiet tick: no drop, timer re-armed.
+    mHal.now = 500;
+    master.onTimer();
+    assert(master.getState() == State::OK);
+
+    // Silence past the limit: master drops, peer is broken to SWP too.
+    mHal.now = 4000;
+    int breaks = mHal.sendBreakCalls;
+    master.onTimer();
+    assert(master.getState() == State::SWP);
+    assert(mHal.sendBreakCalls == breaks + 1);
+    assert(slave.getState() == State::SWP);
+    std::cout << "PASS" << std::endl;
+}
+
+// Keepalive: a quiet-but-healthy link must NOT bounce. Each OK tick with a
+// stale TX emits a lone 0x00 the peer ignores as data but counts as RX.
+void run_test_keepalive() {
+    std::cout << "\n=== Test: Keepalive Stops a Quiet Link From Bouncing ===" << std::endl;
+    AutoLinkConfig cfg;
+    cfg.allowedBauds = {9600, 115200};
+    cfg.reliableMode = true;
+    cfg.idleTimeoutMs = 3000;
+    MockHal mHal, sHal;
+    mHal.peer = &sHal; sHal.peer = &mHal;
+    ALink master(mHal, true, cfg);
+    ALink slave(sHal, false, cfg);
+    negotiate_to_ok(master, slave, mHal, sHal);
+    mHal.clearTx(); sHal.clearTx();
+
+    // App is silent. Tick the master at t=1000: keepalive byte goes out.
+    mHal.now = 1000;
+    master.onTimer();
+    assert(mHal.txBuf.size() == 1 && mHal.txBuf[0] == 0x00);
+
+    // Deliver it: the slave must stay OK, see no app data, count no errors.
+    sHal.now = 1000;
+    pipe_data(mHal, sHal);
+    assert(slave.getState() == State::OK);
+    assert(slave.available() == 0);
+    assert(slave.getErrCount() == 0);
+
+    // Slave keepalives back; master's watchdog at t=2900 must NOT fire,
+    // because the keepalive refreshed lastRxMs.
+    slave.onTimer();
+    mHal.now = 2900;
+    pipe_data(sHal, mHal);
+    master.onTimer();
+    assert(master.getState() == State::OK);
+    std::cout << "PASS" << std::endl;
+}
+
+// LCK timeout: master with a dead peer must re-sweep instead of sending REQ
+// forever.
+void run_test_lck_timeout() {
+    std::cout << "\n=== Test: LCK Timeout Restarts the Sweep ===" << std::endl;
+    AutoLinkConfig cfg;
+    cfg.allowedBauds = {9600, 115200};
+    MockHal mHal;   // no peer: REQs go nowhere
+    ALink master(mHal, true, cfg);
+    master.begin();
+    master.onTimer();              // PING@9600
+    master.onTimer();              // PING@115200 -> LCK
+    assert(master.getState() == State::LCK);
+
+    // 2 * bauds = 4 allowed REQ ticks; the 5th trips the timeout.
+    for (int i = 0; i < 4; i++) master.onTimer();
+    assert(master.getState() == State::LCK);
+    master.onTimer();
+    assert(master.getState() == State::SWP);
+    assert(master.getCurrentSpdIndex() == 0);
+    std::cout << "PASS" << std::endl;
+}
+
+// App-buffer overflow: a full stream buffer must count errors (not lose data
+// silently) and eventually drop the link so it resyncs.
+void run_test_app_buffer_overflow_errs() {
+    std::cout << "\n=== Test: App Buffer Overflow Counts Errors ===" << std::endl;
+    AutoLinkConfig cfg; cfg.reliableMode = true; cfg.errThreshold = 2;
+    MockHal mHal, sHal;
+    ALink a(mHal, true, cfg);
+    ALink b(sHal, false, cfg);
+    sHal.appBufCap = 4;   // tiny: every frame overflows
+
+    uint8_t msg[64];
+    for (int i = 0; i < 64; i++) msg[i] = (uint8_t)i;
+    int errsSeen = 0;
+    for (int k = 0; k < 5; k++) {
+        if (!a.sendMsg(msg, 64)) break;   // stops once the receiver broke us
+        pipe_data(mHal, sHal);
+        if (b.getState() != State::OK) break;
+        errsSeen = b.getErrCount();
+    }
+    // The receiver either accumulated errors or already tripped to SWP.
+    assert(errsSeen > 0 || b.getState() == State::SWP);
+    assert(b.getState() == State::SWP);   // threshold 2 must have tripped
+    std::cout << "PASS" << std::endl;
+}
+
+// After the err threshold trips mid-event, the rest of the same UART event
+// must be handed to the command parser, not consumed as OK-mode frame bytes.
+void run_test_parser_yields_after_drop() {
+    std::cout << "\n=== Test: Parser Yields to Command Parser After Drop ===" << std::endl;
+    AutoLinkConfig cfg; cfg.reliableMode = true; cfg.errThreshold = 1;
+    cfg.allowedBauds = {9600, 115200};
+    MockHal mHal, sHal;
+    sHal.peer = &mHal;   // BREAK goes to the peer, not back to self
+    ALink master(mHal, true, cfg);
+    ALink slave(sHal, false, cfg);   // constructor default state is OK
+
+    // Two bad frames trip threshold 1 (errs > 1), then a valid PING follows
+    // in the SAME event. {0x02, 0xFF} decodes to one byte = CRC-only = err.
+    uint8_t bad[] = {0x00, 0x02, 0xFF, 0x00, 0x02, 0xFF, 0x00};
+    uint8_t ping[4] = {0xAA, 0x55, PING_CMD, 0};
+    // CRC8 of the first 3 bytes (poly 0x07).
+    uint8_t crc = 0;
+    for (int i = 0; i < 3; i++) {
+        crc ^= ping[i];
+        for (int k = 0; k < 8; k++) crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0x07) : (uint8_t)(crc << 1);
+    }
+    ping[3] = crc;
+
+    std::vector<uint8_t> event(bad, bad + sizeof(bad));
+    event.insert(event.end(), ping, ping + 4);
+    slave.onRx(event.data(), (int)event.size());
+
+    assert(slave.getState() == State::SWP);
+    // The PING at the tail must have been scored by the command parser.
+    assert(slave.getCurrentSpdIndex() == 1);
+    std::cout << "PASS" << std::endl;
+}
+
 int main() {
     std::cout << "=== Running AutoLink Core Tests ===" << std::endl;
     run_test_hal_methods();
@@ -751,6 +929,11 @@ int main() {
     run_test_stats();
     run_test_best_baud_selection();
     run_test_asymmetric_peer_death_recovery();
+    run_test_idle_watchdog();
+    run_test_keepalive();
+    run_test_lck_timeout();
+    run_test_app_buffer_overflow_errs();
+    run_test_parser_yields_after_drop();
     std::cout << "\n=== All Tests Completed Successfully ===" << std::endl;
     return 0;
 }
