@@ -38,6 +38,8 @@ void fill(uint8_t* b, int n) { for (int i = 0; i < n; i++) b[i] = random(256); }
 
 void setup() {
     Serial.begin(115200);
+    Log::getLog().setLevel(Log::DEBUG); 
+    Log::getLog().info("Setup", "starting");
     randomSeed(esp_random());
     comm.blinkWait(1, 100, 100, 2000);
     comm.begin();  // baud sweep
@@ -46,17 +48,28 @@ void setup() {
 
 void loop() {
     // search for link
-    if (!comm.ready()) { comm.blinkWait(3, 100, 100, 2000); wasReady = false; return; }
+    if (!comm.ready()) {
+       Log::getLog().info("Loop", "comm not ready");
+       comm.blinkWait(3, 100, 100, 2000);
+       wasReady = false;
+       return;
+    }
     // connected
-    if (!wasReady) { comm.blinkWait(4); wasReady = true; }
+    if (!wasReady) {
+       Log::getLog().info("Loop", "comm ready");
+       comm.blinkWait(4);
+       wasReady = true;
+    }
 
     // linked
     int n = random(1, 1024);
     fill(buf, n);
-    if (comm.send(buf, n)) comm.blinkWait(1);
-
+    if (comm.send(buf, n)) {
+       Log::getLog().info("Loop", "sent");
+       comm.blinkWait(1);
+    }
     while ((n = comm.recv(buf, sizeof buf)) > 0) { /* drain echoes */ }
-
+    Log::getLog().info("Loop", "recv");
     // Optional: log throughput once a second.
     if (millis() - tStat > 1000) {
         uint64_t tx, rx; comm.getStats(tx, rx); comm.resetStats();
@@ -81,18 +94,29 @@ bool      wasReady = false;
 
 void setup() {
     Serial.begin(115200);
+    Log::getLog().setLevel(Log::DEBUG); 
+    Log::getLog().info("Setup", "starting");
     comm.blinkWait(1, 100, 100, 2000);
     comm.begin(); // SWP, waits for master
     comm.blinkWait(2, 100, 100, 2000);
 }
 
 void loop() {
-    if (!comm.ready()) { comm.blinkWait(3, 100, 100, 2000); wasReady = false; return; }
-    if (!wasReady) { comm.blinkWait(4, 100, 100, 2000); wasReady = true; }
+    if (!comm.ready()) {
+Log::getLog().info("Loop", "comm not ready");
+comm.blinkWait(3, 100, 100, 2000); wasReady = false; return; }
+    if (!wasReady) {
+       Log::getLog().info("Loop", "comm ready");
+       comm.blinkWait(4, 100, 100, 2000);
+       wasReady = true;
+   }
+
 
     int n;
     while ((n = comm.recv(buf, sizeof buf)) > 0) {
+        Log::getLog().info("Loop", "recv");
         comm.send(buf, n); // echo
+        Log::getLog().info("Loop", "send");
         comm.blinkWait(1);
     }
 }
