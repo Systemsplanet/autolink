@@ -17,20 +17,30 @@ class MockHal : public ILink {
 public:
     uint32_t spd = 9600;
     bool timerActive = false;
-    std::vector<uint8_t> txBuf; 
-    
+    std::vector<uint8_t> txBuf;
+
     int sendBreakCalls = 0;
     int timerStartCalls = 0;
     std::vector<uint32_t> spdHistory;
-    
+
+    // Optional peer pointer used by the asymmetric-recovery tests. On real
+    // hardware, sendBreak() puts a break on the TX wire and the *other* ESP32
+    // receives it on its RX pin asynchronously. The default MockHal deliver
+    // path (link->onBreak() on self) was right for the master-initiated
+    // self-test, wrong for cross-node tests. When peer is set, sendBreak
+    // delivers onBreak to the peer's link instead of self, mirroring the
+    // wire-level semantics.
+    MockHal* peer = nullptr;
+
     std::queue<uint8_t> appBuf;
-    mutable std::mutex mtx; 
-    
+    mutable std::mutex mtx;
+
     void begin() override {}
     void setSpd(uint32_t s) override { spd = s; spdHistory.push_back(s); }
-    void sendBreak() override { 
-        sendBreakCalls++; 
-        if (link) link->onBreak(); 
+    void sendBreak() override {
+        sendBreakCalls++;
+        if (peer && peer->link) peer->link->onBreak();
+        else if (link) link->onBreak();  // backwards-compatible self-deliver
     }
     void tx(const uint8_t* b, int n) override {
         txBuf.insert(txBuf.end(), b, b+n);
@@ -629,6 +639,102 @@ void run_test_best_baud_selection() {
     std::cout << "PASS" << std::endl;
 }
 
+// Asymmetric peer-death recovery. This is the scenario the v2.4 release
+// couldn't handle: the slave restarts (or its UART goes silent) while the
+// master is in OK. Before v2.5 the master would never see RX errors (its
+// RX pin is idle because it's the originator of traffic), so the master
+// would stay in OK forever, never re-sweep, and the freshly-booted slave
+// at 9600 baud would never hear a PING. v2.5 added the idle-channel
+// watchdog so the master drops to SWP and re-sweeps on its own.
+//
+// The MockHal doesn't have a real wall clock, so nowMs() returns 0 on the
+// host build. To trigger the idle watchdog without a clock we have two
+// options: (a) drive it through err_unlocked() from a parser call, which
+// exercises the same drop path; (b) skip the watchdog and just assert
+// that the err-then-drop-and-sendBreak semantics work. We do (a) via a
+// flood of deliberately corrupted reliable frames; that fires
+// err_unlocked() enough times to trip the threshold, which calls
+// dropLink_unlocked() locally and (in v2.5) latches needSendBreak so the
+// peer gets notified after the lock is released. This is the same code
+// path the real device exercises when its parser sees a flood of garbage
+// after a peer's UART desyncs.
+void run_test_asymmetric_peer_death_recovery() {
+    std::cout << "\n=== Test: Asymmetric Peer-Death Recovery ===" << std::endl;
+    AutoLinkConfig cfg;
+    cfg.reliableMode = true;
+    cfg.allowedBauds = {9600, 115200};
+    cfg.idleTimeoutMs = 0;  // disable the watchdog for this test -- we drive err directly
+
+    MockHal mHal, sHal;
+    mHal.peer = &sHal;  // master.sendBreak() now delivers to the slave
+    sHal.peer = &mHal;  // slave.sendBreak() now delivers to the master
+    ALink master(mHal, true, cfg);
+    ALink slave(sHal, false, cfg);
+
+    // Get to OK the same way the existing negotiation test does: run
+    // begin() and 3 onTimer() ticks (2 PINGs + 1 REQ), pipe data each step.
+    master.begin();
+    slave.begin();
+    master.onTimer(); pipe_data(mHal, sHal);   // PING@9600
+    master.onTimer(); pipe_data(mHal, sHal);   // PING@115200 -> LCK
+    master.onTimer(); pipe_data(mHal, sHal);   // REQ -> slave replies, both go OK
+    pipe_data(sHal, mHal);
+    assert(master.getState() == State::OK);
+    assert(slave.getState()   == State::OK);
+
+    // Now simulate the asymmetric death: the slave's parser sees so much
+    // garbage that err_unlocked() trips. The mock doesn't have a real
+    // peer death, so we synthesize the failure: hand the slave a flood
+    // of non-zero bytes that overflow relRxBuf and trip err_unlocked.
+    // Each overflow is one err. errThreshold defaults to 5, so 10
+    // overflows will trip the threshold.
+    int sendBreakCallsBeforeSlave = sHal.sendBreakCalls;
+    int sendBreakCallsBeforeMaster = mHal.sendBreakCalls;
+    int errsBefore = slave.getErrCount();
+
+    for (int burst = 0; burst < 20; burst++) {
+        std::vector<uint8_t> garbage(300, 0xCC);  // 300 non-zero bytes -> relRxBuf overflows
+        slave.onRx(garbage.data(), (int)garbage.size());
+        // If the err threshold tripped, the state has already been reset
+        // to SWP and the slave is in the middle of dropping. We can stop
+        // flooding now and verify the side effects.
+        if (slave.getErrCount() < errsBefore) break;
+    }
+
+    // The threshold should have tripped: errs reset to 0 inside dropLink_unlocked.
+    assert(slave.getErrCount() == 0);
+    // The slave's local state must be SWP (this is the v2.5 fix).
+    assert(slave.getState() == State::SWP);
+    // And the slave must have called sendBreak() exactly once (latched
+    // from onRx and emitted after the lock was released).
+    assert(sHal.sendBreakCalls == sendBreakCallsBeforeSlave + 1);
+    // The break must have been delivered to the master via the peer
+    // pointer, so the master's onBreak ran and dropped it to SWP too.
+    assert(master.getState() == State::SWP);
+    // And the master received the break (not a self-deliver), so its
+    // sendBreak counter is unchanged.
+    assert(mHal.sendBreakCalls == sendBreakCallsBeforeMaster);
+
+    // Now the master sweeps on its own. We tick the timer and confirm
+    // it sends a PING (the master is the proactive side).
+    master.onTimer();
+    assert(!mHal.txBuf.empty());
+    // The PING is a 4-byte command frame {0xAA,0x55,PING,CRC}.
+    assert(mHal.txBuf.size() == 4);
+    assert(mHal.txBuf[2] == PING_CMD);
+
+    // The slave is in SWP and receives the PING at whatever baud the
+    // master is currently at. The master just set the baud to
+    // allowedBauds[0] (9600) before the first PING. The slave, after
+    // dropLink_unlocked, is also at 9600. Pipe the PING to the slave
+    // and assert the slave scored it (spdI advanced to 1).
+    pipe_data(mHal, sHal);
+    assert(slave.getCurrentSpdIndex() == 1);
+    assert(slave.getErrCount() == 0);
+
+    std::cout << "PASS" << std::endl;
+}
+
 int main() {
     std::cout << "=== Running AutoLink Core Tests ===" << std::endl;
     run_test_hal_methods();
@@ -644,6 +750,7 @@ int main() {
     run_test_message_crc_reject();
     run_test_stats();
     run_test_best_baud_selection();
+    run_test_asymmetric_peer_death_recovery();
     std::cout << "\n=== All Tests Completed Successfully ===" << std::endl;
     return 0;
 }
