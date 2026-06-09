@@ -88,7 +88,7 @@ void setup() {
 
 void loop() {
     if (!comm.ready()) { comm.blinkWait(3, 100, 100, 2000); wasReady = false; return; }
-    if (!wasReady) { comm.blinkWait(4); wasReady = true; }
+    if (!wasReady) { comm.blinkWait(4, 100, 100, 2000); wasReady = true; }
 
     int n;
     while ((n = comm.recv(buf, sizeof buf)) > 0) {
