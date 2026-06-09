@@ -1,5 +1,6 @@
 #pragma once
 #include "ILink.h"
+#include "UtilFrameRx.h"
 #include <vector>
 #include <stdint.h>
 #include <stddef.h>
@@ -39,7 +40,14 @@ struct AutoLinkConfig {
     int idleTimeoutMs = 3000;
 };
 
-class ALink {
+// ----------------------------------------------------------------------------
+// ALink — the AutoLink protocol core: auto-baud negotiation state machine
+// (SWP/LCK/OK), reliable COBS+CRC-8 framing, boundary-preserving CRC-16
+// messages, error thresholding, idle watchdog, and keepalive. Hardware-free:
+// everything physical goes through the injected ILink, so the whole protocol
+// runs natively in the host test suite.
+// ----------------------------------------------------------------------------
+class ALink : private UtilFrameRx::Listener {
     ILink& hw;
     bool isMaster;
     AutoLinkConfig cfg;
@@ -52,8 +60,7 @@ class ALink {
     uint8_t rxBuf[4];
     int rxIdx;
 
-    uint8_t relRxBuf[256];
-    int relRxIdx;
+    UtilFrameRx frameRx;   // reliable-mode RX accumulator (calls back below)
 
     // Message reassembly state (read side).
     int      rxMsgLen;   // -1 = waiting on header
@@ -68,12 +75,10 @@ class ALink {
     uint64_t txBytes;
     uint64_t rxBytes;
 
-    uint8_t  calcCrc(const uint8_t* data, int len) const;
-    uint16_t calcCrc16(const uint8_t* data, int len) const;
+    // UtilFrameRx::Listener (called under the lock from onRx).
+    bool onPayload(const uint8_t* b, int n) override;
+    bool onFrameError() override;
 
-    // CRC LUTs (static const -> flash). Defined in ALink.cpp.
-    static const uint8_t  crc8_lut[256];
-    static const uint16_t crc16_lut[256];
     void sendFrame(uint8_t payload);
     void sendFrame_unlocked(uint8_t payload);  // caller holds the lock
     void changeState_unlocked(State newState);
@@ -84,9 +89,6 @@ class ALink {
     // timer. Idempotent. Caller must hold the lock.
     void dropLink_unlocked();
     int  okTickMs() const;   // watchdog/keepalive poll interval while in OK
-
-    size_t cobsEncode(const uint8_t *ptr, size_t length, uint8_t *dst) const;
-    size_t cobsDecode(const uint8_t *ptr, size_t length, uint8_t *dst) const;
 
 public:
     ALink(ILink& hw, bool isMasterNode, const AutoLinkConfig& config = AutoLinkConfig());
