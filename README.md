@@ -39,7 +39,7 @@ void fill(uint8_t* b, int n) { for (int i = 0; i < n; i++) b[i] = random(256); }
 void setup() {
     Serial.begin(115200);
     Log::getLog().setLevel(Log::DEBUG); 
-    Log::getLog().info("Setup", "starting");
+    Log::getLog().info("Setup", "starting!!!");
     randomSeed(esp_random());
     comm.blinkWait(1, 100, 100, 2000);
     comm.begin();  // baud sweep
@@ -95,7 +95,7 @@ bool      wasReady = false;
 void setup() {
     Serial.begin(115200);
     Log::getLog().setLevel(Log::DEBUG); 
-    Log::getLog().info("Setup", "starting");
+    Log::getLog().info("Setup", "starting!!!");
     comm.blinkWait(1, 100, 100, 2000);
     comm.begin(); // SWP, waits for master
     comm.blinkWait(2, 100, 100, 2000);
