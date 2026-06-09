@@ -32,6 +32,11 @@ struct AutoLinkConfig {
     // streamBufferSize to fit this, so you normally set only this (or nothing).
     size_t maxMsg = 1024;
     int ledPin = 2;   // status LED used by AutoLink::blinkWait(); GPIO2 = onboard blue LED
+    // Idle-channel watchdog. While in OK, if no app-stream bytes arrive for
+    // this many ms, the link is assumed dead and a re-sweep is triggered.
+    // 0 disables. Default 3000 ms -- long enough that a quiet but live peer
+    // (e.g. an app that only sends every few seconds) isn't killed.
+    int idleTimeoutMs = 3000;
 };
 
 class ALink {
@@ -53,6 +58,15 @@ class ALink {
     // Message reassembly state (read side).
     int      rxMsgLen;   // -1 = waiting on header
     uint16_t rxMsgCrc;
+    int      lckRetries;  // REQ_CMD attempts since entering LCK (master only)
+
+    // Idle-channel watchdog. In OK, if no app-stream bytes arrive for
+    // cfg.idleTimeoutMs, assume the peer is gone and re-sweep. The master's
+    // RX pin goes silent when the slave powers off -- without this, the
+    // master would stay in OK forever and never notice. Millis at the last
+    // successfully-parsed reliable byte (or last LCK/SWP transition).
+    uint32_t  lastRxMs;
+    static uint32_t nowMs();
 
     // Throughput counters (app stream bytes).
     uint64_t txBytes;
@@ -70,6 +84,11 @@ class ALink {
     void changeState_unlocked(State newState);
     int  bestSpd_unlocked() const;        // highest baud index that scored > 0
     int  readStream(uint8_t* b, int n);   // pull up to n bytes from the app buffer
+
+    // Local equivalent of onBreak(): reset state, scores, spdI, reassembly
+    // buffers, then retune to allowedBauds[0] and (master only) arm the
+    // sweep timer. Idempotent. Caller must hold the lock.
+    void dropLink_unlocked();
 
     size_t cobsEncode(const uint8_t *ptr, size_t length, uint8_t *dst) const;
     size_t cobsDecode(const uint8_t *ptr, size_t length, uint8_t *dst) const;
