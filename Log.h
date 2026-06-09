@@ -35,7 +35,6 @@ public:
     Level getLevel() const   { return lvl; }
 
     void error(const char* tag, const char* fmt, ...) const {
-        if (lvl == NONE) return;          // only NONE suppresses errors
         va_list ap; va_start(ap, fmt);
         emit("E", tag, fmt, ap);
         va_end(ap);
@@ -56,7 +55,7 @@ public:
     }
 
 private:
-    Level lvl = INFO;
+    Level lvl = ERROR;
 
     Log() {}
     Log(const Log&)            = delete;
