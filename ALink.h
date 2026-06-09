@@ -32,10 +32,10 @@ struct AutoLinkConfig {
     // streamBufferSize to fit this, so you normally set only this (or nothing).
     size_t maxMsg = 1024;
     int ledPin = 2;   // status LED used by AutoLink::blinkWait(); GPIO2 = onboard blue LED
-    // Idle-channel watchdog. While in OK, if no app-stream bytes arrive for
-    // this many ms, the link is assumed dead and a re-sweep is triggered.
-    // 0 disables. Default 3000 ms -- long enough that a quiet but live peer
-    // (e.g. an app that only sends every few seconds) isn't killed.
+    // Idle-channel watchdog. While in OK, if no RX bytes arrive for this many
+    // ms the link is dropped and re-swept. 0 disables. While in OK each side
+    // also sends a 1-byte keepalive (reliable mode only) when its TX has been
+    // quiet for idleTimeoutMs/3, so a healthy-but-silent link never bounces.
     int idleTimeoutMs = 3000;
 };
 
@@ -60,13 +60,9 @@ class ALink {
     uint16_t rxMsgCrc;
     int      lckRetries;  // REQ_CMD attempts since entering LCK (master only)
 
-    // Idle-channel watchdog. In OK, if no app-stream bytes arrive for
-    // cfg.idleTimeoutMs, assume the peer is gone and re-sweep. The master's
-    // RX pin goes silent when the slave powers off -- without this, the
-    // master would stay in OK forever and never notice. Millis at the last
-    // successfully-parsed reliable byte (or last LCK/SWP transition).
-    uint32_t  lastRxMs;
-    static uint32_t nowMs();
+    // Idle watchdog / keepalive clocks (hw.nowMs() domain).
+    uint32_t  lastRxMs;   // last RX activity while in OK
+    uint32_t  lastTxMs;   // last TX while in OK; drives the keepalive
 
     // Throughput counters (app stream bytes).
     uint64_t txBytes;
@@ -75,8 +71,7 @@ class ALink {
     uint8_t  calcCrc(const uint8_t* data, int len) const;
     uint16_t calcCrc16(const uint8_t* data, int len) const;
 
-    // CRC LUTs. constexpr -> live in flash. The data is defined in ALink.cpp
-    // because the 512 bytes of table blow up compile times in the header.
+    // CRC LUTs (static const -> flash). Defined in ALink.cpp.
     static const uint8_t  crc8_lut[256];
     static const uint16_t crc16_lut[256];
     void sendFrame(uint8_t payload);
@@ -85,10 +80,10 @@ class ALink {
     int  bestSpd_unlocked() const;        // highest baud index that scored > 0
     int  readStream(uint8_t* b, int n);   // pull up to n bytes from the app buffer
 
-    // Local equivalent of onBreak(): reset state, scores, spdI, reassembly
-    // buffers, then retune to allowedBauds[0] and (master only) arm the
-    // sweep timer. Idempotent. Caller must hold the lock.
+    // Reset all link state, retune to allowedBauds[0], master arms the sweep
+    // timer. Idempotent. Caller must hold the lock.
     void dropLink_unlocked();
+    int  okTickMs() const;   // watchdog/keepalive poll interval while in OK
 
     size_t cobsEncode(const uint8_t *ptr, size_t length, uint8_t *dst) const;
     size_t cobsDecode(const uint8_t *ptr, size_t length, uint8_t *dst) const;
