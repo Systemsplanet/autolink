@@ -31,8 +31,11 @@ void Log::emit(const char* sev, const char* tag,
         default:  ESP_LOGI(tag, "%s", msg); break;
     }
 #else
-  //todo: format line line esp32 logger
-    puts(line);
+    // Host build: print "<L> [<tag>] <msg>" so the test runner output is
+    // self-explanatory. The original puts(line) referenced an undefined
+    // variable and silently swallowed every log line on the host.
+    fprintf(stdout, "%c [%s] %s\n", sev[0], tag, msg);
+    fflush(stdout);
 #endif
 }
 
