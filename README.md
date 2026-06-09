@@ -37,7 +37,8 @@ Log&      LOG = Log::getLog();
 void fill(uint8_t* b, int n) { for (int i = 0; i < n; i++) b[i] = random(256); }
 
 void setup() {
-  esp_log_level_set("*",ESP_LOG_VERBOSE);     LOG.setLevel(Log::DEBUG); 
+    esp_log_level_set("*",ESP_LOG_VERBOSE);
+    LOG.setLevel(Log::DEBUG); 
     Serial.begin(115200);
     randomSeed(esp_random());
     comm.blinkWait(1, 100, 100, 2000);
@@ -91,7 +92,8 @@ uint8_t   buf[1024];
 bool      wasReady = false;
 Log& LOG = Log::getLog();     
 void setup() {
-  esp_log_level_set("*",ESP_LOG_VERBOSE);     LOG.setLevel(Log::DEBUG); 
+    esp_log_level_set("*",ESP_LOG_VERBOSE);
+    LOG.setLevel(Log::DEBUG); 
     Serial.begin(115200);
     comm.blinkWait(1, 100, 100, 2000);
     comm.begin(); // SWP, waits for master
@@ -100,22 +102,22 @@ void setup() {
 
 void loop() {
     if (!comm.ready()) {
-       LOG.info("Main", "comm not ready");
+       LOG.debug("Main", "comm not ready");
        comm.blinkWait(3, 100, 100, 2000);
        wasReady = false;
        return;
    }
     if (!wasReady) {
-       LOG.info("Main", "comm ready");
+       LOG.debug("Main", "comm ready");
        comm.blinkWait(4, 100, 100, 2000);
        wasReady = true;
    }
 
     int n;
     while ((n = comm.recv(buf, sizeof buf)) > 0) {
-        LOG.info("Main", "recv");
+        LOG.debug("Main", "recv");
         comm.send(buf, n); // echo
-        LOG.info("Main", "send");
+        LOG.debug("Main", "send");
         comm.blinkWait(1);
     }
 }
