@@ -99,9 +99,15 @@ ALink::ALink(ILink& h, bool isMasterNode, const AutoLinkConfig& config)
 
 void ALink::begin() {
     if (isMaster) {
-        // sendBreak() delivers onBreak() (sync on MockHal, async via UART_BREAK on
-        // EspHal). Do not call onBreak() here too — it would reset spdI after the
-        // first timer tick.
+        // Do the local SWP/retune/timer-arm by hand, then sendBreak() to
+        // notify the peer. v2.4's MockHal::sendBreak() happened to deliver
+        // onBreak() to *self*, which masked the fact that the master never
+        // did its own local state transition -- the test relied on the mock
+        // side effect. On real hardware sendBreak() puts a break on TX and
+        // the sender does NOT receive its own TX, so the local onBreak path
+        // must run explicitly here. Without it, the master would stay in OK
+        // and the very first onTimer() would be a no-op.
+        onBreak();
         hw.sendBreak();
     } else {
         hw.lock();
@@ -428,6 +434,17 @@ void ALink::onRx(const uint8_t* data, int len) {
     // Errors alone don't count -- the link is "alive enough to fail" and
     // only true silence should drop us.
     lastRxMs = nowMs();
+    // Latched when err_unlocked() trips the threshold during this event. The
+    // parser can't send a BREAK itself (we still hold the lock, and BREAK
+    // is a wire-level side effect that belongs outside the lock), so we
+    // remember the trip and emit the BREAK after the lock is released below.
+    // Without this, a side whose parser trips its own err counter would do
+    // the local state reset but never tell the peer -- the peer keeps
+    // transmitting on the dead link, and the just-recovered side never
+    // sees a re-sweep PING. (The public err() API has the same
+    // responsibility and has always sent the BREAK; the parser path
+    // previously did not.)
+    bool needSendBreak = false;
     while (i < len) {
         State cur_state = state;
 
@@ -450,13 +467,13 @@ void ALink::onRx(const uint8_t* data, int len) {
                                     // keep parsing. err_unlocked() is called
                                     // under the lock so it bumps the threshold
                                     // atomically with the parser state.
-                                    err_unlocked();
+                                    if (err_unlocked()) needSendBreak = true;
                                 }
                             } else {
                                 // 0 bytes = malformed COBS (likely desync).
                                 // 1 byte  = a CRC with no payload.
                                 // Both are desync signals; count them.
-                                err_unlocked();
+                                if (err_unlocked()) needSendBreak = true;
                             }
                         }
                         // else: stray zero between frames, keep going.
@@ -468,7 +485,7 @@ void ALink::onRx(const uint8_t* data, int len) {
                         // threshold and re-sweep the link.
                         relRxIdx = 0;
                         memset(relRxBuf, 0, sizeof(relRxBuf));
-                        err_unlocked();
+                        if (err_unlocked()) needSendBreak = true;
                     }
                 }
             } else {
@@ -535,6 +552,11 @@ void ALink::onRx(const uint8_t* data, int len) {
         }
     }
     hw.unlock();
+    // If the parser tripped the err threshold while holding the lock, tell
+    // the peer to re-sweep now that we're back outside it. dropLink_unlocked
+    // already ran from inside err_unlocked, so the local side is in SWP
+    // listening at allowedBauds[0] -- the BREAK is the "come find me" ping.
+    if (needSendBreak) hw.sendBreak();
 }
 
 // Local equivalent of onBreak(): reset all the per-link state and retune
