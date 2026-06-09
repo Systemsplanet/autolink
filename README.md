@@ -6,11 +6,23 @@
 Ever had a UART connection drop because a motor spun up nearby? Have you ever hardcoded a baud rate, only to realize the other microcontroller reset and desynced? Raw UART is notoriously fragile in real-world applications.
 
 
+Ever had a UART connection drop because a motor spun up nearby? Have you ever hardcoded a baud rate, only to realize the other microcontroller reset and desynced? Raw UART is notoriously fragile in real-world applications.
+
+
 **AutoLink** fixes this. It sits on top of the standard ESP-IDF UART drivers and transforms your serial connection into a robust, auto-negotiating, self-healing lifeline.
 
 
 If the line gets noisy, AutoLink drops the link and re-sweeps. If a wire gets bumped, it automatically sweeps the baud spectrum and locks back onto the connection. It manages all the FreeRTOS background tasks, queues, and hardware interrupts automatically. You just send and receive data.
 
+
+# ⚡ What's New in 2.5
+
+The previous versions recovered gracefully from a **yanked cable** (symmetric disruption: both sides see noise), but a **silent peer death** — slave power-cycle, MCU hard-fault, UART stuck — could deadlock the master in `LCK` sending `REQ` forever, and the slave would never re-arm itself even after its own error counter tripped. **2.5 fixes the asymmetric recovery path end-to-end:**
+
++ **Idle-channel watchdog** (`cfg.idleTimeoutMs`, default 3000 ms): while in `OK`, if no RX bytes arrive for the configured window, the link is dropped locally and a `BREAK` is sent to the peer. The master is the originator of traffic in most sketches, so its RX pin goes silent when the slave dies — without this watchdog it would sit in `OK` indefinitely.
++ **Self-resetting err path**: `err_unlocked()` now performs the same local state transition (`SWP` + retune to `allowedBauds[0]`) that `onBreak()` does. Previously, a side that tripped its own error counter would send a `BREAK` to the peer but leave its own UART tuned to the locked baud — the peer's re-sweep was then inaudible. Now both sides re-arm symmetrically.
++ **LCK timeout**: if the master sends `REQ` with no slave reply for more than `2 * allowedBauds.size()` ticks, the sweep restarts from `allowedBauds[0]`. Closes the "dead peer, master stuck in `LCK`" hole that v2.4 left open.
++ **BREAK debounce + UART FIFO flush on retune**: line glitches that fire `UART_BREAK` for a few hundred microseconds are now collapsed (anything tighter than 50 ms is dropped but the FIFO is still drained). `setSpd()` flushes the RX FIFO before changing baud so stale samples from the previous baud never feed the parser as garbage on the first byte of a new sweep.
 
 # ⚡ What's New in 2.2
 
@@ -21,7 +33,7 @@ The public API is now **one object and two verbs**. Construct an `AutoLink` as a
 
 # 🏓 Quick Start: Master / Slave Ping-Pong
 
-The classic use case: two boards bouncing **random-sized messages** back and forth, **logging throughput**, and **self-recovering** from any disruption — with almost no application code. The link's sweep/recovery is automatic; the app just gates on `State::OK`.
+The classic use case: two boards bouncing **random-sized messages** back and forth, **logging throughput**, and **self-recovering** from any disruption — with almost no application code. The link's sweep/recovery is automatic; the app just gates on `State::OK`. The examples below also stash every sent payload, compare it against the slave's echo, and log a `MISMATCH` line the moment a single byte goes missing or wrong — the easiest possible smoke test for end-to-end integrity.
 
 ## The Master
 
@@ -29,16 +41,20 @@ The classic use case: two boards bouncing **random-sized messages** back and for
 #include "AutoLink.h"
 using namespace autolink;
 //pin 16=rcv 17=tx
-AutoLink comm(UART_NUM_2, 16, 17, true); 
+AutoLink comm(UART_NUM_2, 16, 17, true);
 uint8_t   buf[1024];
+uint8_t   sent[1024];   // stash the last payload so we can compare with the echo
+int       sentLen = 0;  // length of the stashed payload; 0 = nothing in flight
 bool      wasReady = false;
 uint32_t  tStat = 0;
-Log&      LOG = Log::getLog();     
+uint32_t  msgSeq = 0;   // monotonically increasing, included in the payload so
+                        // mismatches are easy to spot in the log
+Log&      LOG = Log::getLog();
 void fill(uint8_t* b, int n) { for (int i = 0; i < n; i++) b[i] = random(256); }
 
 void setup() {
     esp_log_level_set("*",ESP_LOG_VERBOSE);
-    LOG.setLevel(Log::DEBUG); 
+    LOG.setLevel(Log::DEBUG);
     Serial.begin(115200);
     randomSeed(esp_random());
     comm.blinkWait(1, 100, 100, 2000);
@@ -52,6 +68,7 @@ void loop() {
        LOG.debug("Main", "not ready");
        comm.blinkWait(3, 100, 100, 2000);
        wasReady = false;
+       sentLen = 0;          // a link drop invalidates any in-flight compare
        return;
     }
     // connected
@@ -61,19 +78,54 @@ void loop() {
        wasReady = true;
     }
 
-    // linked
+    // linked: send a fresh random payload. Stash it for the echo check below.
     int n = random(1, 1024);
     fill(buf, n);
     if (comm.send(buf, n)) {
-       LOG.debug("Main", "sent");
-       comm.blinkWait(1);
+        sentLen   = n;
+        memcpy(sent, buf, n);
+        LOG.debug("Main", "sent %d bytes  seq=%lu", n, (unsigned long)msgSeq);
+        comm.blinkWait(1);
+    } else {
+        LOG.error("Main", "send failed (link dropped mid-send)");
+        sentLen = 0;
     }
-    while ((n = comm.recv(buf, sizeof buf)) > 0) { /* drain echoes */ }
-    LOG.debug("Main", "recv");
+
+    // Drain one echo, compare against the stashed send, and log the byte count.
+    int got = comm.recv(buf, sizeof buf);
+    if (got > 0) {
+        LOG.debug("Main", "recv %d bytes  seq=%lu", got, (unsigned long)msgSeq);
+        if (got != sentLen) {
+            LOG.error("Main",
+                "MISMATCH seq=%lu  sent=%d bytes  echoed=%d bytes",
+                (unsigned long)msgSeq, sentLen, got);
+        } else if (memcmp(buf, sent, got) != 0) {
+            int firstBad = -1;
+            for (int i = 0; i < got; i++) {
+                if (buf[i] != sent[i]) { firstBad = i; break; }
+            }
+            LOG.error("Main",
+                "MISMATCH seq=%lu  %d bytes differ, first bad offset=%d  "
+                "expected 0x%02X got 0x%02X",
+                (unsigned long)msgSeq, got, firstBad,
+                sent[firstBad >= 0 ? firstBad : 0],
+                buf[firstBad >= 0 ? firstBad : 0]);
+        }
+        msgSeq++;
+        sentLen = 0;
+    } else if (got < 0) {
+        // -1 = CRC reject / desync; the bad message was drained by recvMsg.
+        // Don't bump msgSeq -- the round trip is incomplete.
+        LOG.error("Main", "recv rejected (CRC/desync) seq=%lu",
+                  (unsigned long)msgSeq);
+        sentLen = 0;
+    }
+
     // log throughput once a second.
     if (millis() - tStat > 1000) {
         uint64_t tx, rx; comm.getStats(tx, rx); comm.resetStats();
-        LOG.debug("Main", "TX %lu B/s   RX %lu B/s",  (unsigned long)tx, (unsigned long)rx);
+        LOG.debug("Main", "TX %lu B/s   RX %lu B/s",
+                  (unsigned long)tx, (unsigned long)rx);
         tStat = millis();
     }
 }
@@ -90,10 +142,10 @@ using namespace autolink;
 AutoLink comm(UART_NUM_2, 16, 17, false);
 uint8_t   buf[1024];
 bool      wasReady = false;
-Log& LOG = Log::getLog();     
+Log&      LOG = Log::getLog();
 void setup() {
     esp_log_level_set("*",ESP_LOG_VERBOSE);
-    LOG.setLevel(Log::DEBUG); 
+    LOG.setLevel(Log::DEBUG);
     Serial.begin(115200);
     comm.blinkWait(1, 100, 100, 2000);
     comm.begin(); // SWP, waits for master
@@ -115,9 +167,12 @@ void loop() {
 
     int n;
     while ((n = comm.recv(buf, sizeof buf)) > 0) {
-        LOG.debug("Main", "recv");
-        comm.send(buf, n); // echo
-        LOG.debug("Main", "send");
+        LOG.debug("Main", "recv %d bytes", n);
+        if (comm.send(buf, n)) {
+            LOG.debug("Main", "echoed %d bytes", n);
+        } else {
+            LOG.error("Main", "echo send failed (link dropped)  %d bytes dropped", n);
+        }
         comm.blinkWait(1);
     }
 }
@@ -230,6 +285,14 @@ if (comm.ready() && comm.available() >= 5) {
 
 
 # 📅 Revision History
+
+**v2.5.0**
+
++ **Asymmetric peer-death recovery:** slave's `err_unlocked()` now performs the same local state reset (`SWP` + retune to `allowedBauds[0]` + score/buffer clear) that `onBreak()` does, so a side that trips its own error counter re-arms itself instead of waiting for the peer to drive the sweep. Closes the deadlock where the master was the originator of traffic and never saw RX errors, leaving both sides stuck.
++ **Idle-channel watchdog:** new `cfg.idleTimeoutMs` (default 3000 ms, set 0 to disable). In `OK`, if no RX activity for that long, the link is dropped locally and a `BREAK` is sent to the peer. The master's RX pin goes silent when the slave powers off; this is the only way the master notices in the originator-of-traffic case.
++ **LCK timeout:** master tracks `lckRetries` and restarts the sweep if more than `2 * allowedBauds.size()` `REQ` ticks pass with no slave reply. Prevents the master from getting stuck in `LCK` forever when the peer is gone.
++ **BREAK debounce:** spurious `UART_BREAK` events closer than 50 ms apart are collapsed; the FIFO is still drained so a noise burst can't leave stale bytes in the parser. Legitimate breaks from a peer `sendBreak()` or a hard reset always pass through.
++ **FIFO flush on retune:** `EspHal::setSpd()` now calls `uart_flush_input()` before `uart_set_baudrate()`. The first bytes after a baud change are no longer samples from the old baud, so a clean re-negotiation doesn't accumulate false-positive errors that would re-trip the threshold and bounce the link.
 
 **v2.4.0**
 
