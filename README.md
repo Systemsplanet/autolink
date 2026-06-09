@@ -75,8 +75,9 @@ void drainAndCompare() {
         if (sentLen == 0) {
             // Echo arrived with nothing in flight. Could be a stale echo
             // from before a link drop -- the dropLink_unlocked path clears
-            // the app buffer, so this should be rare. Don't error, just log.
-            LOG.warn("Main", "recv %d bytes with no in-flight send", got);
+            // the app buffer, so this should be rare. Log so it's visible
+            // in the trace; not fatal.
+            LOG.error("Main", "recv %d bytes with no in-flight send", got);
             continue;
         }
         LOG.debug("Main", "recv %d bytes  sentSeq=%lu", got, (unsigned long)sentSeq);
