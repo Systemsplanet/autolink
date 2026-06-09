@@ -6,14 +6,24 @@
 Ever had a UART connection drop because a motor spun up nearby? Have you ever hardcoded a baud rate, only to realize the other microcontroller reset and desynced? Raw UART is notoriously fragile in real-world applications.
 
 
-Ever had a UART connection drop because a motor spun up nearby? Have you ever hardcoded a baud rate, only to realize the other microcontroller reset and desynced? Raw UART is notoriously fragile in real-world applications.
-
-
 **AutoLink** fixes this. It sits on top of the standard ESP-IDF UART drivers and transforms your serial connection into a robust, auto-negotiating, self-healing lifeline.
 
 
 If the line gets noisy, AutoLink drops the link and re-sweeps. If a wire gets bumped, it automatically sweeps the baud spectrum and locks back onto the connection. It manages all the FreeRTOS background tasks, queues, and hardware interrupts automatically. You just send and receive data.
 
+
+# ⚡ What's New in 2.6
+
++ **Async status LED:** `blinkWait(n)` is now **non-blocking by default** — the flash pattern runs on an `esp_timer` and the call returns immediately, so the per-packet `blinkWait(1)` in the examples no longer stalls the loop (~120 ms saved per echo; round-trip throughput roughly doubles). Pass a trailing `delayMs > 0` and it behaves exactly as before: blocking flash + pause, for pacing a loop.
++ **Watchdog actually armed:** in 2.5 the idle watchdog only ever got one stray timer tick after entering `OK` and then went silent — a dead slave was effectively never detected. Entering `OK` now arms a periodic tick (`idleTimeoutMs / 3`), so the watchdog genuinely fires.
++ **Keepalive:** while in `OK`, each side that has been TX-quiet for a third of the window sends a lone `0x00` the peer's parser skips as an inter-frame zero but counts as RX. A healthy-but-quiet link no longer bounces every `idleTimeoutMs` (reliable mode only — see note below).
++ **App-buffer overflow detected:** a full stream buffer used to drop bytes silently and desync the message stream. The HAL now reports bytes accepted, and a shortfall counts toward the error threshold so the link drops and resyncs instead of corrupting quietly. The auto-sized buffer also grew to two full messages of headroom.
++ **Parser yields after a drop:** when the error threshold trips mid-event, the remainder of that UART event is handed to the SWP command parser instead of being eaten as stale OK-mode frame bytes — the first re-sweep `PING` in the same burst is no longer lost.
++ **Locking hardened:** `dropLink` no longer releases and re-takes the mutex mid-reset, and the `onRx` retune paths run fully locked — closing small interleave windows with `recvMsg`.
++ **UART task stack safety:** the RX scratch buffer moved from `alloca` to a one-time heap allocation, so a large `rxBufferSize` can't overflow the 4 KB event-task stack.
++ **Flat host testing:** `extract_readme.py` now embeds its Arduino/ESP-IDF stubs and writes them to a temp dir, so `make readme` works from the flat repo with no `host_stubs/` directory. The block finder also checks **every** example now (the slave sketch was previously skipped).
+
+> **Note (raw mode):** the keepalive is suppressed when `reliableMode = false` because a `0x00` would reach your app as data. If your raw-mode app can be TX-quiet longer than `idleTimeoutMs`, raise it or set it to `0`.
 
 # ⚡ What's New in 2.5
 
@@ -217,11 +227,16 @@ That's the whole thing. No manual reconnect logic, no checksums, no framing, and
 
 | What you see | Meaning |
 |---|---|
-| One slow blink, repeating | Searching / negotiating baud (`ready()` is false) |
-| A quick burst of **3** | Just connected |
-| One blink per flash | One packet sent (master) / echoed (slave) |
+| Bursts of **3**, with a pause, repeating | Searching / negotiating baud (`ready()` is false) |
+| A burst of **4** | Just connected |
+| One quick flash | One packet sent (master) / echoed (slave) |
 
-The LED defaults to **GPIO 2** (the blue LED on most ESP32 dev boards). Point it elsewhere with `cfg.ledPin`, tune the flash length with `blinkWait(n, onMs, offMs)`, and pass an optional `delayMs` to pause after the flash — `blinkWait(1, 60, 60, 200)` flashes once then waits 200 ms, handy for pacing a send loop. `blinkWait()` is blocking, so it holds `loop()` for the full flash + delay duration; the UART keeps receiving into the app buffer, but your own code won't drain it until `blinkWait()` returns. Use it for one-shot bring-up markings and short pacing delays, not for a per-packet heartbeat at speed.
+The LED defaults to **GPIO 2** (the blue LED on most ESP32 dev boards); point it elsewhere with `cfg.ledPin` and tune the flash with `blinkWait(n, onMs, offMs)`.
+
+`blinkWait` has two modes, picked by the last parameter:
+
++ **Async (default, `delayMs` omitted or 0):** returns immediately; the pattern runs on an `esp_timer` in the background. This makes a per-packet heartbeat free — `blinkWait(1)` on every send/echo costs your loop nothing. A new call replaces any pattern still running.
++ **Blocking (`delayMs > 0`):** flashes, then pauses `delayMs` — holds `loop()` for `n * (onMs + offMs) + delayMs` ms. The UART keeps receiving into the app buffer while you wait, but your code won't drain it until the call returns. `blinkWait(3, 100, 100, 2000)` is what paces the searching loop in the examples.
 
 
 # 📨 The Message API
@@ -316,6 +331,17 @@ if (comm.ready() && comm.available() >= 5) {
 
 
 # 📅 Revision History
+
+**v2.6.0**
+
++ **Async `blinkWait`:** with the default `delayMs == 0` the call is non-blocking — the flash pattern runs on an `esp_timer` and a new call replaces a running one. `delayMs > 0` keeps the original blocking flash + pause. Per-packet LED feedback no longer throttles throughput.
++ **OK-state tick:** entering `OK` arms a periodic timer (`idleTimeoutMs / 3`). Fixes the 2.5 idle watchdog, which was only ever checked on one leftover LCK tick and then never again — a silently dead peer went undetected.
++ **Keepalive:** a TX-quiet side in `OK` emits a lone `0x00` each tick (reliable mode only); the peer skips it as an inter-frame zero but its watchdog counts it. Healthy-but-quiet links no longer re-sweep spuriously.
++ **Overflow accounting:** `ILink::pushAppBuf(buf, n)` now returns bytes accepted; a shortfall (full stream buffer) counts as a link error so persistent overflow drops and resyncs the link instead of silently corrupting the message stream. `AutoLink` auto-sizes the buffer to `2 * (maxMsg + MSG_HDR)`.
++ **Parser yield on drop:** after the error threshold trips mid-event, the rest of the UART event goes to the command parser, so a re-sweep `PING` arriving in the same burst is handled immediately.
++ **Locking:** `dropLink` holds the mutex throughout; `onRx` retune paths no longer unlock mid-parse. `ILink` gained `nowMs()` so the watchdog/keepalive clock is injectable — host tests can now drive time, and the suite grew tests for the watchdog, keepalive, LCK timeout, buffer overflow, and parser yield.
++ **HAL:** UART event-task scratch buffer moved from `alloca` to a one-time heap allocation (stack-overflow risk with large `rxBufferSize`).
++ **Tooling:** `extract_readme.py` embeds its Arduino/ESP-IDF stubs (temp dir at run time; no `host_stubs/`), and its block finder now checks every README example instead of only the first.
 
 **v2.5.0**
 
