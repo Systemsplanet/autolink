@@ -12,6 +12,14 @@ Ever had a UART connection drop because a motor spun up nearby? Have you ever ha
 If the line gets noisy, AutoLink drops the link and re-sweeps. If a wire gets bumped, it automatically sweeps the baud spectrum and locks back onto the connection. It manages all the FreeRTOS background tasks, queues, and hardware interrupts automatically. You just send and receive data.
 
 
+# ⚡ What's New in 2.7
+
+2.7 is an internal-quality release: the standalone algorithms moved out of the protocol god-file into small, single-purpose utility classes, each with its own exhaustive unit suite. Public API unchanged.
+
++ **New utility classes** (all reusable, all flat in the repo): `UtilCrc` (CRC-8 + CRC-16/CCITT-FALSE with their LUTs), `UtilCobs` (COBS codec), `UtilBlink` (the async/blocking LED pattern engine behind `blinkWait`, host-testable via an injected `IBlinkHal`), and `UtilFrameRx` (the reliable-mode frame accumulator extracted from the 100-line `onRx` parser). `ALink.cpp` shrank by ~200 lines and now reads as pure protocol.
++ **Five test suites:** `make test` builds and runs `UtilCrcTest`, `UtilCobsTest`, `UtilBlinkTest`, `UtilFrameRxTest`, and the protocol/integration suite (`test.cpp`) — 34 tests total, compiled `-Wall -Wextra` clean. Every class now has direct tests, not just loopback coverage.
++ **🐛 Latent CRC-16 table corruption found and fixed.** The new known-answer test (`"123456789"` → `0x29B1`) exposed four corrupt entries (indices 76–79) in the CRC-16 LUT that had shipped in every prior version. Loopback tests could never catch it because both ends shared the same wrong table. **Wire-compat note:** a 2.7 node exchanging *messages* with a ≤2.6 node will see CRC-16 rejects (`recv()` → `-1`) on payloads whose checksum touches those entries — upgrade both ends together.
+
 # ⚡ What's New in 2.6
 
 + **Async status LED:** `blinkWait(n)` is now **non-blocking by default** — the flash pattern runs on an `esp_timer` and the call returns immediately, so the per-packet `blinkWait(1)` in the examples no longer stalls the loop (~120 ms saved per echo; round-trip throughput roughly doubles). Pass a trailing `delayMs > 0` and it behaves exactly as before: blocking flash + pause, for pacing a loop.
@@ -314,9 +322,11 @@ if (comm.ready() && comm.available() >= 5) {
 
 # 🛠️ Developer Notes
 
-+ **Hardware Abstraction (Dependency Injection):** Core logic (`ALink.cpp`) is decoupled from the ESP32 (`EspHal.h`) via the `ILink` interface. Keep ESP-IDF / FreeRTOS headers out of `ALink.cpp`.
++ **Hardware Abstraction (Dependency Injection):** Core logic (`ALink.cpp`) is decoupled from the ESP32 (`EspHal.h`) via the `ILink` interface; the LED engine is likewise decoupled via `IBlinkHal`. Keep ESP-IDF / FreeRTOS headers out of `ALink.cpp` and the `Util*` classes.
 
-+ **Native PC Testing:** Because of that abstraction, the entire state machine and message layer run on your computer. `make test` builds and runs the mock-hardware tests in `test.cpp`.
++ **Utility Classes:** standalone algorithms live in single-purpose, reusable classes — `UtilCrc` (checksums + LUTs), `UtilCobs` (codec), `UtilBlink` (LED patterns), `UtilFrameRx` (reliable-frame accumulator). Each has a purpose comment at the top and its own `*Test.cpp` suite. `ALink` consumes them and keeps only protocol logic.
+
++ **Native PC Testing:** Because of that abstraction, the entire stack runs on your computer. `make test` builds and runs five suites: `UtilCrcTest`, `UtilCobsTest`, `UtilBlinkTest`, `UtilFrameRxTest`, and the protocol/integration tests in `test.cpp`. Everything compiles `-Wall -Wextra` clean.
 
 + **State Machine:**
   + `SWP` (Sweep): master iterates allowed bauds sending `PING`; the slave retunes per ping and scores each baud it decodes.
@@ -331,6 +341,13 @@ if (comm.ready() && comm.available() >= 5) {
 
 
 # 📅 Revision History
+
+**v2.7.0**
+
++ **Refactor to utility classes:** `UtilCrc`, `UtilCobs`, `UtilBlink` (+ `IBlinkHal`/`EspBlinkHal`), and `UtilFrameRx` extracted from `ALink.cpp` / `AutoLink.h`. `ALink` implements `UtilFrameRx::Listener`; `AutoLink::blinkWait` is a two-line forward into `UtilBlink`. Public API unchanged.
++ **Per-class unit suites:** `UtilCrcTest`, `UtilCobsTest`, `UtilBlinkTest`, `UtilFrameRxTest` (24 new tests: known-answer CRC vectors, single-bit error detection, COBS 0xFF group boundaries and malformed-input rejection, exact LED on/off/timer sequences, frame splitting/desync/drop semantics). `make test` runs all five binaries; build is `-Wall -Wextra` clean.
++ **CRC-16 LUT fix:** four corrupt entries (76–79) in the CCITT-FALSE table, present since the LUT was introduced, found by the new known-answer test and regenerated. See the wire-compat note in What's New.
++ **Hygiene:** every class carries a purpose summary comment; `AutoLink` copy/move deleted (the blink timer captures `this`).
 
 **v2.6.0**
 
