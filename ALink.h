@@ -75,8 +75,12 @@ class ALink : private UtilFrameRx::Listener {
     uint64_t txBytes;
     uint64_t rxBytes;
 
-    // Total protocol-level errors observed since the last resetStats().
-    // Monotonic, never decreases; survives link drops and re-sweeps.
+    // Total disconnect events observed since the last resetErrors().
+    // Counts 1 per link drop (regardless of cause: bad frame flood,
+    // idle watchdog, peer BREAK, LCK timeout). Never decreases on its
+    // own -- resetStats() leaves it alone, link drops leave it alone.
+    // Use this for longevity testing ("how many bounces did this link
+    // survive?") rather than per-byte error noise.
     uint64_t totalErrs;
 
     // UtilFrameRx::Listener (called under the lock from onRx).
@@ -90,8 +94,13 @@ class ALink : private UtilFrameRx::Listener {
     int  readStream(uint8_t* b, int n);   // pull up to n bytes from the app buffer
 
     // Reset all link state, retune to allowedBauds[0], master arms the sweep
-    // timer. Idempotent. Caller must hold the lock.
-    void dropLink_unlocked(bool countAsError = false);
+    // timer. Idempotent. Caller must hold the lock. Always counts as one
+    // disconnect event for the lifetime error counter -- a link drop is
+    // a single "thing happened" from the app's perspective, and a per-byte
+    // count is too noisy for longevity testing. begin() uses reset_unlocked()
+    // to do the same work without counting.
+    void dropLink_unlocked();
+    void reset_unlocked();      // like dropLink_unlocked but doesn't count
     int  okTickMs() const;   // watchdog/keepalive poll interval while in OK
 
 public:
@@ -120,10 +129,12 @@ public:
 
     // Throughput. Counters are app-stream bytes since the last reset.
     // The 3-arg form also returns the lifetime protocol-error count
-    // (cumulative; survives link drops and re-sweeps; zeroed by resetStats()).
+    // (cumulative; one per disconnect; survives resetStats() and link
+    // drops; only zeroed by resetErrors()).
     void getStats(uint64_t& tx, uint64_t& rx) const;
     void getStats(uint64_t& tx, uint64_t& rx, uint64_t& errors) const;
-    void resetStats();
+    void resetStats();     // zeros tx/rx only; leaves errors alone
+    void resetErrors();    // zeros the lifetime error counter
 
     State getState() const;
     int getErrCount() const;
