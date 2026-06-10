@@ -716,6 +716,72 @@ void run_test_error_counter() {
     std::cout << "PASS" << std::endl;
 }
 
+void run_test_error_counter_during_swp() {
+    // Regression: a cable bounce drops the link, the master spends a few
+    // seconds in SWP/LCK re-locking, and recovers. During the recovery
+    // window the parser sees garbage and calls err() -- but err_unlocked()
+    // is gated on state == OK, so before the fix totalErrs stayed at 0 the
+    // whole time. The threshold-window counter `errs` should still only
+    // tick in OK (so a noisy recovery doesn't itself trip the threshold);
+    // the lifetime counter must always tick.
+    std::cout << "\n=== Test: Error Counter Ticks During SWP/LCK ===" << std::endl;
+    MockHal mHal, sHal;
+    AutoLinkConfig cfg; cfg.allowedBauds = {9600, 115200};
+    ALink master(mHal, true, cfg);
+    ALink slave(sHal, false, cfg);
+    master.begin(); slave.begin();
+
+    // Run a full negotiation so we're in OK.
+    master.onTimer(); pipe_data(mHal, sHal);   // PING@9600
+    master.onTimer(); pipe_data(mHal, sHal);   // PING@115200 -> LCK
+    master.onTimer(); pipe_data(mHal, sHal);   // REQ
+    pipe_data(sHal, mHal);                     // slave's reply
+    assert(master.getState() == State::OK);
+
+    uint64_t tx0, rx0, e0;
+    master.getStats(tx0, rx0, e0);
+    assert(e0 == 0);
+
+    // Now trip the error threshold to force a drop (threshold=5 -> need 6).
+    for (int i = 0; i < 6; i++) master.err();
+    assert(master.getState() == State::SWP);
+
+    // While the master is in SWP, feed it some bad bytes. The parser is
+    // gated against err_unlocked in SWP (no threshold side-effect), but
+    // err() must still bump the lifetime counter.
+    uint64_t tx1, rx1, e1;
+    master.getStats(tx1, rx1, e1);
+    for (int i = 0; i < 5; i++) {
+        master.err();   // simulates "bad byte during re-sweep"
+    }
+    uint64_t tx2, rx2, e2;
+    master.getStats(tx2, rx2, e2);
+    assert(e2 == e1 + 5);
+
+    // The threshold window (`errs`) must not have ticked -- the state was
+    // not OK when those err() calls were processed, so the SWP noise
+    // doesn't itself trip another threshold.
+    assert(master.getErrCount() == 0);
+
+    // Sanity: after the master comes back to OK and sees a real error,
+    // the threshold counter resumes and the lifetime counter keeps going.
+    master.onTimer(); pipe_data(mHal, sHal);
+    master.onTimer(); pipe_data(mHal, sHal);
+    master.onTimer(); pipe_data(mHal, sHal);
+    pipe_data(sHal, mHal);
+    if (master.getState() == State::OK) {
+        uint64_t e_before_ok_err;
+        master.getStats(tx0, rx0, e_before_ok_err);
+        master.err();
+        uint64_t e_after_ok_err;
+        master.getStats(tx0, rx0, e_after_ok_err);
+        assert(e_after_ok_err == e_before_ok_err + 1);
+        assert(master.getErrCount() == 1);
+    }
+
+    std::cout << "PASS" << std::endl;
+}
+
 void run_test_best_baud_selection() {
     std::cout << "\n=== Test: Best-Baud Picks Highest Working Index ===" << std::endl;
     // 4 bauds. Feed the slave 3 PINGs (it scores indices 0,1,2) then a REQ.
@@ -1029,6 +1095,7 @@ int main() {
     run_test_message_crc_reject();
     run_test_stats();
     run_test_error_counter();
+    run_test_error_counter_during_swp();
     run_test_best_baud_selection();
     run_test_asymmetric_peer_death_recovery();
     run_test_idle_watchdog();
