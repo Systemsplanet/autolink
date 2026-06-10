@@ -107,10 +107,21 @@ void ALink::err() {
 
 // Caller must hold the lock. Returns whether the threshold was tripped; on
 // trip the local link is dropped here (caller sends the BREAK to the peer).
+//
+// Two distinct counters are kept:
+//   - `errs` (the threshold window) only ticks while in OK. The link is
+//     supposed to be quiet during SWP/LCK, so thresholding only fires when
+//     the link was actually up.
+//   - `totalErrs` (the lifetime cumulative count) ticks on EVERY entry --
+//     public err() callers and direct err_unlocked() callers (the frame
+//     parser paths in onRx/onPayload/onFrameError). Bumping it first means
+//     a bad frame arriving during SWP/LCK is still visible to the user.
+//     Without this, a cable bounce that recovers cleanly shows err=0
+//     forever -- the very case the counter was added to expose.
 bool ALink::err_unlocked() {
+    totalErrs++;
     if (state != State::OK) return false;
     errs++;
-    totalErrs++;
     if (errs > cfg.errThreshold) {
         Log::getLog().info(ALINK_TAG, "Error threshold exceeded (%d > %d). Dropping link.",
                            errs, cfg.errThreshold);
