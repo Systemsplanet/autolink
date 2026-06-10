@@ -14,8 +14,9 @@ If the line gets noisy, AutoLink drops the link and re-sweeps. If a wire gets bu
 
 # ⚡ What's New in 2.8
 
-+ **Total error counter on the API:** `getStats()` now has a 3-arg form `getStats(tx, rx, errs)` that returns the lifetime protocol-error count. It increments on every `err_unlocked()` call (CRC-8 reject, CRC-16 reject, app-buffer overflow, etc.), is monotonic across link drops and re-sweeps, and is zeroed only by `resetStats()`. The 2-arg form is unchanged and still works. The README Master example logs it alongside throughput each second.
-+ **No new failure modes.** Pure additive change: the counter is a `uint64_t` member, incremented next to the existing `errs` bump, and exposed only through the optional out-param. Sketches that ignore it see no difference.
++ **Lifetime disconnect counter on the API:** `getStats()` now has a 3-arg form `getStats(tx, rx, errs)` that returns the lifetime disconnect count — **one count per link drop**, regardless of cause (bad frame flood tripping the threshold, idle watchdog, peer BREAK, LCK timeout). Per-byte error noise is intentionally not counted. The counter is monotonic across link drops and `resetStats()` — it is only zeroed by the new `resetErrors()`. Designed for longevity testing: "how many bounces has this link survived?"
++ **`resetStats()` / `resetErrors()` are now distinct.** The throughput reset is unchanged (zeros tx/rx), but it no longer touches the disconnect counter, so per-second B/s sampling doesn't wipe the very history that would tell you "errors went up since last sample". `resetErrors()` zeros the disconnect counter explicitly (e.g. on operator ack).
++ The 2-arg `getStats()` form is unchanged. Existing sketches that ignore the new counter see no difference; the README Master example was updated to log the counter alongside throughput.
 
 # ⚡ What's New in 2.7
 
@@ -175,7 +176,10 @@ void loop() {
     // from sending a new one until the previous round trip completes.
     drainAndCompare();
 
-    // log throughput + cumulative error count once a second.
+    // log throughput + lifetime disconnect count once a second.
+    // The disconnect counter is monotonic across samples and link drops --
+    // call resetErrors() explicitly if you want to zero it (e.g. after
+    // an operator ack), never via resetStats(), which is for B/s deltas.
     if (millis() - tStat > 1000) {
         uint64_t tx, rx, errs; comm.getStats(tx, rx, errs); comm.resetStats();
         LOG.debug("Main", "TX %lu B/s RX %lu B/s err=%lu",
@@ -261,8 +265,10 @@ This is the whole public surface for normal use:
 | `int send(const uint8_t* b, int len)` | `len` if queued, `0` if the link is down/busy | `len` must be `1..maxMsg` (default 1024). Safe to call every loop. |
 | `int recv(uint8_t* b, int max)` | `>0` message length, `0` nothing ready, `-1` rejected/dropped | `max` should be `>= maxMsg`. On `-1` the bad message is drained and an error is counted. |
 | `bool ready()` | `true` once negotiated | Optional — `send`/`recv` already gate themselves, so you rarely need this. |
-| `void getStats(uint64_t& tx, uint64_t& rx)` | — | App-stream bytes since the last reset. |
-| `void getStats(uint64_t& tx, uint64_t& rx, uint64_t& errs)` | — | Adds the lifetime protocol-error count. Monotonic across link drops; zeroed by `resetStats()`. |
+| `void getStats(uint64_t& tx, uint64_t& rx)` | — | App-stream bytes since the last `resetStats()`. |
+| `void getStats(uint64_t& tx, uint64_t& rx, uint64_t& errs)` | — | Adds the lifetime disconnect count (one per link drop). Monotonic across samples and link drops; only zeroed by `resetErrors()`. |
+| `void resetStats()` | — | Zero the tx/rx counters. **Does not** touch the disconnect counter. |
+| `void resetErrors()` | — | Zero the lifetime disconnect counter. |
 | `void resetStats()` | — | Zero the counters (call after each sample to get B/s). |
 
 Each message goes out as a 6-byte header (`len` + `crc16`) followed by the payload, chunked into ≤250-byte COBS frames, each guarded by a per-frame CRC-8. The receiver only hands you a message once the **whole** payload arrives and its CRC-16 verifies — so you never see a half-message or a corrupted one.
@@ -350,7 +356,7 @@ if (comm.ready() && comm.available() >= 5) {
 
 **v2.8.0**
 
-+ **Total error counter:** `getStats()` now has an optional 3-arg form `getStats(tx, rx, errs)` that returns the lifetime protocol-error count. The counter is monotonic across link drops and re-sweeps, and is zeroed by `resetStats()`. The README Master example logs it alongside throughput.
++ **Lifetime disconnect counter:** `getStats()` now has a 3-arg form `getStats(tx, rx, errs)` that returns a lifetime count of link drops (one per drop, regardless of cause). `resetStats()` zeros only tx/rx; the new `resetErrors()` zeros the disconnect counter. For longevity testing.
 
 **v2.7.0**
 
