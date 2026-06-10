@@ -14,7 +14,7 @@ If the line gets noisy, AutoLink drops the link and re-sweeps. If a wire gets bu
 
 # ⚡ What's New in 2.8
 
-+ **Lifetime disconnect counter on the API:** `getStats()` now has a 3-arg form `getStats(tx, rx, errs)` that returns the lifetime disconnect count — **one count per link drop**, regardless of cause (bad frame flood tripping the threshold, idle watchdog, peer BREAK, LCK timeout). Per-byte error noise is intentionally not counted. The counter is monotonic across link drops and `resetStats()` — it is only zeroed by the new `resetErrors()`. Designed for longevity testing: "how many bounces has this link survived?"
++ **Lifetime disconnect counter on the API:** `getStats()` now has a 3-arg form `getStats(tx, rx, errs)` that returns the lifetime disconnect count — **one count per OK→SWP transition**. While the master is already in SWP/LCK, additional `onBreak()` calls, threshold trips, and LCK timeouts do not inflate the count: a slave reset that emits a burst of BREAKs while rebooting is still one event, not N. Per-byte error noise is intentionally not counted. The counter is monotonic across link drops and `resetStats()` — it is only zeroed by the new `resetErrors()`. Designed for longevity testing: "how many bounces has this link survived?"
 + **`resetStats()` / `resetErrors()` are now distinct.** The throughput reset is unchanged (zeros tx/rx), but it no longer touches the disconnect counter, so per-second B/s sampling doesn't wipe the very history that would tell you "errors went up since last sample". `resetErrors()` zeros the disconnect counter explicitly (e.g. on operator ack).
 + The 2-arg `getStats()` form is unchanged. Existing sketches that ignore the new counter see no difference; the README Master example was updated to log the counter alongside throughput.
 
@@ -266,7 +266,7 @@ This is the whole public surface for normal use:
 | `int recv(uint8_t* b, int max)` | `>0` message length, `0` nothing ready, `-1` rejected/dropped | `max` should be `>= maxMsg`. On `-1` the bad message is drained and an error is counted. |
 | `bool ready()` | `true` once negotiated | Optional — `send`/`recv` already gate themselves, so you rarely need this. |
 | `void getStats(uint64_t& tx, uint64_t& rx)` | — | App-stream bytes since the last `resetStats()`. |
-| `void getStats(uint64_t& tx, uint64_t& rx, uint64_t& errs)` | — | Adds the lifetime disconnect count (one per link drop). Monotonic across samples and link drops; only zeroed by `resetErrors()`. |
+| `void getStats(uint64_t& tx, uint64_t& rx, uint64_t& errs)` | — | Adds the lifetime disconnect count (one per OK→SWP transition). Monotonic across samples and link drops; only zeroed by `resetErrors()`. |
 | `void resetStats()` | — | Zero the tx/rx counters. **Does not** touch the disconnect counter. |
 | `void resetErrors()` | — | Zero the lifetime disconnect counter. |
 | `void resetStats()` | — | Zero the counters (call after each sample to get B/s). |
@@ -356,7 +356,7 @@ if (comm.ready() && comm.available() >= 5) {
 
 **v2.8.0**
 
-+ **Lifetime disconnect counter:** `getStats()` now has a 3-arg form `getStats(tx, rx, errs)` that returns a lifetime count of link drops (one per drop, regardless of cause). `resetStats()` zeros only tx/rx; the new `resetErrors()` zeros the disconnect counter. For longevity testing.
++ **Lifetime disconnect counter:** `getStats()` now has a 3-arg form `getStats(tx, rx, errs)` that returns a lifetime count of OK→SWP transitions (one per disconnect, regardless of how noisy the recovery is). `resetStats()` zeros only tx/rx; the new `resetErrors()` zeros the disconnect counter. For longevity testing.
 
 **v2.7.0**
 
