@@ -91,7 +91,7 @@ class ALink : private UtilFrameRx::Listener {
 
     // Reset all link state, retune to allowedBauds[0], master arms the sweep
     // timer. Idempotent. Caller must hold the lock.
-    void dropLink_unlocked();
+    void dropLink_unlocked(bool countAsError = false);
     int  okTickMs() const;   // watchdog/keepalive poll interval while in OK
 
 public:
