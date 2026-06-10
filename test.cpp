@@ -625,175 +625,166 @@ void run_test_stats() {
     b.getStats(btx, brx, berr);
     assert(atx == 100 + MSG_HDR); // header + payload queued
     assert(brx == 100 + MSG_HDR); // header + payload delivered to app buffer
-    assert(aerr == 0);
+    assert(aerr == 0);  // no drops on the clean pipe
     assert(berr == 0);
 
     a.resetStats();
     a.getStats(atx, arx, aerr);
     assert(atx == 0 && arx == 0);
-    assert(aerr == 0);  // resetStats() also zeros the error counter
+    assert(aerr == 0);  // resetStats() leaves the error counter alone
+                         // (it was 0 already, so this is a no-op confirmation)
     std::cout << "PASS" << std::endl;
 }
 
 void run_test_error_counter() {
-    std::cout << "\n=== Test: Total Error Counter Survives Drops + Resets ===" << std::endl;
-    MockHal mHal, sHal;
-    AutoLinkConfig cfg; cfg.reliableMode = true; cfg.streamBufferSize = 8192;
-    // Lift the threshold well above our corrupt-frame count so the link
-    // stays in OK for the whole test -- we want to isolate the counter
-    // semantics, not the link-drop behavior (covered by run_test_error_threshold).
-    cfg.errThreshold = 1000;
-    ALink a(mHal, true, cfg);
-    ALink b(sHal, false, cfg);
+    // The disconnect counter is exactly: 1 per link drop, 0 otherwise.
+    // Per-byte error noise does NOT count (that's the parser's job and
+    // would make the counter useless for longevity testing).
+    std::cout << "\n=== Test: Disconnect Counter = One Per Link Drop ===" << std::endl;
 
-    // First: a bad message -> at least one error on the receiver.
-    uint8_t msg[] = {0x10, 0x20, 0x30, 0x40};
-    assert(a.sendMsg(msg, 4));
-    assert(!mHal.txBuf.empty());
-    mHal.txBuf[mHal.txBuf.size() / 2] ^= 0x01;
-    pipe_data(mHal, sHal);
-    uint8_t rx[32];
-    int r = b.recvMsg(rx, sizeof(rx));
-    assert(r <= 0);
-
-    uint64_t btx, brx, berr;
-    b.getStats(btx, brx, berr);
-    assert(berr >= 1);
-    uint64_t berr_after_first = berr;
-
-    // Second: feed more corrupt frames and confirm the counter grows
-    // monotonically (never decreases on its own, no implicit reset path).
-    for (int k = 0; k < 3; k++) {
-        mHal.txBuf.clear();
-        uint8_t m2[] = {(uint8_t)k, 0xAA, 0xBB};
-        assert(a.sendMsg(m2, 3));
-        mHal.txBuf[mHal.txBuf.size() / 2] ^= 0x80;
-        pipe_data(mHal, sHal);
-        b.recvMsg(rx, sizeof(rx));
-    }
-    uint64_t berr2;
-    b.getStats(btx, brx, berr2);
-    assert(berr2 > berr_after_first);
-
-    // After resetStats(), the counter zeros out cleanly (cumulative -> 0).
-    b.resetStats();
-    b.getStats(btx, brx, berr);
-    assert(berr == 0);
-
-    // Third: clean round-trip on a fresh link pair adds zero errors. We use
-    // a separate ALink pair because the corrupt frames above left stale bytes
-    // in b's app buffer that would corrupt any subsequent message header --
-    // in real use the user can call a fresh AutoLink on a fresh wire, or the
-    // protocol's own drop-and-recover would handle it.
+    // Part 1: no drops = no counts, even with corrupt bytes flying around.
     {
-        MockHal mHal2, sHal2;
-        ALink a2(mHal2, true, cfg);
-        ALink b2(sHal2, false, cfg);
-        uint8_t clean[] = {0x11, 0x22, 0x33};
-        assert(a2.sendMsg(clean, 3));
-        pipe_data(mHal2, sHal2);
-        assert(b2.recvMsg(rx, sizeof(rx)) == 3);
-        uint64_t tx2, rx2, e2;
-        b2.getStats(tx2, rx2, e2);
-        assert(e2 == 0);
+        MockHal mHal, sHal;
+        AutoLinkConfig cfg; cfg.reliableMode = true; cfg.streamBufferSize = 8192;
+        // Lift the threshold well above our corrupt-frame count so the
+        // link stays in OK -- we want to isolate "no drops = no counts".
+        cfg.errThreshold = 1000;
+        ALink a(mHal, true, cfg);
+        ALink b(sHal, false, cfg);
+        uint8_t rx[32];
+        uint64_t btx, brx, berr;
+
+        b.getStats(btx, brx, berr);
+        assert(berr == 0);
+
+        for (int k = 0; k < 10; k++) {
+            mHal.txBuf.clear();
+            uint8_t m[] = {(uint8_t)k, 0xAA, 0xBB};
+            assert(a.sendMsg(m, 3));
+            mHal.txBuf[mHal.txBuf.size() / 2] ^= 0x80;
+            pipe_data(mHal, sHal);
+            b.recvMsg(rx, sizeof(rx));
+        }
+        b.getStats(btx, brx, berr);
+        assert(berr == 0);   // parser rejected frames, but no drops -> 0
     }
 
-    // Fourth: the counter equals the number of err_unlocked() calls on
-    // that side -- monotonic across corruption bursts, no hidden reset.
-    for (int k = 0; k < 2; k++) {
-        mHal.txBuf.clear();
-        uint8_t m3[] = {(uint8_t)(0x40 + k), 0xAA, 0xBB};
-        assert(a.sendMsg(m3, 3));
-        mHal.txBuf[mHal.txBuf.size() / 2] ^= 0x10;
-        pipe_data(mHal, sHal);
-        b.recvMsg(rx, sizeof(rx));
+    // Part 2: each forced drop = exactly one count.
+    {
+        MockHal mHal, sHal;
+        AutoLinkConfig cfg; cfg.reliableMode = true; cfg.streamBufferSize = 8192;
+        // Default threshold = 5; trip condition is errs > 5 (so 6 errs trips).
+        ALink a(mHal, true, cfg);
+        ALink b(sHal, false, cfg);
+        uint64_t btx, brx, berr;
+
+        b.getStats(btx, brx, berr);
+        assert(berr == 0);
+
+        for (int i = 0; i < 6; i++) b.err();
+        assert(b.getState() == State::SWP);
+        b.getStats(btx, brx, berr);
+        assert(berr == 1);
+
+        // Post-drop noise: err() while in SWP is a no-op (the parser
+        // already gave up on those bytes). The counter doesn't inflate.
+        for (int i = 0; i < 100; i++) b.err();
+        b.getStats(btx, brx, berr);
+        assert(berr == 1);
+
+        // resetStats() leaves the disconnect counter alone (B/s sampling
+        // must not wipe longevity history).
+        b.resetStats();
+        b.getStats(btx, brx, berr);
+        assert(berr == 1);
+
+        // resetErrors() zeros it (operator ack).
+        b.resetErrors();
+        b.getStats(btx, brx, berr);
+        assert(berr == 0);
+
+        // After the ack, a second drop still counts cleanly.
+        b.begin();   // returns the master to SWP from OK-or-wherever
+        b.err(); b.err(); b.err(); b.err(); b.err(); b.err();
+        // begin() goes to SWP (no drop counted), but b.err() while in
+        // SWP is gated to a no-op. So we can't easily force a second
+        // drop without re-locking. Instead, verify the test re-runs
+        // from a known state by using a fresh link.
     }
-    uint64_t berr3;
-    b.getStats(btx, brx, berr3);
-    assert(berr3 >= 2);
-    assert(berr3 > 0);
+    {
+        MockHal mHal, sHal;
+        AutoLinkConfig cfg; cfg.reliableMode = true; cfg.streamBufferSize = 8192;
+        ALink a(mHal, true, cfg);
+        ALink b(sHal, false, cfg);
+        uint64_t btx, brx, berr;
+        for (int i = 0; i < 6; i++) b.err();
+        b.getStats(btx, brx, berr);
+        assert(berr == 1);
+    }
 
-    // Fifth: 2-arg getStats() still compiles and runs (back-compat).
-    uint64_t a2tx, a2rx;
-    a.getStats(a2tx, a2rx);
-    (void)a2tx; (void)a2rx;
-
-    // (The AutoLink facade forwarding the 3-arg form is covered by the
-    // extract_readme.py compile gate -- host tests don't link the facade
-    // because it depends on EspHal.)
+    // 2-arg getStats() still works (back-compat).
+    {
+        MockHal mHal, sHal;
+        AutoLinkConfig cfg; cfg.reliableMode = true; cfg.streamBufferSize = 8192;
+        ALink a(mHal, true, cfg);
+        uint64_t a2tx, a2rx;
+        a.getStats(a2tx, a2rx);
+        (void)a2tx; (void)a2rx;
+    }
 
     std::cout << "PASS" << std::endl;
 }
 
 void run_test_error_counter_during_swp() {
     // Regression: a cable bounce drops the link, the master spends a few
-    // seconds in SWP/LCK re-locking, and recovers. During the recovery
-    // window the parser sees garbage and calls err() -- but err_unlocked()
-    // is gated on state == OK, so before the fix totalErrs stayed at 0 the
-    // whole time. The threshold-window counter `errs` should still only
-    // tick in OK (so a noisy recovery doesn't itself trip the threshold);
-    // the lifetime counter must always tick.
-    std::cout << "\n=== Test: Error Counter Ticks During SWP/LCK ===" << std::endl;
+    // seconds in SWP/LCK re-locking, and recovers. With the per-drop
+    // semantic, this is ONE disconnect event -- not N+1 from the noise
+    // bytes that arrive during the sweep. The threshold window (`errs`)
+    // resets after a drop, so post-drop noise during SWP cannot itself
+    // trip a second drop until errs reaches threshold again.
+    std::cout << "\n=== Test: One Count Per Cable Bounce ===" << std::endl;
     MockHal mHal, sHal;
     AutoLinkConfig cfg; cfg.allowedBauds = {9600, 115200};
     ALink master(mHal, true, cfg);
     ALink slave(sHal, false, cfg);
     master.begin(); slave.begin();
 
-    // Run a full negotiation so we're in OK.
-    master.onTimer(); pipe_data(mHal, sHal);   // PING@9600
-    master.onTimer(); pipe_data(mHal, sHal);   // PING@115200 -> LCK
-    master.onTimer(); pipe_data(mHal, sHal);   // REQ
-    pipe_data(sHal, mHal);                     // slave's reply
+    // Negotiate to OK.
+    master.onTimer(); pipe_data(mHal, sHal);
+    master.onTimer(); pipe_data(mHal, sHal);
+    master.onTimer(); pipe_data(mHal, sHal);
+    pipe_data(sHal, mHal);
     assert(master.getState() == State::OK);
 
     uint64_t tx0, rx0, e0;
     master.getStats(tx0, rx0, e0);
     assert(e0 == 0);
 
-    // Now trip the error threshold to force a drop (threshold=5 -> need 6).
+    // Trip the threshold to force one disconnect event.
     for (int i = 0; i < 6; i++) master.err();
     assert(master.getState() == State::SWP);
+    master.getStats(tx0, rx0, e0);
+    assert(e0 == 1);
 
-    // 6 err() calls bumped totalErrs by 6. dropLink_unlocked(false) is
-    // called from inside err_unlocked for the trip -- so totalErrs is
-    // bumped exactly once per err(), not twice.
-    uint64_t tx_during_swp, rx_during_swp, e_during_swp;
-    master.getStats(tx_during_swp, rx_during_swp, e_during_swp);
-    assert(e_during_swp == 6);
+    // Simulate the post-drop SWP noise: a flurry of err() calls. The
+    // threshold window resets on drop, so these contribute nothing to
+    // `errs` until they reach 5+ again. And per-byte noise shouldn't
+    // count toward the disconnect counter anyway.
+    for (int i = 0; i < 100; i++) master.err();
+    master.getStats(tx0, rx0, e0);
+    assert(e0 == 1);   // still one disconnect, no per-byte inflation
 
-    // While the master is in SWP, feed it some bad bytes. The parser is
-    // gated against err_unlocked in SWP (no threshold side-effect), but
-    // err() must still bump the lifetime counter.
-    uint64_t tx1, rx1, e1;
-    master.getStats(tx1, rx1, e1);
-    for (int i = 0; i < 5; i++) {
-        master.err();   // simulates "bad byte during re-sweep"
+    // Recover. (The slave is still in OK from before the drop. Master is
+    // back in SWP and re-sweeps. We don't drive a full re-lock here --
+    // that's covered by the negotiation test -- we just confirm the
+    // counter hasn't inflated from the post-drop noise.)
+    for (int i = 0; i < 3; i++) {
+        master.onTimer();
+        if (!mHal.txBuf.empty()) pipe_data(mHal, sHal);
     }
-    uint64_t tx2, rx2, e2;
-    master.getStats(tx2, rx2, e2);
-    assert(e2 == e1 + 5);
-
-    // The threshold window (`errs`) must not have ticked -- the state was
-    // not OK when those err() calls were processed, so the SWP noise
-    // doesn't itself trip another threshold.
-    assert(master.getErrCount() == 0);
-
-    // Sanity: after the master comes back to OK and sees a real error,
-    // the threshold counter resumes and the lifetime counter keeps going.
-    master.onTimer(); pipe_data(mHal, sHal);
-    master.onTimer(); pipe_data(mHal, sHal);
-    master.onTimer(); pipe_data(mHal, sHal);
-    pipe_data(sHal, mHal);
-    if (master.getState() == State::OK) {
-        uint64_t e_before_ok_err;
-        master.getStats(tx0, rx0, e_before_ok_err);
-        master.err();
-        uint64_t e_after_ok_err;
-        master.getStats(tx0, rx0, e_after_ok_err);
-        assert(e_after_ok_err == e_before_ok_err + 1);
-        assert(master.getErrCount() == 1);
-    }
+    // The post-drop noise did not add any new disconnects.
+    master.getStats(tx0, rx0, e0);
+    assert(e0 == 1);
 
     std::cout << "PASS" << std::endl;
 }
@@ -818,35 +809,31 @@ void run_test_error_counter_link_failures() {
         assert(e0 == 0);
     }
 
-    // ----- Case 2: idle watchdog trip counts. -----
+    // ----- Case 2: idle watchdog trip counts as exactly one. -----
     {
         MockHal mHal, sHal;
         AutoLinkConfig cfg;
         cfg.allowedBauds = {9600, 115200};
-        cfg.idleTimeoutMs = 100;     // short, for test speed
+        cfg.idleTimeoutMs = 100;
         ALink master(mHal, true, cfg);
         ALink slave(sHal, false, cfg);
         master.begin(); slave.begin();
-
-        // Negotiate to OK.
         master.onTimer(); pipe_data(mHal, sHal);
         master.onTimer(); pipe_data(mHal, sHal);
         master.onTimer(); pipe_data(mHal, sHal);
         pipe_data(sHal, mHal);
         assert(master.getState() == State::OK);
 
-        // Advance MockHal's clock past the idle window. The next onTimer()
-        // should fire the watchdog and drop the link.
         mHal.now = cfg.idleTimeoutMs + 50;
         master.onTimer();
         assert(master.getState() == State::SWP);
 
         uint64_t tx1, rx1, e1;
         master.getStats(tx1, rx1, e1);
-        assert(e1 >= 1);  // the watchdog trip counts
+        assert(e1 == 1);
     }
 
-    // ----- Case 3: peer's BREAK arriving on us counts. -----
+    // ----- Case 3: peer's BREAK arriving on us counts as exactly one. -----
     {
         MockHal mHal, sHal;
         AutoLinkConfig cfg; cfg.allowedBauds = {9600, 115200};
@@ -859,18 +846,15 @@ void run_test_error_counter_link_failures() {
         pipe_data(sHal, mHal);
         assert(master.getState() == State::OK);
 
-        uint64_t tx1, rx1, e1;
-        master.getStats(tx1, rx1, e1);
-
-        master.onBreak();   // peer detected trouble and pinged us
+        master.onBreak();
         assert(master.getState() == State::SWP);
 
-        uint64_t tx2, rx2, e2;
-        master.getStats(tx2, rx2, e2);
-        assert(e2 == e1 + 1);
+        uint64_t tx, rx, e;
+        master.getStats(tx, rx, e);
+        assert(e == 1);
     }
 
-    // ----- Case 4: LCK timeout counts. -----
+    // ----- Case 4: LCK timeout counts as exactly one. -----
     {
         MockHal mHal, sHal;
         AutoLinkConfig cfg; cfg.allowedBauds = {9600, 115200};
@@ -879,11 +863,8 @@ void run_test_error_counter_link_failures() {
         master.begin(); slave.begin();
         master.onTimer(); pipe_data(mHal, sHal);
         master.onTimer(); pipe_data(mHal, sHal);
-        // Now in LCK. Slave is silent.
         assert(master.getState() == State::LCK);
 
-        // Drive the master's REQ retries past the timeout
-        // (allowedBauds.size() * 2 = 4 retries; threshold trip is `>` so 5 trips).
         for (int i = 0; i < (int)cfg.allowedBauds.size() * 2 + 2; i++) {
             master.onTimer();
         }
@@ -891,7 +872,46 @@ void run_test_error_counter_link_failures() {
 
         uint64_t tx, rx, e;
         master.getStats(tx, rx, e);
-        assert(e >= 1);
+        assert(e == 1);
+    }
+
+    // ----- Case 5: cable-bounce simulation. begin, negotiate, bounce the
+    // slave (silent past idleTimeout), let master recover. Expect exactly
+    // one count, no matter how many SWP-noise errs the parser would
+    // otherwise log. -----
+    {
+        MockHal mHal, sHal;
+        AutoLinkConfig cfg;
+        cfg.allowedBauds = {9600, 115200};
+        cfg.idleTimeoutMs = 100;
+        ALink master(mHal, true, cfg);
+        ALink slave(sHal, false, cfg);
+        master.begin(); slave.begin();
+        master.onTimer(); pipe_data(mHal, sHal);
+        master.onTimer(); pipe_data(mHal, sHal);
+        master.onTimer(); pipe_data(mHal, sHal);
+        pipe_data(sHal, mHal);
+        assert(master.getState() == State::OK);
+
+        // Slave "dies": master sees no RX, watchdog fires, master drops.
+        mHal.now = cfg.idleTimeoutMs + 50;
+        master.onTimer();
+        assert(master.getState() == State::SWP);
+
+        // A flurry of parser errs during the re-sweep window. None of
+        // these should inflate the disconnect count.
+        for (int i = 0; i < 20; i++) master.err();
+        for (int i = 0; i < 5; i++) master.err();
+
+        // Slave "comes back": finish the re-sweep and re-lock.
+        master.onTimer(); pipe_data(mHal, sHal);
+        master.onTimer(); pipe_data(mHal, sHal);
+        master.onTimer(); pipe_data(mHal, sHal);
+        pipe_data(sHal, mHal);
+
+        uint64_t tx, rx, e;
+        master.getStats(tx, rx, e);
+        assert(e == 1);   // one bounce, one count
     }
 
     std::cout << "PASS" << std::endl;
