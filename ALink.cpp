@@ -430,7 +430,13 @@ void ALink::onRx(const uint8_t* data, int len) {
 // disconnect event for the lifetime error counter; use reset_unlocked()
 // from begin() to do the same work without counting.
 void ALink::dropLink_unlocked() {
-    totalErrs++;             // one count per link drop, regardless of cause
+    // Count exactly one event per OK -> SWP transition. While already in
+    // SWP/LCK, additional onBreak() calls, threshold trips, and LCK timeouts
+    // are all part of the same recovery (e.g. a slave that emits multiple
+    // BREAKs while rebooting) and must not inflate the count. The user's
+    // mental model: "one slave reset = one count, no matter how noisy the
+    // recovery was."
+    if (state == State::OK) totalErrs++;
     changeState_unlocked(State::SWP);
     spdI = 0;
     rxIdx = 0;
