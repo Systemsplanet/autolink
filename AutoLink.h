@@ -79,9 +79,15 @@ public:
     int  recv(uint8_t* b, int max_len)   { return link->recvMsg(b, max_len); }
     bool ready() const { return link->getState() == State::OK; }
 
-    // Optional: app-stream throughput since the last reset.
-    // The 3-arg form also returns the lifetime protocol-error count
-    // (cumulative; never decreases until resetStats()).
+    // Optional: app-stream throughput + lifetime disconnect count.
+    //
+    // The 2-arg form is unchanged; the 3-arg form adds the lifetime
+    // disconnect count -- one per link drop, regardless of cause (bad
+    // frame flood, idle watchdog, peer BREAK, LCK timeout). Survives
+    // resetStats() and link drops; only zeroed by resetErrors(). This
+    // is what you want for longevity testing ("how many bounces did
+    // this link survive?"); per-byte error noise is intentionally not
+    // counted.
     void getStats(uint64_t& tx, uint64_t& rx) const {
         uint64_t errs;
         link->getStats(tx, rx, errs);
@@ -89,7 +95,13 @@ public:
     void getStats(uint64_t& tx, uint64_t& rx, uint64_t& errors) const {
         link->getStats(tx, rx, errors);
     }
+    // Zero the tx/rx throughput counters. Does NOT zero the disconnect
+    // counter -- use resetErrors() for that, or per-second B/s sampling
+    // would wipe the very history that lets you see "errors went up
+    // since last sample".
     void resetStats() { link->resetStats(); }
+    // Zero the lifetime disconnect counter (e.g. on operator ack).
+    void resetErrors() { link->resetErrors(); }
 
     // ======================= Advanced =======================
     bool isHealthy() const { return hal->isHealthy(); }
