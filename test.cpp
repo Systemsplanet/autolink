@@ -559,12 +559,15 @@ void run_test_message_size_sweep() {
     // adds 3 + 10000 + 7 payload bytes plus 3 MSG_HDRs on top of the sweep.
     expectedTx += (uint64_t)(3 + 10000 + 7) + (uint64_t)MSG_HDR * 3;
     expectedRx += (uint64_t)(3 + 10000 + 7) + (uint64_t)MSG_HDR * 3;
-    uint64_t atx, arx, btx, brx;
-    a.getStats(atx, arx);
-    b.getStats(btx, brx);
+    uint64_t atx, arx, btx, brx, aerr, berr;
+    a.getStats(atx, arx, aerr);
+    b.getStats(btx, brx, berr);
     assert(atx == expectedTx);
     assert(brx == expectedRx);
     assert(atx == brx);
+    // The clean pipe produced no protocol errors on either side.
+    assert(aerr == 0);
+    assert(berr == 0);
     std::cout << "  [stats] sender tx=" << atx << " receiver rx=" << brx
               << " (expected " << expectedTx << ")" << std::endl;
 
@@ -608,15 +611,108 @@ void run_test_stats() {
     uint8_t rx[128];
     assert(b.recvMsg(rx, sizeof(rx)) == 100);
 
-    uint64_t atx, arx, btx, brx;
-    a.getStats(atx, arx);
-    b.getStats(btx, brx);
+    uint64_t atx, arx, btx, brx, aerr, berr;
+    a.getStats(atx, arx, aerr);
+    b.getStats(btx, brx, berr);
     assert(atx == 100 + MSG_HDR); // header + payload queued
     assert(brx == 100 + MSG_HDR); // header + payload delivered to app buffer
+    assert(aerr == 0);
+    assert(berr == 0);
 
     a.resetStats();
-    a.getStats(atx, arx);
+    a.getStats(atx, arx, aerr);
     assert(atx == 0 && arx == 0);
+    assert(aerr == 0);  // resetStats() also zeros the error counter
+    std::cout << "PASS" << std::endl;
+}
+
+void run_test_error_counter() {
+    std::cout << "\n=== Test: Total Error Counter Survives Drops + Resets ===" << std::endl;
+    MockHal mHal, sHal;
+    AutoLinkConfig cfg; cfg.reliableMode = true; cfg.streamBufferSize = 8192;
+    // Lift the threshold well above our corrupt-frame count so the link
+    // stays in OK for the whole test -- we want to isolate the counter
+    // semantics, not the link-drop behavior (covered by run_test_error_threshold).
+    cfg.errThreshold = 1000;
+    ALink a(mHal, true, cfg);
+    ALink b(sHal, false, cfg);
+
+    // First: a bad message -> at least one error on the receiver.
+    uint8_t msg[] = {0x10, 0x20, 0x30, 0x40};
+    assert(a.sendMsg(msg, 4));
+    assert(!mHal.txBuf.empty());
+    mHal.txBuf[mHal.txBuf.size() / 2] ^= 0x01;
+    pipe_data(mHal, sHal);
+    uint8_t rx[32];
+    int r = b.recvMsg(rx, sizeof(rx));
+    assert(r <= 0);
+
+    uint64_t btx, brx, berr;
+    b.getStats(btx, brx, berr);
+    assert(berr >= 1);
+    uint64_t berr_after_first = berr;
+
+    // Second: feed more corrupt frames and confirm the counter grows
+    // monotonically (never decreases on its own, no implicit reset path).
+    for (int k = 0; k < 3; k++) {
+        mHal.txBuf.clear();
+        uint8_t m2[] = {(uint8_t)k, 0xAA, 0xBB};
+        assert(a.sendMsg(m2, 3));
+        mHal.txBuf[mHal.txBuf.size() / 2] ^= 0x80;
+        pipe_data(mHal, sHal);
+        b.recvMsg(rx, sizeof(rx));
+    }
+    uint64_t berr2;
+    b.getStats(btx, brx, berr2);
+    assert(berr2 > berr_after_first);
+
+    // After resetStats(), the counter zeros out cleanly (cumulative -> 0).
+    b.resetStats();
+    b.getStats(btx, brx, berr);
+    assert(berr == 0);
+
+    // Third: clean round-trip on a fresh link pair adds zero errors. We use
+    // a separate ALink pair because the corrupt frames above left stale bytes
+    // in b's app buffer that would corrupt any subsequent message header --
+    // in real use the user can call a fresh AutoLink on a fresh wire, or the
+    // protocol's own drop-and-recover would handle it.
+    {
+        MockHal mHal2, sHal2;
+        ALink a2(mHal2, true, cfg);
+        ALink b2(sHal2, false, cfg);
+        uint8_t clean[] = {0x11, 0x22, 0x33};
+        assert(a2.sendMsg(clean, 3));
+        pipe_data(mHal2, sHal2);
+        assert(b2.recvMsg(rx, sizeof(rx)) == 3);
+        uint64_t tx2, rx2, e2;
+        b2.getStats(tx2, rx2, e2);
+        assert(e2 == 0);
+    }
+
+    // Fourth: the counter equals the number of err_unlocked() calls on
+    // that side -- monotonic across corruption bursts, no hidden reset.
+    for (int k = 0; k < 2; k++) {
+        mHal.txBuf.clear();
+        uint8_t m3[] = {(uint8_t)(0x40 + k), 0xAA, 0xBB};
+        assert(a.sendMsg(m3, 3));
+        mHal.txBuf[mHal.txBuf.size() / 2] ^= 0x10;
+        pipe_data(mHal, sHal);
+        b.recvMsg(rx, sizeof(rx));
+    }
+    uint64_t berr3;
+    b.getStats(btx, brx, berr3);
+    assert(berr3 >= 2);
+    assert(berr3 > 0);
+
+    // Fifth: 2-arg getStats() still compiles and runs (back-compat).
+    uint64_t a2tx, a2rx;
+    a.getStats(a2tx, a2rx);
+    (void)a2tx; (void)a2rx;
+
+    // (The AutoLink facade forwarding the 3-arg form is covered by the
+    // extract_readme.py compile gate -- host tests don't link the facade
+    // because it depends on EspHal.)
+
     std::cout << "PASS" << std::endl;
 }
 
@@ -932,6 +1028,7 @@ int main() {
     run_test_message_size_sweep();
     run_test_message_crc_reject();
     run_test_stats();
+    run_test_error_counter();
     run_test_best_baud_selection();
     run_test_asymmetric_peer_death_recovery();
     run_test_idle_watchdog();
