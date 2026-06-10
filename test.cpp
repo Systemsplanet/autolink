@@ -44,9 +44,18 @@ public:
     void setSpd(uint32_t s) override { spd = s; spdHistory.push_back(s); }
     void sendBreak() override {
         sendBreakCalls++;
+        // On real hardware, sendBreak() puts a BREAK on the TX wire and the
+        // *other* ESP32 sees it -- the sender does not. Tests must use the
+        // explicit pipe_break_to_peer() helper (or a peer->setLink pair) to
+        // simulate the wire crossing. The old "self-deliver" hack was needed
+        // when ALink::begin() called onBreak() to do the local drop, but
+        // begin() now does the local drop directly, so self-delivery would
+        // double-count as an error.
         if (peer && peer->link) peer->link->onBreak();
-        else if (link) link->onBreak();  // backwards-compatible self-deliver
     }
+    // Explicit cross-wire BREAK delivery for tests that don't have a peer
+    // pair but still need to simulate "the peer saw our BREAK".
+    void deliver_break_to_self() { if (link) link->onBreak(); }
     void tx(const uint8_t* b, int n) override {
         txBuf.insert(txBuf.end(), b, b+n);
     }
@@ -746,6 +755,13 @@ void run_test_error_counter_during_swp() {
     for (int i = 0; i < 6; i++) master.err();
     assert(master.getState() == State::SWP);
 
+    // 6 err() calls bumped totalErrs by 6. dropLink_unlocked(false) is
+    // called from inside err_unlocked for the trip -- so totalErrs is
+    // bumped exactly once per err(), not twice.
+    uint64_t tx_during_swp, rx_during_swp, e_during_swp;
+    master.getStats(tx_during_swp, rx_during_swp, e_during_swp);
+    assert(e_during_swp == 6);
+
     // While the master is in SWP, feed it some bad bytes. The parser is
     // gated against err_unlocked in SWP (no threshold side-effect), but
     // err() must still bump the lifetime counter.
@@ -777,6 +793,105 @@ void run_test_error_counter_during_swp() {
         master.getStats(tx0, rx0, e_after_ok_err);
         assert(e_after_ok_err == e_before_ok_err + 1);
         assert(master.getErrCount() == 1);
+    }
+
+    std::cout << "PASS" << std::endl;
+}
+
+void run_test_error_counter_link_failures() {
+    // Regression: a cable bounce / silent peer death / no-reply LCK are all
+    // real link failures and must bump the lifetime error counter, even
+    // though recovery is clean. Before this fix, only the parser's per-byte
+    // err_unlocked() path counted, which meant a perfect re-sweep after a
+    // watchdog trip showed err=0 -- exactly what the user reported.
+    std::cout << "\n=== Test: Error Counter Ticks on Link Failures ===" << std::endl;
+
+    // ----- Case 1: begin() must NOT count as an error. -----
+    {
+        MockHal mHal, sHal;
+        AutoLinkConfig cfg; cfg.allowedBauds = {9600, 115200};
+        ALink master(mHal, true, cfg);
+        ALink slave(sHal, false, cfg);
+        master.begin(); slave.begin();
+        uint64_t tx0, rx0, e0;
+        master.getStats(tx0, rx0, e0);
+        assert(e0 == 0);
+    }
+
+    // ----- Case 2: idle watchdog trip counts. -----
+    {
+        MockHal mHal, sHal;
+        AutoLinkConfig cfg;
+        cfg.allowedBauds = {9600, 115200};
+        cfg.idleTimeoutMs = 100;     // short, for test speed
+        ALink master(mHal, true, cfg);
+        ALink slave(sHal, false, cfg);
+        master.begin(); slave.begin();
+
+        // Negotiate to OK.
+        master.onTimer(); pipe_data(mHal, sHal);
+        master.onTimer(); pipe_data(mHal, sHal);
+        master.onTimer(); pipe_data(mHal, sHal);
+        pipe_data(sHal, mHal);
+        assert(master.getState() == State::OK);
+
+        // Advance MockHal's clock past the idle window. The next onTimer()
+        // should fire the watchdog and drop the link.
+        mHal.now = cfg.idleTimeoutMs + 50;
+        master.onTimer();
+        assert(master.getState() == State::SWP);
+
+        uint64_t tx1, rx1, e1;
+        master.getStats(tx1, rx1, e1);
+        assert(e1 >= 1);  // the watchdog trip counts
+    }
+
+    // ----- Case 3: peer's BREAK arriving on us counts. -----
+    {
+        MockHal mHal, sHal;
+        AutoLinkConfig cfg; cfg.allowedBauds = {9600, 115200};
+        ALink master(mHal, true, cfg);
+        ALink slave(sHal, false, cfg);
+        master.begin(); slave.begin();
+        master.onTimer(); pipe_data(mHal, sHal);
+        master.onTimer(); pipe_data(mHal, sHal);
+        master.onTimer(); pipe_data(mHal, sHal);
+        pipe_data(sHal, mHal);
+        assert(master.getState() == State::OK);
+
+        uint64_t tx1, rx1, e1;
+        master.getStats(tx1, rx1, e1);
+
+        master.onBreak();   // peer detected trouble and pinged us
+        assert(master.getState() == State::SWP);
+
+        uint64_t tx2, rx2, e2;
+        master.getStats(tx2, rx2, e2);
+        assert(e2 == e1 + 1);
+    }
+
+    // ----- Case 4: LCK timeout counts. -----
+    {
+        MockHal mHal, sHal;
+        AutoLinkConfig cfg; cfg.allowedBauds = {9600, 115200};
+        ALink master(mHal, true, cfg);
+        ALink slave(sHal, false, cfg);
+        master.begin(); slave.begin();
+        master.onTimer(); pipe_data(mHal, sHal);
+        master.onTimer(); pipe_data(mHal, sHal);
+        // Now in LCK. Slave is silent.
+        assert(master.getState() == State::LCK);
+
+        // Drive the master's REQ retries past the timeout
+        // (allowedBauds.size() * 2 = 4 retries; threshold trip is `>` so 5 trips).
+        for (int i = 0; i < (int)cfg.allowedBauds.size() * 2 + 2; i++) {
+            master.onTimer();
+        }
+        assert(master.getState() == State::SWP);
+
+        uint64_t tx, rx, e;
+        master.getStats(tx, rx, e);
+        assert(e >= 1);
     }
 
     std::cout << "PASS" << std::endl;
@@ -1096,6 +1211,7 @@ int main() {
     run_test_stats();
     run_test_error_counter();
     run_test_error_counter_during_swp();
+    run_test_error_counter_link_failures();
     run_test_best_baud_selection();
     run_test_asymmetric_peer_death_recovery();
     run_test_idle_watchdog();
