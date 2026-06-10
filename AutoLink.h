@@ -82,8 +82,9 @@ public:
     // Optional: app-stream throughput + lifetime disconnect count.
     //
     // The 2-arg form is unchanged; the 3-arg form adds the lifetime
-    // disconnect count -- one per link drop, regardless of cause (bad
-    // frame flood, idle watchdog, peer BREAK, LCK timeout). Survives
+    // disconnect count -- one per OK->SWP transition. Spurious onBreak()
+    // calls and threshold trips while already in SWP/LCK are part of
+    // the same recovery and do not inflate the count. Survives
     // resetStats() and link drops; only zeroed by resetErrors(). This
     // is what you want for longevity testing ("how many bounces did
     // this link survive?"); per-byte error noise is intentionally not
