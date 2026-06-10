@@ -46,11 +46,11 @@ ALink::ALink(ILink& h, bool isMasterNode, const AutoLinkConfig& config)
 
 void ALink::begin() {
     if (isMaster) {
-        // Run the local drop explicitly: a sender never receives its own BREAK.
-        // First init -- don't count this as an error. A real "peer went away"
-        // comes through the public onBreak() path later and counts.
+        // Run the local reset explicitly: a sender never receives its own
+        // BREAK. First init -- this is NOT a disconnect event, so use
+        // reset_unlocked() instead of dropLink_unlocked().
         hw.lock();
-        dropLink_unlocked(false);
+        reset_unlocked();
         hw.unlock();
         hw.sendBreak();
     } else {
@@ -111,26 +111,18 @@ void ALink::err() {
 
 // Caller must hold the lock. Returns whether the threshold was tripped; on
 // trip the local link is dropped here (caller sends the BREAK to the peer).
-//
-// Two distinct counters are kept:
-//   - `errs` (the threshold window) only ticks while in OK. The link is
-//     supposed to be quiet during SWP/LCK, so thresholding only fires when
-//     the link was actually up.
-//   - `totalErrs` (the lifetime cumulative count) ticks on EVERY entry --
-//     public err() callers and direct err_unlocked() callers (the frame
-//     parser paths in onRx/onPayload/onFrameError). Bumping it first means
-//     a bad frame arriving during SWP/LCK is still visible to the user.
-//     Without this, a cable bounce that recovers cleanly shows err=0
-//     forever -- the very case the counter was added to expose.
+// `errs` (the threshold window) is the only thing this function touches --
+// the lifetime disconnect counter is bumped by dropLink_unlocked() itself,
+// so a single disconnect is one count regardless of how many err() calls
+// the parser made along the way. Per-byte noise during SWP/LCK is
+// intentionally not counted.
 bool ALink::err_unlocked() {
-    totalErrs++;
     if (state != State::OK) return false;
     errs++;
     if (errs > cfg.errThreshold) {
         Log::getLog().info(ALINK_TAG, "Error threshold exceeded (%d > %d). Dropping link.",
                            errs, cfg.errThreshold);
-        dropLink_unlocked(false);   // local SWP + retune; we still hold the lock
-                                    // (totalErrs was already bumped at entry)
+        dropLink_unlocked();   // counts as one disconnect event
         return true;
     }
     return false;
@@ -325,7 +317,13 @@ void ALink::getStats(uint64_t& tx, uint64_t& rx, uint64_t& errors) const {
     hw.unlock();
 }
 void ALink::resetStats() {
-    hw.lock(); txBytes = 0; rxBytes = 0; totalErrs = 0; hw.unlock();
+    // Zeros tx/rx only. The lifetime error counter is independent --
+    // sampling throughput for B/s must not wipe the very history that
+    // would let you see "errors went up while I wasn't looking".
+    hw.lock(); txBytes = 0; rxBytes = 0; hw.unlock();
+}
+void ALink::resetErrors() {
+    hw.lock(); totalErrs = 0; hw.unlock();
 }
 
 State ALink::getState() const { hw.lock(); State s = state; hw.unlock(); return s; }
@@ -428,15 +426,29 @@ void ALink::onRx(const uint8_t* data, int len) {
 
 // Reset all per-link state and retune to allowedBauds[0]. Idempotent.
 // Caller must hold the lock; it is held throughout (HAL calls never take it).
-// Master arms the sweep timer; slave waits passively.
-//
-// `countAsError` bumps the lifetime error counter. The link can drop for
-// reasons that aren't "errors" (cold start, the master's own REQ-timeout
-// restart) and reasons that are (bad frame flood tripping the threshold,
-// peer BREAK, idle watchdog). Passing false for the init/RE paths keeps
-// the lifetime counter aligned with what a human would call "an error".
-void ALink::dropLink_unlocked(bool countAsError) {
-    if (countAsError) totalErrs++;
+// Master arms the sweep timer; slave waits passively. Counts as one
+// disconnect event for the lifetime error counter; use reset_unlocked()
+// from begin() to do the same work without counting.
+void ALink::dropLink_unlocked() {
+    totalErrs++;             // one count per link drop, regardless of cause
+    changeState_unlocked(State::SWP);
+    spdI = 0;
+    rxIdx = 0;
+    rxMsgLen = -1;
+    frameRx.reset();
+    for (int i = 0; i < (int)scores.size(); i++) scores[i] = 0;
+    errs = 0;
+    lckRetries = 0;
+    lastRxMs = hw.nowMs();
+    hw.clearAppBuf();
+    hw.setSpd(cfg.allowedBauds[0]);
+    if (isMaster) hw.startTimer(cfg.delayMs);
+    else hw.stopTimer();
+}
+
+// Same as dropLink_unlocked but does NOT bump the lifetime error counter.
+// Used by begin() to do the initial local reset on startup.
+void ALink::reset_unlocked() {
     changeState_unlocked(State::SWP);
     spdI = 0;
     rxIdx = 0;
@@ -473,8 +485,8 @@ void ALink::onBreak() {
     hw.lock();
     Log::getLog().info(ALINK_TAG, "BREAK received -> re-sweep");
     // Peer-initiated drop: their link died, or we were so out of sync they
-    // had to re-sweep us. Count it -- from our side the link just failed.
-    dropLink_unlocked(true);
+    // had to re-sweep us. One disconnect event.
+    dropLink_unlocked();
     hw.unlock();
 }
 
@@ -493,9 +505,8 @@ void ALink::onTimer() {
             if ((uint32_t)(now - lastRxMs) > (uint32_t)cfg.idleTimeoutMs) {
                 Log::getLog().info(ALINK_TAG, "Idle for %u ms (limit %d) -> dropping link",
                                    (unsigned)(now - lastRxMs), cfg.idleTimeoutMs);
-                // Silent peer death: a link failure from our point of view
-                // even though recovery is clean. Counts as an error.
-                dropLink_unlocked(true);
+                // Silent peer death: a link failure. One disconnect event.
+                dropLink_unlocked();
                 hw.unlock();
                 hw.sendBreak();   // tell the peer to re-sweep too
                 return;
@@ -550,8 +561,8 @@ void ALink::onTimer() {
                                lckRetries);
             hw.lock();
             // No slave answered REQ -- either the peer is dead or its baud
-            // drifted. From our side the link just failed. Counts.
-            dropLink_unlocked(true);
+            // drifted. One disconnect event.
+            dropLink_unlocked();
             hw.unlock();
             hw.sendBreak();
             return;
