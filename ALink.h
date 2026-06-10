@@ -75,6 +75,10 @@ class ALink : private UtilFrameRx::Listener {
     uint64_t txBytes;
     uint64_t rxBytes;
 
+    // Total protocol-level errors observed since the last resetStats().
+    // Monotonic, never decreases; survives link drops and re-sweeps.
+    uint64_t totalErrs;
+
     // UtilFrameRx::Listener (called under the lock from onRx).
     bool onPayload(const uint8_t* b, int n) override;
     bool onFrameError() override;
@@ -115,7 +119,10 @@ public:
     int  recvMsg(uint8_t* b, int max_len);
 
     // Throughput. Counters are app-stream bytes since the last reset.
+    // The 3-arg form also returns the lifetime protocol-error count
+    // (cumulative; survives link drops and re-sweeps; zeroed by resetStats()).
     void getStats(uint64_t& tx, uint64_t& rx) const;
+    void getStats(uint64_t& tx, uint64_t& rx, uint64_t& errors) const;
     void resetStats();
 
     State getState() const;
