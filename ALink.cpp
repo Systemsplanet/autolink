@@ -31,7 +31,7 @@ const char* StateToStr(State s) {
 ALink::ALink(ILink& h, bool isMasterNode, const AutoLinkConfig& config)
     : hw(h), isMaster(isMasterNode), cfg(config),
       state(State::OK), errs(0), spdI(0), rxIdx(0), frameRx(*this),
-      rxMsgLen(-1), rxMsgCrc(0), lckRetries(0), lastRxMs(0), lastTxMs(0), txBytes(0), rxBytes(0)
+      rxMsgLen(-1), rxMsgCrc(0), lckRetries(0), lastRxMs(0), lastTxMs(0), txBytes(0), rxBytes(0), totalErrs(0)
 {
     scores.resize(cfg.allowedBauds.size(), 0);
     hw.bind(this);
@@ -110,6 +110,7 @@ void ALink::err() {
 bool ALink::err_unlocked() {
     if (state != State::OK) return false;
     errs++;
+    totalErrs++;
     if (errs > cfg.errThreshold) {
         Log::getLog().info(ALINK_TAG, "Error threshold exceeded (%d > %d). Dropping link.",
                            errs, cfg.errThreshold);
@@ -295,10 +296,20 @@ int ALink::recvMsg(uint8_t* out, int max_len) {
 }
 
 void ALink::getStats(uint64_t& tx, uint64_t& rx) const {
-    hw.lock(); tx = txBytes; rx = rxBytes; hw.unlock();
+    hw.lock();
+    tx = txBytes;
+    rx = rxBytes;
+    hw.unlock();
+}
+void ALink::getStats(uint64_t& tx, uint64_t& rx, uint64_t& errors) const {
+    hw.lock();
+    tx = txBytes;
+    rx = rxBytes;
+    errors = totalErrs;
+    hw.unlock();
 }
 void ALink::resetStats() {
-    hw.lock(); txBytes = 0; rxBytes = 0; hw.unlock();
+    hw.lock(); txBytes = 0; rxBytes = 0; totalErrs = 0; hw.unlock();
 }
 
 State ALink::getState() const { hw.lock(); State s = state; hw.unlock(); return s; }
