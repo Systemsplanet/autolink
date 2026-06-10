@@ -47,7 +47,11 @@ ALink::ALink(ILink& h, bool isMasterNode, const AutoLinkConfig& config)
 void ALink::begin() {
     if (isMaster) {
         // Run the local drop explicitly: a sender never receives its own BREAK.
-        onBreak();
+        // First init -- don't count this as an error. A real "peer went away"
+        // comes through the public onBreak() path later and counts.
+        hw.lock();
+        dropLink_unlocked(false);
+        hw.unlock();
         hw.sendBreak();
     } else {
         hw.lock();
@@ -125,7 +129,8 @@ bool ALink::err_unlocked() {
     if (errs > cfg.errThreshold) {
         Log::getLog().info(ALINK_TAG, "Error threshold exceeded (%d > %d). Dropping link.",
                            errs, cfg.errThreshold);
-        dropLink_unlocked();   // local SWP + retune; we still hold the lock
+        dropLink_unlocked(false);   // local SWP + retune; we still hold the lock
+                                    // (totalErrs was already bumped at entry)
         return true;
     }
     return false;
@@ -424,7 +429,14 @@ void ALink::onRx(const uint8_t* data, int len) {
 // Reset all per-link state and retune to allowedBauds[0]. Idempotent.
 // Caller must hold the lock; it is held throughout (HAL calls never take it).
 // Master arms the sweep timer; slave waits passively.
-void ALink::dropLink_unlocked() {
+//
+// `countAsError` bumps the lifetime error counter. The link can drop for
+// reasons that aren't "errors" (cold start, the master's own REQ-timeout
+// restart) and reasons that are (bad frame flood tripping the threshold,
+// peer BREAK, idle watchdog). Passing false for the init/RE paths keeps
+// the lifetime counter aligned with what a human would call "an error".
+void ALink::dropLink_unlocked(bool countAsError) {
+    if (countAsError) totalErrs++;
     changeState_unlocked(State::SWP);
     spdI = 0;
     rxIdx = 0;
@@ -460,7 +472,9 @@ bool ALink::onFrameError() {
 void ALink::onBreak() {
     hw.lock();
     Log::getLog().info(ALINK_TAG, "BREAK received -> re-sweep");
-    dropLink_unlocked();
+    // Peer-initiated drop: their link died, or we were so out of sync they
+    // had to re-sweep us. Count it -- from our side the link just failed.
+    dropLink_unlocked(true);
     hw.unlock();
 }
 
@@ -479,7 +493,9 @@ void ALink::onTimer() {
             if ((uint32_t)(now - lastRxMs) > (uint32_t)cfg.idleTimeoutMs) {
                 Log::getLog().info(ALINK_TAG, "Idle for %u ms (limit %d) -> dropping link",
                                    (unsigned)(now - lastRxMs), cfg.idleTimeoutMs);
-                dropLink_unlocked();
+                // Silent peer death: a link failure from our point of view
+                // even though recovery is clean. Counts as an error.
+                dropLink_unlocked(true);
                 hw.unlock();
                 hw.sendBreak();   // tell the peer to re-sweep too
                 return;
@@ -533,7 +549,9 @@ void ALink::onTimer() {
             Log::getLog().info(ALINK_TAG, "LCK timeout: no peer reply after %d REQs -> re-sweep",
                                lckRetries);
             hw.lock();
-            dropLink_unlocked();
+            // No slave answered REQ -- either the peer is dead or its baud
+            // drifted. From our side the link just failed. Counts.
+            dropLink_unlocked(true);
             hw.unlock();
             hw.sendBreak();
             return;
