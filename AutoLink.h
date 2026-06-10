@@ -80,7 +80,15 @@ public:
     bool ready() const { return link->getState() == State::OK; }
 
     // Optional: app-stream throughput since the last reset.
-    void getStats(uint64_t& tx, uint64_t& rx) const { link->getStats(tx, rx); }
+    // The 3-arg form also returns the lifetime protocol-error count
+    // (cumulative; never decreases until resetStats()).
+    void getStats(uint64_t& tx, uint64_t& rx) const {
+        uint64_t errs;
+        link->getStats(tx, rx, errs);
+    }
+    void getStats(uint64_t& tx, uint64_t& rx, uint64_t& errors) const {
+        link->getStats(tx, rx, errors);
+    }
     void resetStats() { link->resetStats(); }
 
     // ======================= Advanced =======================
