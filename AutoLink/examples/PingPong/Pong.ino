@@ -9,7 +9,7 @@
 // error counts every 5 seconds. Pass WiFi credentials (last three args) to
 // enable the live web dashboard, or omit them for a UART-only link.
 
-#include <UtilPong.h>
+#include <util/UtilPong.h>
 using namespace autolink;
 
 UtilPong pong(
