@@ -138,6 +138,7 @@ public:
     void clearErr() { link->clearErr(); }
     int  getErrCount() const { return link->getErrCount(); }
     State getState() const { return link->getState(); }
+    uint32_t getCurrentBaud() const { return link->getCurrentBaud(); }
 };
 
 } // namespace autolink
