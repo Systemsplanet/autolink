@@ -31,6 +31,7 @@ int       sentLen = 0;  // length of the stashed payload; 0 = nothing in flight
 uint32_t  sentSeq = 0;  // sequence number of the stashed payload
 bool      wasReady = false;
 uint32_t  msgSeq = 0;   // monotonically increasing send sequence
+uint32_t  tStat  = 0;   // last time we logged throughput to serial
 Log&      LOG = Log::getLog();
 void fill(uint8_t* b, int n) { for (int i = 0; i < n; i++) b[i] = random(256); }
 
@@ -135,8 +136,17 @@ void loop() {
     // from sending a new one until the previous round trip completes.
     drainAndCompare();
 
-    // Throughput, error count, and lifetime disconnects are shown live in
-    // the AutoLinkWeb dashboard — no manual stats logging needed here.
+    // Serial throughput log every 5 s. Also visible live in the AutoLinkWeb
+    // dashboard if WiFi is configured. resetStats() zeros tx/rx but never
+    // touches the lifetime disconnect counter.
+    if (millis() - tStat > 5000) {
+        uint64_t tx, rx, errs;
+        comm.getStats(tx, rx, errs);
+        LOG.info("Main", "tx=%llu B  rx=%llu B  baud=%lu  disconnects=%llu",
+                 tx, rx, (unsigned long)comm.getCurrentBaud(), errs);
+        comm.resetStats();
+        tStat = millis();
+    }
 }
 ```
 
