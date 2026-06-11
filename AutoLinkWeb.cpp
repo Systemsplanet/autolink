@@ -106,8 +106,18 @@ main{padding:14px;max-width:540px;margin:0 auto}
 </main>
 <div class="footer">AutoLink Web Monitor &#x2014; <span id="host"></span></div>
 <script>
-var paused=false,lastSeq=0,fails=0;
+var paused=false,lastSeq=0,fails=0,busy=false;
 document.getElementById('host').textContent=location.host;
+
+// Fetch with an AbortController timeout (ms). Prevents stalled requests from
+// holding open connections when the ESP is busy or WiFi is reconnecting.
+function tfetch(url,opts,ms){
+  var c=new AbortController();
+  var id=setTimeout(function(){c.abort();},ms||2500);
+  var o=Object.assign({signal:c.signal},opts||{});
+  return fetch(url,o).then(function(r){clearTimeout(id);return r;},
+                           function(e){clearTimeout(id);throw e;});
+}
 
 function bps(n){if(n>=1048576)return(n/1048576).toFixed(1)+' MB/s';if(n>=1024)return(n/1024).toFixed(1)+' KB/s';return n+' B/s';}
 function bytes(n){if(n>=1073741824)return(n/1073741824).toFixed(2)+' GB';if(n>=1048576)return(n/1048576).toFixed(2)+' MB';if(n>=1024)return(n/1024).toFixed(1)+' KB';return n+' B';}
@@ -144,7 +154,7 @@ async function resetAll(){
   var b=document.getElementById('rbtn');
   b.textContent='…';
   try{
-    var r=await fetch('/reset',{method:'POST'});
+    var r=await tfetch('/reset',{method:'POST'},2500);
     b.textContent=r.ok?'✓ Done':'✗ Err';
   }catch(e){b.textContent='✗ Err';}
   setTimeout(function(){b.textContent='↺ Reset';},1200);
@@ -161,9 +171,10 @@ function appendLog(sev,seq,text){
 }
 
 async function poll(){
-  if(paused)return;
+  if(paused||busy)return;
+  busy=true;
   try{
-    var r=await fetch('/stats');
+    var r=await tfetch('/stats',null,2500);
     if(!r.ok)throw 0;
     var d=await r.json();
     set('txbps',bps(d.txBps));
@@ -174,17 +185,18 @@ async function poll(){
     set('discon', d.errTotal + (d.errTotal===1?' disconnect':' disconnects'));
     set('rssi',d.rssi+' dBm');
     set('heap','heap '+bytes(d.freeHeap));
-    set('baud', d.baudRate ? d.baudRate.toLocaleString()+' baud' : 'sweeping…');
+    set('baud', d.baudRate ? d.baudRate.toLocaleString()+' baud' : 'sweeping\u2026');
     set('uptime','up '+hms(d.uptimeS));
     setPill(d.state);
     fails=0;hide('alert');
   }catch(e){if(++fails>=3)show('alert');}
   try{
-    var r2=await fetch('/logs?since='+lastSeq);
+    var r2=await tfetch('/logs?since='+lastSeq,null,2500);
     if(!r2.ok)throw 0;
     var d2=await r2.json();
     d2.lines.forEach(function(l){appendLog(l.sev,l.seq,l.text);});
   }catch(e){}
+  busy=false;
 }
 
 document.addEventListener('visibilitychange',function(){if(!document.hidden&&!paused)poll();});
@@ -375,6 +387,7 @@ void AutoLinkWeb::logSinkCb(char sev, const char* tag, const char* msg, void* ct
 esp_err_t AutoLinkWeb::handleRoot(httpd_req_t* req) {
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "Connection", "close");
     // sizeof - 1: exclude the NUL terminator of the string literal.
     httpd_resp_send(req, HTML_PAGE, sizeof(HTML_PAGE) - 1);
     return ESP_OK;
@@ -414,6 +427,7 @@ esp_err_t AutoLinkWeb::handleStats(httpd_req_t* req) {
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    httpd_resp_set_hdr(req, "Connection", "close");
     httpd_resp_send(req, buf, len);
     return ESP_OK;
 }
@@ -439,6 +453,7 @@ esp_err_t AutoLinkWeb::handleLogs(httpd_req_t* req) {
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    httpd_resp_set_hdr(req, "Connection", "close");
     httpd_resp_sendstr_chunk(req, "{\"lines\":[");
 
     bool first = true;
@@ -474,7 +489,11 @@ esp_err_t AutoLinkWeb::handleLogs(httpd_req_t* req) {
             }
             chunk[pos++] = '"';
             chunk[pos++] = '}';
-            httpd_resp_send_chunk(req, chunk, pos);
+            if (httpd_resp_send_chunk(req, chunk, pos) != ESP_OK) {
+                // Client disconnected mid-response; release the mutex and bail.
+                xSemaphoreGive(self->logMtx_);
+                return ESP_FAIL;
+            }
         }
         xSemaphoreGive(self->logMtx_);
     }
@@ -498,6 +517,7 @@ esp_err_t AutoLinkWeb::handleReset(httpd_req_t* req) {
         xSemaphoreGive(self->snapMtx_);
     }
     httpd_resp_set_type(req, "text/plain");
+    httpd_resp_set_hdr(req, "Connection", "close");
     httpd_resp_send(req, "ok", 2);
     return ESP_OK;
 }
