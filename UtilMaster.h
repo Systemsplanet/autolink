@@ -4,6 +4,18 @@
 // README Quick Start into a single setup()/loop() object. Drop the header
 // into a sketch and wire three calls — that's the entire application.
 //
+// ┌──────────── WIRING ─────────────────────────────────────────────────────┐
+// │ Cross-connect the two boards:  Master TX ──► Slave RX                  │
+// │                                Master RX ◄── Slave TX                  │
+// │ (TX→TX or RX→RX are the most common wiring mistakes and produce        │
+// │  0 received bytes at every baud.)                                       │
+// │                                                                         │
+// │ Default pins: rxPin=16, txPin=17 (ESP32 UART2 defaults).               │
+// │ FireBeetle ESP32: GPIO 16/17 are NOT on the header.                    │
+// │   Use GPIO18/19  →  UtilMaster um(115200, UART_NUM_2, 18, 19, ...);   │
+// │   Use GPIO21/22  →  UtilMaster um(115200, UART_NUM_2, 21, 22, ...);   │
+// └─────────────────────────────────────────────────────────────────────────┘
+//
 // The WiFi web monitor is optional: pass a non-null SSID to enable it.
 // If the SSID is omitted (or nullptr), the UART link runs unaffected and
 // the AutoLinkWeb object is constructed but never started.
