@@ -1,3 +1,9 @@
+// ALink.cpp — AutoLink protocol core implementation.
+//
+// State machine (SWP/LCK/OK), COBS+CRC-8 framing, CRC-16 message layer,
+// auto-baud sweep with reliability scoring, idle watchdog, keepalive, and
+// error thresholding. All physical I/O goes through the injected ILink so
+// this file compiles and runs cleanly on the host for unit testing.
 #include "ALink.h"
 #include "Log.h"
 #include "UtilCrc.h"
@@ -30,10 +36,15 @@ const char* StateToStr(State s) {
 
 ALink::ALink(ILink& h, bool isMasterNode, const AutoLinkConfig& config)
     : hw(h), isMaster(isMasterNode), cfg(config),
-      state(State::OK), errs(0), spdI(0), rxIdx(0), frameRx(*this),
+      state(State::OK), errs(0), spdI(0), pingSample(0), baudSweep((int)config.allowedBauds.size()),
+      rxIdx(0), frameRx(*this),
       rxMsgLen(-1), rxMsgCrc(0), lckRetries(0), lastRxMs(0), lastTxMs(0), txBytes(0), rxBytes(0), totalErrs(0)
 {
-    scores.resize(cfg.allowedBauds.size(), 0);
+    UtilBaudSweep::Config sc;
+    sc.pingSamplesPerBaud = config.pingSamplesPerBaud;
+    sc.minAcceptRate       = config.minAcceptRate;
+    sc.expectedSamples     = -1;  // inherit from pingSamplesPerBaud
+    baudSweep.configure(sc);
     hw.bind(this);
     Log::getLog().info(ALINK_TAG, "Initialized as %s. Reliable Mode: %s",
                        isMaster ? "Master" : "Slave", cfg.reliableMode ? "ON" : "OFF");
@@ -56,13 +67,19 @@ void ALink::begin() {
     } else {
         hw.lock();
         changeState_unlocked(State::SWP);
-        spdI = 0; rxIdx = 0;
+        // Sweep in array order: start at index 0 and increment. With
+        // the default allowedBauds = {115200, 57600, 38400, 19200,
+        // 9600}, the master tests 115200 first. The slave is at the
+        // same index, both increment in lockstep.
+        spdI = 0;
+        pingSample = 0;
+        rxIdx = 0;
         rxMsgLen = -1;
         frameRx.reset();
-        for (int i = 0; i < (int)scores.size(); i++) scores[i] = 0;
+        baudSweep.resetAll();
         hw.unlock();
         hw.clearAppBuf();
-        hw.setSpd(cfg.allowedBauds[0]);
+        hw.setSpd(cfg.allowedBauds[spdI]);
         // Slave does not run the sweep clock; the master drives it.
     }
 }
@@ -75,14 +92,12 @@ void ALink::changeState_unlocked(State newState) {
     }
 }
 
-// Pick the fastest baud (highest index) the slave actually decoded a PING on.
-// Falls back to index 0 if nothing scored. Caller must hold the lock.
+// Pick the most reliable baud using the reliability sweep. See
+// UtilBaudSweep::pickBest() for the full algorithm. Returns 0 if the sweep
+// produced no data at all (a fresh negotiation that never saw a PING).
 int ALink::bestSpd_unlocked() const {
-    int best = 0;
-    for (int j = 1; j < (int)cfg.allowedBauds.size(); j++) {
-        if (scores[j] > 0) best = j;
-    }
-    return best;
+    int best = baudSweep.pickBest();
+    return best < 0 ? 0 : best;
 }
 
 void ALink::sendFrame(uint8_t payload) {
@@ -382,13 +397,66 @@ void ALink::onRx(const uint8_t* data, int len) {
                             lastRxMs = lastTxMs = hw.nowMs();
                             changeState_unlocked(State::OK);
                             if (cfg.idleTimeoutMs > 0) hw.startTimer(okTickMs());
+                        } else if (isMaster && cfg.fastBaudLock
+                                   && payload != PING_CMD && payload != REQ_CMD
+                                   && payload < (int)cfg.allowedBauds.size()) {
+                            // Fast-ack from the slave: it has enough
+                            // confidence at the current baud and is
+                            // telling us to lock here. Same frame format
+                            // as the existing LCK best-reply, so the
+                            // master just treats any in-range payload
+                            // (that's not PING/REQ) as a best-ack.
+                            hw.setSpd(cfg.allowedBauds[payload]);
+                            errs = 0;
+                            lastRxMs = lastTxMs = hw.nowMs();
+                            Log::getLog().info(ALINK_TAG, "Locked at %lu baud (fast-ack)",
+                                               (unsigned long)cfg.allowedBauds[payload]);
+                            changeState_unlocked(State::OK);
+                            if (cfg.idleTimeoutMs > 0) hw.startTimer(okTickMs());
+                            // Stop the sweep clock; we're done.
+                            hw.stopTimer();
                         } else if (payload == PING_CMD && spdI < (int)cfg.allowedBauds.size()) {
-                            scores[spdI]++;
-                            spdI++;
-                            // Retune in lockstep with the master so the next
-                            // PING (at the next baud) can be decoded.
-                            int next = (spdI < (int)cfg.allowedBauds.size()) ? spdI : 0;
-                            hw.setSpd(cfg.allowedBauds[next]); // baud[0] readies us for REQ
+                            baudSweep.score(spdI);
+                            // Fast-ack path: if we've scored enough PINGs
+                            // at the current baud to trust it, send a
+                            // best-ack immediately and lock. The master
+                            // is at the same baud (lockstep), so it sees
+                            // the ack and jumps to OK. Same one-frame
+                            // format as the existing LCK best-reply, so
+                            // the master just treats any in-range payload
+                            // in SWP the same way it does in LCK.
+                            if (cfg.fastBaudLock && baudSweep.scoreAt(spdI) >= baudSweep.minHitsForReliable()) {
+                                int best = baudSweep.pickBest();
+                                if (best < 0) best = spdI;
+                                sendFrame_unlocked((uint8_t)best);
+                                hw.setSpd(cfg.allowedBauds[best]);
+                                errs = 0;
+                                lastRxMs = lastTxMs = hw.nowMs();
+                                Log::getLog().info(ALINK_TAG, "Locked at %lu baud (fast-ack)",
+                                                   (unsigned long)cfg.allowedBauds[best]);
+                                changeState_unlocked(State::OK);
+                                if (cfg.idleTimeoutMs > 0) hw.startTimer(okTickMs());
+                                // Stay in OK; no need to advance spdI.
+                            } else {
+                                // Reliability sweep: stay at this baud for
+                                // `pingSamplesPerBaud` PINGs so the slave
+                                // can score the decode rate. Only advance
+                                // spdI and retune when we have a full
+                                // sample. Array-order lockstep.
+                                int samples = baudSweep.samplesPerBaud();
+                                if (samples < 1) samples = 1;
+                                if (++pingSample >= samples) {
+                                    pingSample = 0;
+                                    spdI++;
+                                    // Retune in lockstep with the master so
+                                    // the next PING (at the next baud up)
+                                    // can be decoded. When we've seen all
+                                    // bauds, return to baud[0] to listen
+                                    // for REQ.
+                                    int next = (spdI < (int)cfg.allowedBauds.size()) ? spdI : 0;
+                                    hw.setSpd(cfg.allowedBauds[next]);
+                                }
+                            }
                         }
                     }
                     else if (cur_state == State::LCK) {
@@ -397,6 +465,8 @@ void ALink::onRx(const uint8_t* data, int len) {
                                 hw.setSpd(cfg.allowedBauds[payload]);
                                 errs = 0;
                                 lastRxMs = lastTxMs = hw.nowMs();
+                                Log::getLog().info(ALINK_TAG, "Locked at %lu baud",
+                                                   (unsigned long)cfg.allowedBauds[payload]);
                                 changeState_unlocked(State::OK);
                                 if (cfg.idleTimeoutMs > 0) hw.startTimer(okTickMs());
                             }
@@ -407,6 +477,8 @@ void ALink::onRx(const uint8_t* data, int len) {
                                 hw.setSpd(cfg.allowedBauds[best]);
                                 errs = 0;
                                 lastRxMs = lastTxMs = hw.nowMs();
+                                Log::getLog().info(ALINK_TAG, "Locked at %lu baud",
+                                                   (unsigned long)cfg.allowedBauds[best]);
                                 changeState_unlocked(State::OK);
                                 if (cfg.idleTimeoutMs > 0) hw.startTimer(okTickMs());
                             }
@@ -438,16 +510,19 @@ void ALink::dropLink_unlocked() {
     // recovery was."
     if (state == State::OK) totalErrs++;
     changeState_unlocked(State::SWP);
+    // Sweep in array order: see begin()'s slave branch for the
+    // rationale. The lockstep is preserved.
     spdI = 0;
+    pingSample = 0;
     rxIdx = 0;
     rxMsgLen = -1;
     frameRx.reset();
-    for (int i = 0; i < (int)scores.size(); i++) scores[i] = 0;
+    baudSweep.resetAll();
     errs = 0;
     lckRetries = 0;
     lastRxMs = hw.nowMs();
     hw.clearAppBuf();
-    hw.setSpd(cfg.allowedBauds[0]);
+    hw.setSpd(cfg.allowedBauds[spdI]);
     if (isMaster) hw.startTimer(cfg.delayMs);
     else hw.stopTimer();
 }
@@ -456,16 +531,18 @@ void ALink::dropLink_unlocked() {
 // Used by begin() to do the initial local reset on startup.
 void ALink::reset_unlocked() {
     changeState_unlocked(State::SWP);
+    // Sweep in array order: see begin()'s slave branch for the
+    // rationale. The lockstep is preserved.
     spdI = 0;
     rxIdx = 0;
     rxMsgLen = -1;
     frameRx.reset();
-    for (int i = 0; i < (int)scores.size(); i++) scores[i] = 0;
+    baudSweep.resetAll();
     errs = 0;
     lckRetries = 0;
     lastRxMs = hw.nowMs();
     hw.clearAppBuf();
-    hw.setSpd(cfg.allowedBauds[0]);
+    hw.setSpd(cfg.allowedBauds[spdI]);
     if (isMaster) hw.startTimer(cfg.delayMs);
     else hw.stopTimer();
 }
@@ -535,23 +612,48 @@ void ALink::onTimer() {
     hw.unlock();
 
     if (s == State::SWP) {
-        if (isMaster && curSpd < (int)cfg.allowedBauds.size()) sendFrame(PING_CMD);
+        // Reliability sweep: send `pingSamplesPerBaud` PINGs at each
+        // baud in array order, so the slave can score decode rates.
+        // The master stays on the same baud for N consecutive timer
+        // ticks (driven by `pingSample`); only when the local count
+        // reaches samplesPerBaud does the master advance spdI and
+        // retune. Once we've covered the whole list without the slave
+        // acking, fall through to LCK and use the legacy REQ_CMD path.
+        if (isMaster && curSpd < (int)cfg.allowedBauds.size()) {
+            sendFrame(PING_CMD);
+            int samples = baudSweep.samplesPerBaud();
+            if (samples < 1) samples = 1;
+            if (pingSample + 1 >= samples) {
+                // Done with this baud. Increment spdI, retune (or
+                // transition to LCK if we've covered the whole list).
+                hw.lock();
+                pingSample = 0;
+                spdI++;
+                curSpd = spdI;
+                hw.unlock();
 
-        hw.lock();
-        spdI++;
-        curSpd = spdI;
-        hw.unlock();
-
-        if (curSpd < (int)cfg.allowedBauds.size()) {
-            hw.setSpd(cfg.allowedBauds[curSpd]);
-            hw.startTimer(cfg.delayMs);
+                if (curSpd < (int)cfg.allowedBauds.size()) {
+                    hw.setSpd(cfg.allowedBauds[curSpd]);
+                    hw.startTimer(cfg.delayMs);
+                } else {
+                    hw.lock();
+                    changeState_unlocked(State::LCK);
+                    lckRetries = 0;
+                    hw.unlock();
+                    hw.setSpd(cfg.allowedBauds[0]);
+                    if (isMaster) hw.startTimer(cfg.delayMs);
+                }
+            } else {
+                // Stay on this baud; re-arm the timer.
+                hw.lock();
+                pingSample++;
+                hw.unlock();
+                hw.startTimer(cfg.delayMs);
+            }
         } else {
-            hw.lock();
-            changeState_unlocked(State::LCK);
-            lckRetries = 0;
-            hw.unlock();
-            hw.setSpd(cfg.allowedBauds[0]);
-            if (isMaster) hw.startTimer(cfg.delayMs);
+            // Slave in SWP doesn't drive the sweep clock; master does.
+            // (This branch is unreachable in practice since the slave
+            // only calls onTimer in OK, but kept defensively.)
         }
     }
     else if (s == State::LCK && isMaster) {
