@@ -1,3 +1,5 @@
+// UtilCobs.cpp — COBS encoder/decoder implementation.
+// See UtilCobs.h for the public interface.
 #include "UtilCobs.h"
 #include <string.h>
 
