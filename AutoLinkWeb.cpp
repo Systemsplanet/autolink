@@ -98,6 +98,7 @@ main{padding:14px;max-width:540px;margin:0 auto}
     <span class="section-lbl">Live Log</span>
     <div class="btns">
       <button class="btn" onclick="clearLog()">Clear</button>
+      <button class="btn" id="cbtn" onclick="copyLog()">Copy</button>
       <button class="btn" id="pbtn" onclick="togglePause()">&#9646;&#9646; Pause</button>
     </div>
   </div>
@@ -126,6 +127,18 @@ function togglePause(){
 }
 
 function clearLog(){document.getElementById('log').innerHTML='';}
+
+async function copyLog(){
+  var lines=Array.from(document.getElementById('log').children).map(function(e){return e.textContent;});
+  var b=document.getElementById('cbtn');
+  try{
+    await navigator.clipboard.writeText(lines.join('\n'));
+    b.textContent='✓ Copied';
+  }catch(e){
+    b.textContent='✗ Failed';
+  }
+  setTimeout(function(){b.textContent='Copy';},1500);
+}
 
 async function resetAll(){
   var b=document.getElementById('rbtn');
