@@ -400,6 +400,7 @@ void ALink::onRx(const uint8_t* data, int len) {
                             int best = bestSpd_unlocked();
                             sendFrame_unlocked(best);
                             hw.setSpd(cfg.allowedBauds[best]);
+                            spdI = best;   // track the actual locked baud index
                             errs = 0;
                             lastRxMs = lastTxMs = hw.nowMs();
                             changeState_unlocked(State::OK);
@@ -414,6 +415,7 @@ void ALink::onRx(const uint8_t* data, int len) {
                             // master just treats any in-range payload
                             // (that's not PING/REQ) as a best-ack.
                             hw.setSpd(cfg.allowedBauds[payload]);
+                            spdI = (int)payload;  // track the actual locked baud index
                             errs = 0;
                             lastRxMs = lastTxMs = hw.nowMs();
                             Log::getLog().info(ALINK_TAG, "Locked at %lu baud (fast-ack)",
@@ -437,13 +439,13 @@ void ALink::onRx(const uint8_t* data, int len) {
                                 if (best < 0) best = spdI;
                                 sendFrame_unlocked((uint8_t)best);
                                 hw.setSpd(cfg.allowedBauds[best]);
+                                spdI = best;   // track the actual locked baud index
                                 errs = 0;
                                 lastRxMs = lastTxMs = hw.nowMs();
                                 Log::getLog().info(ALINK_TAG, "Locked at %lu baud (fast-ack)",
                                                    (unsigned long)cfg.allowedBauds[best]);
                                 changeState_unlocked(State::OK);
                                 if (cfg.idleTimeoutMs > 0) hw.startTimer(okTickMs());
-                                // Stay in OK; no need to advance spdI.
                             } else {
                                 // Reliability sweep: stay at this baud for
                                 // `pingSamplesPerBaud` PINGs so the slave
@@ -470,6 +472,7 @@ void ALink::onRx(const uint8_t* data, int len) {
                         if (isMaster) {
                             if (payload < (int)cfg.allowedBauds.size()) {
                                 hw.setSpd(cfg.allowedBauds[payload]);
+                                spdI = (int)payload;  // track the actual locked baud index
                                 errs = 0;
                                 lastRxMs = lastTxMs = hw.nowMs();
                                 Log::getLog().info(ALINK_TAG, "Locked at %lu baud",
@@ -482,6 +485,7 @@ void ALink::onRx(const uint8_t* data, int len) {
                                 int best = bestSpd_unlocked();
                                 sendFrame_unlocked(best);
                                 hw.setSpd(cfg.allowedBauds[best]);
+                                spdI = best;   // track the actual locked baud index
                                 errs = 0;
                                 lastRxMs = lastTxMs = hw.nowMs();
                                 Log::getLog().info(ALINK_TAG, "Locked at %lu baud",
@@ -646,6 +650,7 @@ void ALink::onTimer() {
                     hw.lock();
                     changeState_unlocked(State::LCK);
                     lckRetries = 0;
+                    spdI = 0;  // UART will be tuned to allowedBauds[0] below
                     hw.unlock();
                     hw.setSpd(cfg.allowedBauds[0]);
                     if (isMaster) hw.startTimer(cfg.delayMs);
