@@ -18,8 +18,10 @@ namespace autolink {
 
 class UtilFrameRx {
 public:
-    // Receiver-side callbacks. Both return true if the link was dropped and
-    // feeding this event should stop.
+    // Listener — implemented by the owner (ALink) to receive validated frame
+    // payloads and frame-error notifications. Both callbacks return true if
+    // the link was dropped mid-event so feed() can stop early and hand the
+    // rest of the buffer to the command parser.
     class Listener {
     public:
         virtual ~Listener() {}
