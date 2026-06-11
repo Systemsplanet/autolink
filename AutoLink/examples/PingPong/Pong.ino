@@ -1,8 +1,8 @@
-// Pong — AutoLink slave node for the ping-pong throughput/echo test.
+// Pong — AutoLink pong node for the ping-pong throughput/echo test.
 //
 // Flash this onto one ESP32 and Ping.ino onto another. Wire them:
-//   Pong GPIO17 (TX) -> Ping GPIO16 (RX)
-//   Pong GPIO16 (RX) <- Ping GPIO17 (TX)
+//   Pong TX(GPIO17) ──► Ping RX(GPIO16)
+//   Pong RX(GPIO16) ◄── Ping TX(GPIO17)
 //   shared GND
 //
 // Pong echoes back every complete message it receives and logs throughput +
