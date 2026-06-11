@@ -4,6 +4,21 @@ All releases, most recent first.
 
 ---
 
+## v2.12.1
+
++ **Wiring check warning.** After 3 consecutive full sweeps where not a single PING decoded at any baud (including 9600), the slave logs a prominent `[E]` message identifying the two most common hardware causes: TX wired in parallel (TX→TX) instead of crossover (TX→RX), and using pins that don't exist on the board's header. The warning repeats every 3 sweeps so it's visible whenever serial is opened, not just at boot. Resets to 0 on any link drop or reconnect.
++ **FireBeetle ESP32 pin note.** GPIO 16 and 17 are not exposed on the FireBeetle ESP32 header. Both `UtilMaster.h` and `UtilSlave.h` now have a prominent wiring box at the top with the crossover diagram and explicit alternative pins (GPIO18/19 or GPIO21/22). The README master/slave examples also carry this note.
+
+---
+
+## v2.12.1
+
++ **Raw-bytes-per-window diagnostic in slave sweep log.** The "scored 0/2, advancing" log line now includes the count of raw bytes received in that window: `SWP slave baud[6]=115200 scored 0/2 (0 raw bytes rx), advancing`. A count of 0 means the master's TX signal is not reaching the slave's RX pin at all — wiring issue. A non-zero count means the wire is live but the baud rate is wrong for the current window.
++ **WIRING CHECK error message corrected and enhanced.** The previous message incorrectly stated GPIO16/17 were not on the FireBeetle header. They are (GPIO17=D10, GPIO16=D11). Corrected to: *"connect master D10(GPIO17,TX)->slave D11(GPIO16,RX) and slave D10(GPIO17,TX)->master D11(GPIO16,RX)."*
++ **EspHal UART init now logs success and checks all three init calls.** `uart_param_config` and `uart_set_pin` were previously silent on failure. Both now check the return value and log a specific error including the UART number and pin numbers. On success: `[I][EspHal] UART2 ready: tx=GPIO17 rx=GPIO16` — making it easy to confirm the correct pins are configured.
+
+---
+
 ## v2.12.0
 
 + **`UtilMaster.h` and `UtilSlave.h` — zero-boilerplate sketch helpers.** The full ping-pong echo test (send, compare, echo, stats log, reconnect) is now a single-object API. The README master sketch went from ~100 lines to 3. Constructor takes debug baud, UART number, RX pin, TX pin, and optional WiFi credentials; `setup()` and `loop()` do everything else. The underlying `AutoLink` and `AutoLinkWeb` members are constructed in-place — no heap allocation, no pointers. Web monitor is opt-in: omit the SSID argument (or pass `nullptr`) and the server never starts, but the UART link runs exactly as before.
