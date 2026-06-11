@@ -1,6 +1,13 @@
+// ALink.h — AutoLink protocol core: class declaration, AutoLinkConfig struct,
+// and protocol constants (state enum, command bytes, frame size limits).
+//
+// ALink is hardware-free; it talks to the physical layer only through the
+// injected ILink interface. This makes the full protocol stack runnable in
+// the host test suite without an ESP32.
 #pragma once
 #include "ILink.h"
 #include "UtilFrameRx.h"
+#include "UtilBaudSweep.h"
 #include <vector>
 #include <stdint.h>
 #include <stddef.h>
@@ -22,8 +29,22 @@ constexpr int MAX_CHUNK = 250;
 // Message-layer header: len(4, LE) + crc16(2, LE) of the payload.
 constexpr int MSG_HDR = 6;
 
+// ----------------------------------------------------------------------------
+// AutoLinkConfig — all tunable parameters for an AutoLink instance.
+//
+// Construct one, override only the fields you care about, and pass it to the
+// AutoLink constructor. The AutoLink facade auto-sizes streamBufferSize from
+// maxMsg, so in most sketches only maxMsg (and optionally allowedBauds and
+// ledPin) need to be touched.
+// ----------------------------------------------------------------------------
 struct AutoLinkConfig {
-    std::vector<uint32_t> allowedBauds = {9600, 19200, 38400, 57600, 115200};
+    // Auto-baud sweep order. The master tests the first entry first,
+    // then the next, and locks at the first baud that meets the
+    // reliability threshold (see fastBaudLock below). With the
+    // default order, 115200 is tried first -- the obvious
+    // "fastest baud wins" behavior. Reverse the list for a
+    // slowest-first fallback.
+    std::vector<uint32_t> allowedBauds = {115200, 57600, 38400, 19200, 9600};
     int errThreshold = 5;
     int delayMs = 50;
     bool reliableMode = true;          // framed bytes + message API on by default
@@ -38,6 +59,25 @@ struct AutoLinkConfig {
     // also sends a 1-byte keepalive (reliable mode only) when its TX has been
     // quiet for idleTimeoutMs/3, so a healthy-but-silent link never bounces.
     int idleTimeoutMs = 3000;
+    // Auto-baud reliability sweep. The master sends `pingSamplesPerBaud`
+    // PINGs at each candidate baud; the slave scores the success rate and
+    // picks the highest baud whose rate is >= minAcceptRate. A 1-PING sweep
+    // is fast but flaky: a single missed PING drops the slave to a slower
+    // baud. Multiple samples favor stability over sweep speed. Set
+    // pingSamplesPerBaud=1 to get the old "first one wins" behavior.
+    int pingSamplesPerBaud = 4;
+    // Minimum fraction of PINGs that must decode at a baud for it to be
+    // considered reliable. 0.5 = at least half; 0.8 = strict; 0 = any
+    // success counts. The slave falls back to lower bauds if the top one
+    // doesn't meet the threshold.
+    float minAcceptRate = 0.5f;
+    // Enable the "fast ack" path: the slave sends BEST_CMD (with its
+    // current best baud index) as soon as it has enough PINGs to trust
+    // the current baud, instead of waiting for the master to sweep every
+    // baud and send REQ. With this on, a healthy top-baud link locks in
+    // 4 ticks instead of N*M ticks. Set to false to use the legacy
+    // "sweep every baud, then REQ" path.
+    bool fastBaudLock = true;
 };
 
 // ----------------------------------------------------------------------------
@@ -55,9 +95,10 @@ class ALink : private UtilFrameRx::Listener {
     State state;
     int errs;
     int spdI;
-    std::vector<int> scores;
+    int pingSample;             // master: which sample of N at the current baud
+    UtilBaudSweep baudSweep;    // per-baud decode scoring on the slave side
 
-    uint8_t rxBuf[4];
+    uint8_t rxBuf[4];  // 4-byte command frame accumulator in SWP/LCK state (0xAA 0x55 cmd crc8)
     int rxIdx;
 
     UtilFrameRx frameRx;   // reliable-mode RX accumulator (calls back below)
@@ -90,7 +131,7 @@ class ALink : private UtilFrameRx::Listener {
     void sendFrame(uint8_t payload);
     void sendFrame_unlocked(uint8_t payload);  // caller holds the lock
     void changeState_unlocked(State newState);
-    int  bestSpd_unlocked() const;        // highest baud index that scored > 0
+    int  bestSpd_unlocked() const;        // highest baud index that scored reliably
     int  readStream(uint8_t* b, int n);   // pull up to n bytes from the app buffer
 
     // Reset all link state, retune to allowedBauds[0], master arms the sweep
@@ -142,6 +183,8 @@ public:
     int getErrCount() const;
     int getCurrentSpdIndex() const;
 
+    // HAL callbacks — called by EspHal from the UART event task and FreeRTOS
+    // timer. Not part of the user-facing API; do not call from application code.
     void onRx(const uint8_t* data, int len);
     void onBreak();
     void onTimer();
