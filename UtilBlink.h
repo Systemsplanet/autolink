@@ -10,11 +10,34 @@
 // the same pattern inline plus a trailing pause, for pacing a loop. A new
 // start() replaces any pattern still running. The HAL seam keeps the engine
 // fully host-testable; EspBlinkHal below is the ESP32 implementation.
+//
+// LED defaults to GPIO 2 (the onboard blue LED on most ESP32 dev boards).
+// Point it elsewhere with cfg.ledPin; tune timing with blinkWait(n, onMs, offMs).
+//
+// Two modes (selected by the delayMs argument to AutoLink::blinkWait):
+//   Async  (delayMs == 0, default): returns immediately; the pattern runs on
+//          an esp_timer in the background. A new call replaces any running
+//          pattern. Use this for per-packet heartbeats — zero loop overhead.
+//   Blocking (delayMs > 0): flashes n times then pauses delayMs ms, holding
+//          loop() for n*(onMs+offMs)+delayMs. The UART keeps buffering while
+//          you wait, but your code won't drain it until the call returns.
+//
+// Suggested sketch convention:
+//   blinkWait(3, 100, 100, 2000)  — repeated while searching / negotiating baud
+//   blinkWait(4)                  — one burst on first connect
+//   blinkWait(1)                  — one flash per packet sent or echoed
 // ----------------------------------------------------------------------------
 
 namespace autolink {
 
-// Hardware seam for UtilBlink: a pin, a one-shot tick timer, and a delay.
+// ----------------------------------------------------------------------------
+// IBlinkHal — hardware seam for UtilBlink.
+//
+// Abstracts the three things the blink engine needs from hardware: a GPIO
+// pin to toggle, a one-shot timer to schedule the next phase, and a blocking
+// delay for the synchronous path. EspBlinkHal is the ESP32 implementation;
+// mock implementations drive the host unit tests.
+// ----------------------------------------------------------------------------
 class IBlinkHal {
 public:
     virtual ~IBlinkHal() {}
@@ -89,7 +112,13 @@ public:
 
 namespace autolink {
 
-// ESP32 IBlinkHal: a GPIO pin plus an esp_timer for the async ticks.
+// ----------------------------------------------------------------------------
+// EspBlinkHal — ESP32 implementation of IBlinkHal.
+//
+// Drives a GPIO pin via digitalWrite and schedules blink ticks with an
+// esp_timer one-shot. Constructed by AutoLink; bind() wires it to the
+// UtilBlink instance so the timer callback can call tick().
+// ----------------------------------------------------------------------------
 class EspBlinkHal : public IBlinkHal {
     int pin;
     esp_timer_handle_t timer = nullptr;
