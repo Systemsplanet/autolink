@@ -1,24 +1,8 @@
-// UtilPong.h — ready-to-run AutoLink slave for the ping-pong echo test.
+// UtilPong.h — ready-to-run AutoLink pong node for the ping-pong echo test.
 //
 // Wraps AutoLink + AutoLinkWeb + the receive/echo loop from the README Quick
-// Start into a single setup()/loop() object. Pair with a UtilMaster on the
+// Start into a single setup()/loop() object. Pair with UtilPing on the
 // other board.
-//
-// ┌──────────── WIRING ─────────────────────────────────────────────────────┐
-// │ Cross-connect the two boards:  Master TX(GPIO17) ──► Slave RX(GPIO16)  │
-// │                                Master RX(GPIO16) ◄── Slave TX(GPIO17)  │
-// │                                shared GND                              │
-// │ (TX→TX or RX→RX are the most common wiring mistakes and produce        │
-// │  0 received bytes at every baud. A missing GND does the same.)         │
-// │                                                                         │
-// │ Default pins: rxPin=16, txPin=17 (ESP32 UART2 defaults).               │
-// │ On the FireBeetle ESP32 these are header pins D11 (GPIO16) and          │
-// │ D10 (GPIO17). Any free GPIOs work — pass different pins if needed.     │
-// └─────────────────────────────────────────────────────────────────────────┘
-//
-// The WiFi web monitor is optional: pass a non-null SSID to enable it.
-// If the SSID is omitted (or nullptr), the UART link runs unaffected and
-// the AutoLinkWeb object is constructed but never started.
 //
 // Usage:
 //   UtilPong pong(115200, UART_NUM_2, 16, 17);           // UART only
@@ -29,102 +13,65 @@
 #pragma once
 #ifdef ARDUINO
 
-#include "../AutoLink.h"
-#include "../AutoLinkWeb.h"
-#include <Arduino.h>
+#include "UtilMain.h"
 
 namespace autolink {
 
 // ----------------------------------------------------------------------------
-// UtilPong — plug-and-play AutoLink slave.
+// UtilPong — plug-and-play AutoLink pong node.
 //
-// Echoes every complete message back to the master, logs the byte count, and
+// Echoes every complete message back to Ping, logs the byte count, and
 // blinks the LED once per echo. Reconnects after any link disruption
 // automatically — no state machine needed in the sketch.
 // ----------------------------------------------------------------------------
-class UtilPong {
+class UtilPong : public UtilMain {
 public:
     UtilPong(uint32_t    debugBaud,
-              uart_port_t uartNum,
-              int         rxPin,
-              int         txPin,
-              const char* ssid     = nullptr,
-              const char* password = nullptr,
-              uint16_t    webPort  = 8765)
-        : debugBaud_(debugBaud)
-        , comm_(uartNum, rxPin, txPin, /*isMaster=*/false)
-        , mon_(comm_)
-        , ssid_(ssid)
-        , password_(password ? password : "")
-        , webPort_(webPort)
-        , log_(Log::getLog())
+             uart_port_t uartNum,
+             int         rxPin,
+             int         txPin,
+             const char* ssid     = nullptr,
+             const char* password = nullptr,
+             uint16_t    webPort  = 8765)
+        : UtilMain(debugBaud, uartNum, rxPin, txPin, /*isPing=*/false,
+                   ssid, password, webPort)
     {}
 
-    // Non-copyable — AutoLink and AutoLinkWeb own hardware resources.
+    // Non-copyable — hardware resources are owned by the base.
     UtilPong(const UtilPong&)            = delete;
     UtilPong& operator=(const UtilPong&) = delete;
 
     void setup() {
-        esp_log_level_set("*", ESP_LOG_VERBOSE);
-        log_.setLevel(Log::DEBUG);
-        Serial.begin(debugBaud_);
-        comm_.blinkWait(1, 100, 100, 2000);
-        comm_.begin();                                   // SWP: waits for master
-        if (ssid_) mon_.begin(ssid_, password_, webPort_);
-        comm_.blinkWait(2, 100, 100, 2000);
+        setupCommon();
     }
 
     void loop() {
         if (!comm_.ready()) {
-            log_.debug("Main", "comm not ready");
+            log_.debug("Pong", "not ready");
             comm_.blinkWait(3, 100, 100, 2000);
             wasReady_ = false;
             return;
         }
         if (!wasReady_) {
-            log_.debug("Main", "comm ready");
+            log_.debug("Pong", "ready");
             comm_.blinkWait(4, 100, 100, 2000);
             wasReady_ = true;
         }
 
         int n;
         while ((n = comm_.recv(buf_, sizeof buf_)) > 0) {
-            log_.debug("Main", "recv %d bytes", n);
+            log_.debug("Pong", "recv %d bytes", n);
             if (comm_.send(buf_, n)) {
-                log_.debug("Main", "echoed %d bytes", n);
+                log_.debug("Pong", "echoed %d bytes", n);
             } else {
-                log_.error("Main",
+                log_.error("Pong",
                     "echo send failed (link dropped)  %d bytes dropped", n);
             }
             comm_.blinkWait(1);   // one flash per echo — visual heartbeat
         }
 
-        // Serial throughput + error log every 5 s, matching the master.
-        if (millis() - tStat_ > 5000) {
-            uint64_t tx, rx, errs;
-            comm_.getStats(tx, rx, errs);
-            log_.info("Main",
-                "tx=%llu B  rx=%llu B  baud=%lu  disconnects=%llu  errors=%llu",
-                tx, rx, (unsigned long)comm_.getCurrentBaud(), errs,
-                (unsigned long long)comm_.getLifetimeErrors());
-            tStat_ = millis();
-        }
+        logStats("Pong");
     }
-
-private:
-    // ── config ────────────────────────────────────────────────────────────
-    uint32_t    debugBaud_;
-    AutoLink    comm_;
-    AutoLinkWeb mon_;
-    const char* ssid_;
-    const char* password_;
-    uint16_t    webPort_;
-    Log&        log_;
-
-    // ── per-loop state ────────────────────────────────────────────────────
-    uint8_t  buf_[1024];        // receive / echo buffer
-    bool     wasReady_ = false;
-    uint32_t tStat_    = 0;     // last time throughput was logged
 };
 
 } // namespace autolink
