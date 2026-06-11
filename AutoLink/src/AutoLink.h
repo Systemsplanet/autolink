@@ -50,7 +50,6 @@ private:
     UtilBlink   blinker;
     std::unique_ptr<EspHal> hal;
     std::unique_ptr<ALink> link;
-    bool isMaster_ = false;
 
 public:
     // The blink timer callback captures `this`; copies/moves would dangle.
@@ -72,15 +71,12 @@ public:
 
         hal = std::make_unique<EspHal>(u_num, rx_pin, tx_pin, cfg);
         link = std::make_unique<ALink>(*hal, isMasterNode, cfg);
-        isMaster_ = isMasterNode;
     }
 
     void begin() {
-        Log::getLog().info("AutoLink", "AutoLink v%s starting (%s)",
-            AUTOLINK_VERSION, isMaster_ ? "master" : "slave");
+        Log::getLog().info("AutoLink", "v" AUTOLINK_VERSION);
         hal->begin();
     }
-
     // Flash the status LED n times.
     //   delayMs == 0 (default): asynchronous. Returns immediately; the
     //     pattern runs on an esp_timer, so blinkWait(1) per packet costs
