@@ -137,14 +137,12 @@ void loop() {
     drainAndCompare();
 
     // Serial throughput log every 5 s. Also visible live in the AutoLinkWeb
-    // dashboard if WiFi is configured. resetStats() zeros tx/rx but never
-    // touches the lifetime disconnect counter.
+    // dashboard if WiFi is configured.
     if (millis() - tStat > 5000) {
         uint64_t tx, rx, errs;
         comm.getStats(tx, rx, errs);
         LOG.info("Main", "tx=%llu B  rx=%llu B  baud=%lu  disconnects=%llu",
                  tx, rx, (unsigned long)comm.getCurrentBaud(), errs);
-        comm.resetStats();
         tStat = millis();
     }
 }
