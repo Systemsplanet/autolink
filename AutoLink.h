@@ -1,3 +1,16 @@
+// AutoLink.h — public facade for the AutoLink ESP32 UART library.
+//
+// This is the only header most sketches need. It wires the protocol core
+// (ALink) to the ESP32 hardware (EspHal), auto-sizes stream buffers from
+// cfg.maxMsg, exposes the simple send()/recv()/ready() API, the Arduino
+// Stream byte interface, and drives the status LED through UtilBlink.
+//
+// Usage:
+//   #include "AutoLink.h"
+//   using namespace autolink;
+//   AutoLink comm(UART_NUM_2, 16, 17, /*isMaster=*/true);
+//   void setup() { comm.begin(); }
+//   void loop()  { comm.send(buf, n);  comm.recv(buf, sizeof buf); }
 #pragma once
 #include "EspHal.h"
 #include "ALink.h"
