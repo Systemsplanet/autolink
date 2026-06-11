@@ -9,6 +9,7 @@
 #include "Log.h"
 #include <Arduino.h>
 #include "driver/uart.h"
+#include "driver/gpio.h"
 #include "esp_err.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -136,8 +137,33 @@ public:
             cleanup_resources();
             return;
         }
-        uart_param_config(uart_num, &uart_config);
-        uart_set_pin(uart_num, tx_pin, rx_pin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+        if (uart_param_config(uart_num, &uart_config) != ESP_OK) {
+            Log::getLog().error(HAL_TAG,
+                "uart_param_config failed for UART%d (baud %lu)",
+                (int)uart_num, (unsigned long)uart_config.baud_rate);
+            uart_driver_delete(uart_num);
+            cleanup_resources();
+            return;
+        }
+        if (uart_set_pin(uart_num, tx_pin, rx_pin,
+                         UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE) != ESP_OK) {
+            Log::getLog().error(HAL_TAG,
+                "uart_set_pin failed for UART%d tx=%d rx=%d — "
+                "check these GPIO numbers exist on your board. "
+                "FireBeetle ESP32: GPIO17=D10(TX), GPIO16=D11(RX) on the header.",
+                (int)uart_num, tx_pin, rx_pin);
+            uart_driver_delete(uart_num);
+            cleanup_resources();
+            return;
+        }
+        Log::getLog().info(HAL_TAG, "UART%d ready: tx=GPIO%d rx=GPIO%d",
+            (int)uart_num, tx_pin, rx_pin);
+
+        // Pull the RX pin high so an unconnected line is a stable UART idle
+        // (mark = HIGH). Without this a floating pin generates a continuous
+        // stream of noise bytes — ~11 kB/s at 115200, ~375 kB/s at 3 MHz —
+        // which floods the event queue and can hang the system.
+        gpio_set_pull_mode((gpio_num_t)rx_pin, GPIO_PULLUP_ONLY);
         
         if (xTaskCreate(uart_event_task, "uart_ev_task", 4096, this, 12, &task_handle) != pdPASS) {
             Log::getLog().error(HAL_TAG, "Failed to create UART event task");
