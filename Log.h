@@ -56,8 +56,21 @@ public:
         va_end(ap);
     }
 
+    // ---- Optional output sink ----
+    // A single callback registered once (e.g. by AutoLinkWeb) to receive
+    // every formatted log line after the normal ESP_LOG / stdout output.
+    // Must be fast and non-blocking: it runs in whatever task calls emit().
+    // setSink() is safe to call from setup() before UART tasks start.
+    using LogSink = void(*)(char sev, const char* tag, const char* msg, void* ctx);
+    void setSink(LogSink fn, void* ctx = nullptr);
+    void clearSink();
+
 private:
     Level lvl = ERROR;
+
+    // Mutable so emit() (const) can call the sink without a const_cast.
+    mutable LogSink  sink_fn_  = nullptr;
+    mutable void*    sink_ctx_ = nullptr;
 
     Log() {}
     Log(const Log&)            = delete;
