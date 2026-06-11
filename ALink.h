@@ -40,13 +40,11 @@ constexpr int MSG_HDR = 6;
 struct AutoLinkConfig {
     // Auto-baud sweep order. The master tests the first entry first and locks
     // at the highest baud that meets the reliability threshold. The default
-    // list covers ESP32-to-ESP32 direct wire: 3 MHz is the fastest practical
-    // rate on the ESP32's 80 MHz APB clock (÷27 = 2.963 MHz, 1.2% low --
-    // within UART ±2.5% tolerance). With 11 bauds × 4 samples × 50 ms, a
-    // full sweep before falling back to LCK takes ~2.2 s.
-    std::vector<uint32_t> allowedBauds = {3000000, 2000000, 1000000, 921600,
-                                          460800, 230400, 115200, 57600,
-                                          38400, 19200, 9600};
+    // list is conservative — all five bauds work reliably with ordinary jumper
+    // wires on standard ESP32 boards. High-speed bauds (≥230400) require short
+    // wiring and good signal integrity; if needed, prepend them explicitly:
+    //   cfg.allowedBauds = {921600, 460800, 230400, 115200, 57600, 38400, 19200, 9600};
+    std::vector<uint32_t> allowedBauds = {115200, 57600, 38400, 19200, 9600};
     int errThreshold = 5;
     int delayMs = 50;
     bool reliableMode = true;          // framed bytes + message API on by default
@@ -99,9 +97,11 @@ class ALink : private UtilFrameRx::Listener {
     int spdI;
     int pingSample;             // master: which sample of N at the current baud
     UtilBaudSweep baudSweep;    // per-baud decode scoring on the slave side
+    int emptySweeps_;           // slave: consecutive full sweeps with 0 PINGs at any baud
 
     uint8_t rxBuf[4];  // 4-byte command frame accumulator in SWP/LCK state (0xAA 0x55 cmd crc8)
     int rxIdx;
+    int swpRxBytes_ = 0;   // raw bytes received while in SWP (reset each baud window)
 
     UtilFrameRx frameRx;   // reliable-mode RX accumulator (calls back below)
 
