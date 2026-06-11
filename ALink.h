@@ -38,13 +38,15 @@ constexpr int MSG_HDR = 6;
 // ledPin) need to be touched.
 // ----------------------------------------------------------------------------
 struct AutoLinkConfig {
-    // Auto-baud sweep order. The master tests the first entry first,
-    // then the next, and locks at the first baud that meets the
-    // reliability threshold (see fastBaudLock below). With the
-    // default order, 115200 is tried first -- the obvious
-    // "fastest baud wins" behavior. Reverse the list for a
-    // slowest-first fallback.
-    std::vector<uint32_t> allowedBauds = {115200, 57600, 38400, 19200, 9600};
+    // Auto-baud sweep order. The master tests the first entry first and locks
+    // at the highest baud that meets the reliability threshold. The default
+    // list covers ESP32-to-ESP32 direct wire: 3 MHz is the fastest practical
+    // rate on the ESP32's 80 MHz APB clock (÷27 = 2.963 MHz, 1.2% low --
+    // within UART ±2.5% tolerance). With 11 bauds × 4 samples × 50 ms, a
+    // full sweep before falling back to LCK takes ~2.2 s.
+    std::vector<uint32_t> allowedBauds = {3000000, 2000000, 1000000, 921600,
+                                          460800, 230400, 115200, 57600,
+                                          38400, 19200, 9600};
     int errThreshold = 5;
     int delayMs = 50;
     bool reliableMode = true;          // framed bytes + message API on by default
