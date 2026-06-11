@@ -21,7 +21,7 @@ The two sketches live in `examples/PingPong/` as `Ping.ino` (ping) and `Pong.ino
 ## Ping
 
 ```cpp
-#include "UtilPing.h"
+#include "util/UtilPing.h"
 using namespace autolink;
 
 // Wiring (crossover): Ping TX(GPIO17) ──► Pong RX(GPIO16)
@@ -44,7 +44,7 @@ void loop()  { ping.loop();  }
 ## Pong
 
 ```cpp
-#include "UtilPong.h"
+#include "util/UtilPong.h"
 using namespace autolink;
 
 // Wiring (crossover): Ping TX(GPIO17) ──► Pong RX(GPIO16)
