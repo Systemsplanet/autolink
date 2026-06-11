@@ -22,6 +22,9 @@ The classic use case: two boards bouncing **random-sized messages** back and for
 #include "UtilMaster.h"
 using namespace autolink;
 
+// Wiring (crossover): Master TX(pin 17) ──► Slave RX(pin 16)
+//                     Master RX(pin 16) ◄── Slave TX(pin 17)
+// FireBeetle ESP32: GPIO16/17 are not on the header — use 18/19 or 21/22.
 UtilMaster um(
     115200,       // Serial debug baud
     UART_NUM_2,   // UART port for the AutoLink wire
@@ -44,6 +47,9 @@ The slave echoes back every complete message. Pass **false** for the master flag
 #include "UtilSlave.h"
 using namespace autolink;
 
+// Wiring (crossover): Master TX(pin 17) ──► Slave RX(pin 16)
+//                     Master RX(pin 16) ◄── Slave TX(pin 17)
+// FireBeetle ESP32: GPIO16/17 are not on the header — use 18/19 or 21/22.
 UtilSlave us(
     115200,       // Serial debug baud
     UART_NUM_2,   // UART port for the AutoLink wire
