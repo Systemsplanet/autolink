@@ -1,3 +1,7 @@
+// ILink.h — hardware abstraction interface between the protocol core (ALink)
+// and the physical layer. EspHal implements it on the ESP32; MockHal
+// implements it in the host test suite, which is what makes the protocol
+// natively testable without hardware.
 #pragma once
 #include <stdint.h>
 
