@@ -29,32 +29,32 @@ static const char HTML_PAGE[] = R"HTML(<!DOCTYPE html>
 <title>AutoLink Monitor</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0d0f14;color:#e2e8f0;min-height:100vh}
-header{background:#13151f;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #1e2235;position:sticky;top:0;z-index:10;box-shadow:0 2px 12px rgba(0,0,0,.6)}
-h1{font-size:17px;font-weight:600;letter-spacing:.2px}
-.sub{font-size:12px;color:#475569;margin-top:3px}
-.pill{padding:5px 14px;border-radius:20px;font-size:12px;font-weight:700;letter-spacing:.5px;transition:background .3s,color .3s}
-.ok{background:#064e3b;color:#6ee7b7}
-.swp{background:#7f1d1d;color:#fca5a5}
-.lck{background:#78350f;color:#fcd34d}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f2f5;color:#111827;min-height:100vh}
+header{background:#ffffff;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;border-bottom:2px solid #d1d5db;position:sticky;top:0;z-index:10;box-shadow:0 2px 8px rgba(0,0,0,.08)}
+h1{font-size:18px;font-weight:700;letter-spacing:.2px}
+.sub{font-size:13px;color:#6b7280;margin-top:3px}
+.pill{padding:6px 16px;border-radius:20px;font-size:13px;font-weight:700;letter-spacing:.5px;transition:background .3s,color .3s}
+.ok{background:#d1fae5;color:#065f46}
+.swp{background:#fee2e2;color:#991b1b}
+.lck{background:#fef9c3;color:#92400e}
 main{padding:14px;max-width:540px;margin:0 auto}
-.alert{background:#1c0a0a;border:1px solid #7f1d1d;border-radius:10px;padding:10px 14px;color:#fca5a5;font-size:13px;text-align:center;margin-bottom:12px;display:none}
+.alert{background:#fee2e2;border:1px solid #f87171;border-radius:10px;padding:10px 14px;color:#991b1b;font-size:14px;text-align:center;margin-bottom:12px;display:none}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px}
-.card{background:#13151f;border:1px solid #1e2235;border-radius:12px;padding:14px}
-.lbl{font-size:10px;color:#475569;text-transform:uppercase;letter-spacing:.9px;margin-bottom:7px}
-.val{font-size:24px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.1}
-.g{color:#34d399}.b{color:#60a5fa}.r{color:#f87171}.a{color:#fbbf24}
-.hint{font-size:11px;color:#475569;margin-top:5px}
+.card{background:#ffffff;border:1px solid #d1d5db;border-radius:12px;padding:14px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.lbl{font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:.9px;margin-bottom:7px;font-weight:600}
+.val{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.1}
+.g{color:#059669}.b{color:#2563eb}.r{color:#dc2626}.a{color:#d97706}
+.hint{font-size:12px;color:#6b7280;margin-top:5px}
 .row{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
-.section-lbl{font-size:10px;color:#475569;text-transform:uppercase;letter-spacing:.9px}
+.section-lbl{font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:.9px;font-weight:600}
 .btns{display:flex;gap:7px}
-.btn{background:#1e2235;color:#94a3b8;border:1px solid #2d3454;padding:7px 15px;border-radius:8px;font-size:13px;font-weight:500;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.btn{background:#e5e7eb;color:#374151;border:1px solid #d1d5db;padding:8px 16px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;-webkit-tap-highlight-color:transparent}
 .btn:active{opacity:.7}
-.btn.on{background:#0f2a4a;color:#60a5fa;border-color:#1d4ed8}
-.btn.rst{background:#2a1010;color:#f87171;border-color:#7f1d1d}
-.log{background:#080a0e;border:1px solid #1e2235;border-radius:12px;padding:12px;height:240px;overflow-y:auto;font-family:ui-monospace,'Cascadia Code','Courier New',monospace;font-size:11.5px;line-height:1.65;-webkit-overflow-scrolling:touch}
-.E{color:#f87171}.I{color:#64748b}.D{color:#334155}
-.footer{text-align:center;padding:16px;font-size:11px;color:#2d3454}
+.btn.on{background:#dbeafe;color:#1d4ed8;border-color:#93c5fd}
+.btn.rst{background:#fee2e2;color:#dc2626;border-color:#fca5a5}
+.log{background:#ffffff;border:1px solid #d1d5db;border-radius:12px;padding:12px;height:240px;overflow-y:auto;font-family:ui-monospace,'Cascadia Code','Courier New',monospace;font-size:12px;line-height:1.65;-webkit-overflow-scrolling:touch}
+.E{color:#dc2626}.I{color:#374151}.D{color:#9ca3af}
+.footer{text-align:center;padding:16px;font-size:12px;color:#9ca3af}
 </style>
 </head>
 <body>
@@ -81,12 +81,13 @@ main{padding:14px;max-width:540px;margin:0 auto}
     <div class="card">
       <div class="lbl">Errors</div>
       <div class="val r" id="errcnt">&#x2014;</div>
-      <div class="hint" id="discon">lifetime &#x2014;</div>
+      <div class="hint" id="discon">0 disconnects</div>
     </div>
     <div class="card">
       <div class="lbl">WiFi RSSI</div>
       <div class="val a" id="rssi">&#x2014;</div>
       <div class="hint" id="heap">heap &#x2014;</div>
+      <div class="hint" id="baud">baud &#x2014;</div>
     </div>
   </div>
   <div class="row" style="margin-bottom:10px">
@@ -119,7 +120,7 @@ function setPill(st){var p=document.getElementById('pill');p.className='pill '+s
 function togglePause(){
   paused=!paused;
   var b=document.getElementById('pbtn');
-  b.textContent=paused?'&#9654; Resume':'&#9646;&#9646; Pause';
+  b.innerHTML=paused?'&#9654; Resume':'&#9646;&#9646; Pause';
   b.className=paused?'btn on':'btn';
   if(!paused)poll();
 }
@@ -157,9 +158,10 @@ async function poll(){
     set('rxbps',bps(d.rxBps));
     set('rxtot','total '+bytes(d.rxTotal));
     set('errcnt',d.errCount);
-    set('discon','lifetime '+d.errTotal);
+    set('discon', d.errTotal + (d.errTotal===1?' disconnect':' disconnects'));
     set('rssi',d.rssi+' dBm');
     set('heap','heap '+bytes(d.freeHeap));
+    set('baud', d.baudRate ? d.baudRate.toLocaleString()+' baud' : 'sweeping…');
     set('uptime','up '+hms(d.uptimeS));
     setPill(d.state);
     fails=0;hide('alert');
@@ -326,6 +328,7 @@ void AutoLinkWeb::statTimerCb(void* arg) {
     self->snap_.rssi     = (int32_t)WiFi.RSSI();
     self->snap_.freeHeap = esp_get_free_heap_size();
     self->snap_.uptimeS  = millis() / 1000;
+    self->snap_.baudRate = self->link_.getCurrentBaud();
     xSemaphoreGive(self->snapMtx_);
 
     self->prevTx_ = tx;
@@ -377,12 +380,13 @@ esp_err_t AutoLinkWeb::handleStats(httpd_req_t* req) {
     s = self->snap_;
     xSemaphoreGive(self->snapMtx_);
 
-    char buf[256];
+    char buf[300];
     int  len = snprintf(buf, sizeof(buf),
         "{\"state\":\"%s\",\"errCount\":%d,\"errTotal\":%llu,"
         "\"txBps\":%lu,\"rxBps\":%lu,"
         "\"txTotal\":%llu,\"rxTotal\":%llu,"
-        "\"rssi\":%d,\"freeHeap\":%lu,\"uptimeS\":%lu}",
+        "\"rssi\":%d,\"freeHeap\":%lu,\"uptimeS\":%lu,"
+        "\"baudRate\":%lu}",
         s.state,
         s.errCount,
         (unsigned long long)s.errTotal,
@@ -392,7 +396,8 @@ esp_err_t AutoLinkWeb::handleStats(httpd_req_t* req) {
         (unsigned long long)s.rxTotal,
         (int)s.rssi,
         (unsigned long)s.freeHeap,
-        (unsigned long)s.uptimeS);
+        (unsigned long)s.uptimeS,
+        (unsigned long)s.baudRate);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
