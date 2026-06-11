@@ -344,6 +344,13 @@ void ALink::resetErrors() {
 State ALink::getState() const { hw.lock(); State s = state; hw.unlock(); return s; }
 int ALink::getErrCount() const { hw.lock(); int e = errs; hw.unlock(); return e; }
 int ALink::getCurrentSpdIndex() const { hw.lock(); int idx = spdI; hw.unlock(); return idx; }
+uint32_t ALink::getCurrentBaud() const {
+    hw.lock();
+    uint32_t b = (spdI >= 0 && spdI < (int)cfg.allowedBauds.size())
+                 ? cfg.allowedBauds[spdI] : 0;
+    hw.unlock();
+    return b;
+}
 
 void ALink::onRx(const uint8_t* data, int len) {
     // One lock acquisition per UART event. The reliable-mode parser mutates
