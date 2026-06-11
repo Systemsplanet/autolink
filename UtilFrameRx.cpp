@@ -1,3 +1,5 @@
+// UtilFrameRx.cpp — reliable-mode frame receive accumulator implementation.
+// See UtilFrameRx.h for the public interface.
 #include "UtilFrameRx.h"
 #include "UtilCobs.h"
 #include "UtilCrc.h"
