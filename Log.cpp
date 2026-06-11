@@ -7,7 +7,7 @@
 // Log.cpp  —  autolink internal logger implementation
 //
 // On ESP_PLATFORM the formatted line is passed to the matching ESP_LOG*
-// macro so it still appears in the IDF monitor stream, 
+// macro so it still appears in the IDF monitor stream.
 // On host builds the line goes straight to stdout.
 // --------------------------------------------------------------------------
 
@@ -35,6 +35,21 @@ void Log::emit(const char* sev, const char* tag,
     fprintf(stdout, "%c [%s] %s\n", sev[0], tag, msg);
     fflush(stdout);
 #endif
+
+    // Optional sink (e.g. AutoLinkWeb log panel). Called after normal output
+    // so serial is never delayed. Fast pointer check — sink is set once at
+    // startup from begin() and cleared on teardown.
+    if (sink_fn_) sink_fn_(sev[0], tag, msg, sink_ctx_);
+}
+
+void Log::setSink(LogSink fn, void* ctx) {
+    sink_fn_  = fn;
+    sink_ctx_ = ctx;
+}
+
+void Log::clearSink() {
+    sink_fn_  = nullptr;
+    sink_ctx_ = nullptr;
 }
 
 } // namespace autolink
