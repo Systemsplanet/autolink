@@ -10,7 +10,7 @@
 // (last three args) to enable the live web dashboard, or omit them for a
 // UART-only link.
 
-#include <UtilPing.h>
+#include <util/UtilPing.h>
 using namespace autolink;
 
 UtilPing ping(
