@@ -1,3 +1,8 @@
+// EspHal.h — ESP32 implementation of the ILink hardware abstraction.
+//
+// Owns the UART driver, FreeRTOS event task, software timer, mutex, and
+// stream buffer. Constructed by AutoLink; never used directly in sketches.
+// For host testing use MockHal (defined in test.cpp) instead.
 #pragma once
 #include "ILink.h"
 #include "ALink.h"
