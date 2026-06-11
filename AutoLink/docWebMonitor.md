@@ -5,8 +5,8 @@
 The `UtilPing` / `UtilPong` helpers wire this up for you automatically when you pass WiFi credentials to their constructor; the snippet below is the manual equivalent for a custom sketch.
 
 ```cpp
-#include "AutoLink.h"
-#include "AutoLinkWeb.h"
+#include <AutoLink.h>
+#include <AutoLinkWeb.h>
 using namespace autolink;
 
 AutoLink    comm(UART_NUM_2, 16, 17, true);
