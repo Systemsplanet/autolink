@@ -36,7 +36,8 @@ const char* StateToStr(State s) {
 
 ALink::ALink(ILink& h, bool isMasterNode, const AutoLinkConfig& config)
     : hw(h), isMaster(isMasterNode), cfg(config),
-      state(State::OK), errs(0), spdI(0), pingSample(0), baudSweep((int)config.allowedBauds.size()),
+      state(State::OK), errs(0), spdI(0), pingSample(0), emptySweeps_(0),
+      baudSweep((int)config.allowedBauds.size()),
       rxIdx(0), frameRx(*this),
       rxMsgLen(-1), rxMsgCrc(0), lckRetries(0), lastRxMs(0), lastTxMs(0), txBytes(0), rxBytes(0), totalErrs(0)
 {
@@ -370,6 +371,8 @@ void ALink::onRx(const uint8_t* data, int len) {
     // against the app side is the simplest way to make the parser race-free.
     hw.lock();
     int i = 0;
+    // Track raw bytes received in SWP for wiring diagnostics (logged each baud window).
+    if (state == State::SWP) swpRxBytes_ += len;
     // Any RX activity in OK means the peer is alive; bump the idle watchdog.
     // Errors alone don't count -- the link is "alive enough to fail" and
     // only true silence should drop us.
@@ -546,6 +549,8 @@ void ALink::dropLink_unlocked() {
     baudSweep.resetAll();
     errs = 0;
     lckRetries = 0;
+    emptySweeps_ = 0;
+    swpRxBytes_ = 0;
     lastRxMs = hw.nowMs();
     hw.clearAppBuf();
     hw.setSpd(cfg.allowedBauds[spdI]);
@@ -566,6 +571,8 @@ void ALink::reset_unlocked() {
     baudSweep.resetAll();
     errs = 0;
     lckRetries = 0;
+    emptySweeps_ = 0;
+    swpRxBytes_ = 0;
     lastRxMs = hw.nowMs();
     hw.clearAppBuf();
     hw.setSpd(cfg.allowedBauds[spdI]);
@@ -694,18 +701,45 @@ void ALink::onTimer() {
                 int needed = baudSweep.minHitsForReliable();
                 if (scored < needed) {
                     Log::getLog().info(ALINK_TAG,
-                        "SWP slave baud[%d]=%lu scored %d/%d, advancing",
+                        "SWP slave baud[%d]=%lu scored %d/%d (%d raw bytes rx), advancing",
                         spdI,
                         (unsigned long)(spdI < (int)cfg.allowedBauds.size()
                                         ? cfg.allowedBauds[spdI] : 0),
-                        scored, needed);
+                        scored, needed, swpRxBytes_);
+                    swpRxBytes_ = 0;  // reset for the next baud window
                     spdI++;
                     if (spdI >= (int)cfg.allowedBauds.size()) {
+                        // Check whether any baud decoded even one PING before resetting
+                        // scores. If not, the physical layer is broken (wrong pins or
+                        // wrong wiring) — log a prominent warning.
+                        bool anyPinged = false;
+                        for (int i = 0; i < (int)cfg.allowedBauds.size(); i++) {
+                            if (baudSweep.scoreAt(i) > 0) { anyPinged = true; break; }
+                        }
                         Log::getLog().info(ALINK_TAG,
                             "SWP slave: full sweep done, restarting from baud[0]=%lu",
                             (unsigned long)cfg.allowedBauds[0]);
                         spdI = 0;
                         baudSweep.resetAll();  // fresh scores for the next sweep
+
+                        if (!anyPinged) {
+                            emptySweeps_++;
+                            if (emptySweeps_ == 1 || emptySweeps_ % 5 == 0) {
+                                Log::getLog().error(ALINK_TAG,
+                                    "WIRING CHECK (%d empty sweep(s)): "
+                                    "0 raw bytes received at any baud. "
+                                    "The master's TX is not reaching this RX pin. "
+                                    "Required: master TX -> slave RX  AND  slave TX -> master RX "
+                                    "(crossover — TX to RX, not TX to TX). "
+                                    "Also check GND is shared. "
+                                    "FireBeetle ESP32: GPIO16=D11, GPIO17=D10 on the header — "
+                                    "connect master D10(GPIO17,TX)->slave D11(GPIO16,RX) "
+                                    "and slave D10(GPIO17,TX)->master D11(GPIO16,RX).",
+                                    emptySweeps_);
+                            }
+                        } else {
+                            emptySweeps_ = 0;
+                        }
                     }
                     pingSample = 0;
                     Log::getLog().info(ALINK_TAG, "SWP slave testing baud[%d]=%lu",
