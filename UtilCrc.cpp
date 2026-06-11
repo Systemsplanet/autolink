@@ -1,3 +1,5 @@
+// UtilCrc.cpp — CRC lookup tables and algorithm implementations.
+// See UtilCrc.h for the public interface.
 #include "UtilCrc.h"
 
 namespace autolink {
