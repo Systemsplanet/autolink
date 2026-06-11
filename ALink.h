@@ -182,6 +182,7 @@ public:
     State getState() const;
     int getErrCount() const;
     int getCurrentSpdIndex() const;
+    uint32_t getCurrentBaud() const; // current UART baud rate (0 if allowedBauds is empty)
 
     // HAL callbacks — called by EspHal from the UART event task and FreeRTOS
     // timer. Not part of the user-facing API; do not call from application code.
