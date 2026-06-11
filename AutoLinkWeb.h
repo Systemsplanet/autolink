@@ -82,6 +82,7 @@ private:
         int32_t  rssi;           // WiFi RSSI dBm
         uint32_t freeHeap;       // ESP heap bytes free
         uint32_t uptimeS;        // millis()/1000
+        uint32_t baudRate;       // current UART baud (0 while sweeping before first lock)
     };
 
     // ---- members ----
