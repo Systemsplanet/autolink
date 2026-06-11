@@ -56,6 +56,16 @@ ALink::ALink(ILink& h, bool isMasterNode, const AutoLinkConfig& config)
 }
 
 void ALink::begin() {
+    // Log the full baud sweep config so connection issues are immediately visible.
+    if (!cfg.allowedBauds.empty()) {
+        Log::getLog().info(ALINK_TAG, "%s: %d bauds %lu..%lu, %d samples/baud, fastAck=%s",
+            isMaster ? "Master" : "Slave",
+            (int)cfg.allowedBauds.size(),
+            (unsigned long)cfg.allowedBauds.front(),
+            (unsigned long)cfg.allowedBauds.back(),
+            cfg.pingSamplesPerBaud,
+            cfg.fastBaudLock ? "on" : "off");
+    }
     if (isMaster) {
         // Run the local reset explicitly: a sender never receives its own
         // BREAK. First init -- this is NOT a disconnect event, so use
@@ -67,10 +77,6 @@ void ALink::begin() {
     } else {
         hw.lock();
         changeState_unlocked(State::SWP);
-        // Sweep in array order: start at index 0 and increment. With
-        // the default allowedBauds = {115200, 57600, 38400, 19200,
-        // 9600}, the master tests 115200 first. The slave is at the
-        // same index, both increment in lockstep.
         spdI = 0;
         pingSample = 0;
         rxIdx = 0;
@@ -80,7 +86,12 @@ void ALink::begin() {
         hw.unlock();
         hw.clearAppBuf();
         hw.setSpd(cfg.allowedBauds[spdI]);
-        // Slave does not run the sweep clock; the master drives it.
+        Log::getLog().info(ALINK_TAG, "SWP slave testing baud[0]=%lu",
+            (unsigned long)cfg.allowedBauds[0]);
+        // Slave sweep timer: fires every pingSamplesPerBaud*delayMs so the
+        // slave advances in lockstep with the master even when a baud is too
+        // fast for the physical wiring and produces zero decodable PINGs.
+        hw.startTimer(cfg.pingSamplesPerBaud * cfg.delayMs);
     }
 }
 
@@ -450,20 +461,24 @@ void ALink::onRx(const uint8_t* data, int len) {
                                 // Reliability sweep: stay at this baud for
                                 // `pingSamplesPerBaud` PINGs so the slave
                                 // can score the decode rate. Only advance
-                                // spdI and retune when we have a full
-                                // sample. Array-order lockstep.
+                                // spdI and retune when we have a full sample.
                                 int samples = baudSweep.samplesPerBaud();
                                 if (samples < 1) samples = 1;
+                                // Log the first decoded PING at each baud to
+                                // confirm the physical layer is working there.
+                                if (baudSweep.scoreAt(spdI) == 1) {
+                                    Log::getLog().info(ALINK_TAG,
+                                        "SWP slave: first PING at baud[%d]=%lu",
+                                        spdI, (unsigned long)cfg.allowedBauds[spdI]);
+                                }
                                 if (++pingSample >= samples) {
                                     pingSample = 0;
                                     spdI++;
-                                    // Retune in lockstep with the master so
-                                    // the next PING (at the next baud up)
-                                    // can be decoded. When we've seen all
-                                    // bauds, return to baud[0] to listen
-                                    // for REQ.
                                     int next = (spdI < (int)cfg.allowedBauds.size()) ? spdI : 0;
                                     hw.setSpd(cfg.allowedBauds[next]);
+                                    // Reset the baud-window timer so the master
+                                    // gets a fresh window at the new baud.
+                                    hw.startTimer(cfg.pingSamplesPerBaud * cfg.delayMs);
                                 }
                             }
                         }
@@ -535,7 +550,7 @@ void ALink::dropLink_unlocked() {
     hw.clearAppBuf();
     hw.setSpd(cfg.allowedBauds[spdI]);
     if (isMaster) hw.startTimer(cfg.delayMs);
-    else hw.stopTimer();
+    else          hw.startTimer(cfg.pingSamplesPerBaud * cfg.delayMs);
 }
 
 // Same as dropLink_unlocked but does NOT bump the lifetime error counter.
@@ -555,7 +570,7 @@ void ALink::reset_unlocked() {
     hw.clearAppBuf();
     hw.setSpd(cfg.allowedBauds[spdI]);
     if (isMaster) hw.startTimer(cfg.delayMs);
-    else hw.stopTimer();
+    else          hw.startTimer(cfg.pingSamplesPerBaud * cfg.delayMs);
 }
 
 // UtilFrameRx::Listener -- called (under the lock) per validated payload.
@@ -631,6 +646,12 @@ void ALink::onTimer() {
         // retune. Once we've covered the whole list without the slave
         // acking, fall through to LCK and use the legacy REQ_CMD path.
         if (isMaster && curSpd < (int)cfg.allowedBauds.size()) {
+            // Log once at the start of each baud window so connection issues
+            // are easy to spot in the serial monitor.
+            if (pingSample == 0) {
+                Log::getLog().info(ALINK_TAG, "SWP master baud[%d]=%lu",
+                    curSpd, (unsigned long)cfg.allowedBauds[curSpd]);
+            }
             sendFrame(PING_CMD);
             int samples = baudSweep.samplesPerBaud();
             if (samples < 1) samples = 1;
@@ -662,10 +683,40 @@ void ALink::onTimer() {
                 hw.unlock();
                 hw.startTimer(cfg.delayMs);
             }
-        } else {
-            // Slave in SWP doesn't drive the sweep clock; master does.
-            // (This branch is unreachable in practice since the slave
-            // only calls onTimer in OK, but kept defensively.)
+        } else if (!isMaster) {
+            // Slave sweep timer: one baud window (pingSamplesPerBaud * delayMs)
+            // has elapsed. If we didn't score enough PINGs to fast-ack, advance
+            // to the next baud so the slave stays in lockstep with the master
+            // even when the current baud is too fast for the physical wiring.
+            hw.lock();
+            if (state == State::SWP) {
+                int scored = baudSweep.scoreAt(spdI);
+                int needed = baudSweep.minHitsForReliable();
+                if (scored < needed) {
+                    Log::getLog().info(ALINK_TAG,
+                        "SWP slave baud[%d]=%lu scored %d/%d, advancing",
+                        spdI,
+                        (unsigned long)(spdI < (int)cfg.allowedBauds.size()
+                                        ? cfg.allowedBauds[spdI] : 0),
+                        scored, needed);
+                    spdI++;
+                    if (spdI >= (int)cfg.allowedBauds.size()) {
+                        Log::getLog().info(ALINK_TAG,
+                            "SWP slave: full sweep done, restarting from baud[0]=%lu",
+                            (unsigned long)cfg.allowedBauds[0]);
+                        spdI = 0;
+                        baudSweep.resetAll();  // fresh scores for the next sweep
+                    }
+                    pingSample = 0;
+                    Log::getLog().info(ALINK_TAG, "SWP slave testing baud[%d]=%lu",
+                        spdI, (unsigned long)cfg.allowedBauds[spdI]);
+                    hw.setSpd(cfg.allowedBauds[spdI]);
+                }
+                hw.unlock();
+                hw.startTimer(cfg.pingSamplesPerBaud * cfg.delayMs);
+            } else {
+                hw.unlock();  // transitioned to OK/LCK under the lock; stop
+            }
         }
     }
     else if (s == State::LCK && isMaster) {
