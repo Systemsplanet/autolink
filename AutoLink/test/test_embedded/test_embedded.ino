@@ -4,12 +4,12 @@
 // tests run on a real ESP32 and exercise the actual UART peripheral, FreeRTOS
 // tasks, and timers. Flash this to a single board with GPIO17 (TX) jumpered
 // directly to GPIO16 (RX) — an external self-loopback — and watch the serial
-// monitor. The board talks to itself: the master and slave logic both run, and
+// monitor. The board talks to itself: the ping and pong logic both run, and
 // a healthy run locks the link and echoes messages with zero errors.
 //
 // This is a starting point; add board-specific timing and stress cases here.
 
-#include "AutoLink.h"
+#include <AutoLink.h>
 using namespace autolink;
 
 // Single-board self-loopback: jumper GPIO17 -> GPIO16 on the same board.
