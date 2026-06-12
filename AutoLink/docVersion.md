@@ -4,6 +4,24 @@ All releases, most recent first.
 
 ---
 
+## v3.1.0
+
+First release with a stable bidirectional link. The core throughput demonstration is working.
+
++ **FIFO pipeline restored with desync safety.** The 8-message pipeline is retained for ~2× throughput. Four safety fixes eliminate the desync: (1) any length or CRC mismatch now calls `resetFifo_()` and stops processing further echoes that loop, rather than advancing the FIFO by one and comparing subsequent echoes against the wrong slot; (2) a link-layer CRC reject now calls `resetFifo_()` rather than blindly dropping one entry; (3) TX and RX use separate buffers (`sendBuf_` / `recvBuf_`) so `recv()` can never overwrite a payload whose CRC is still pending; (4) on link-up, the receive buffer is fully drained before any new sends so stale echoes from the previous session never corrupt the fresh FIFO.
++ **Pause button pauses log only.** Stats, gauges, uptime, RSSI, and heap continue updating while the log is paused. `lastSeq` still advances during pause so resuming shows only new lines.
++ **Baud display shows sweep state.** During `SWP` the baud field shows the baud currently being tested with a `⇄ sweeping` suffix; during `LCK` it shows `⇄ locking`; in `OK` it shows the locked baud cleanly.
+
+---
+
+## v3.0.17
+
++ **Stream buffer overflow fixed.** `AutoLink` auto-sized the reassembly buffer to `2 × (maxMsg + MSG_HDR) = ~2 KB`. With `UtilPing`'s 8-message pipeline, all 8 echoes can arrive before `drainAndCompare_()` drains them — ~8 KB of payload. Changed auto-size multiplier from 2× to 10× (`~10 KB`). The overflow was causing `onPayload: app buffer overflow` errors, which tripped the error threshold and dropped the link immediately after the settle period.
++ **Not-ready `blinkWait` delay removed.** Both `UtilPing` and `UtilPong` called `blinkWait(3, 100, 100, 2000)` in their not-ready loop — blocking `loop()` for 2600 ms on every iteration. During this block, the FreeRTOS sweep timer was firing every 50 ms and its command queue (depth 10) overflowed after 500 ms, causing `xTimerStart` to silently fail. The sweep would send 4 PINGs for baud[0], advance to baud[1], then the queue backed up and the timer stopped — Ping got stuck in SWP for 30+ seconds. Fixed by switching to async blink (`delay=0`).
++ **`SWP Ping: full sweep done -> LCK` debug line** added so the sweep-to-LCK transition is visible in the log.
+
+---
+
 ## v3.0.16
 
 Debug logging pass over `ALink.cpp` — all previously silent decision points now emit `[D]` lines:
