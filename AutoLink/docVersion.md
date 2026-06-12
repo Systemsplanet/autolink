@@ -4,6 +4,44 @@ All releases, most recent first.
 
 ---
 
+## v3.0.16
+
+Debug logging pass over `ALink.cpp` — all previously silent decision points now emit `[D]` lines:
+
++ **Command frame CRC fail** — when a 4-byte `AA 55 cmd crc` frame arrives with a bad CRC (noise or baud mismatch), logs the raw bytes and the expected CRC.
++ **PING decoded by Pong** — every successfully decoded PING now logs `baud[N]=X score=M/K` so the running score is visible.
++ **Pong fast-ack decision** — logs score, threshold, and chosen baud index before sending the ack frame.
++ **Ping fast-ack received** — logs the payload baud index and current `spdI` so it's clear which baud Pong selected.
++ **SWP Ping per-sample** — every PING sent now logs sample number (e.g. `sample=2/4`), not just the first of each window.
++ **LCK REQ received by Pong** — logs the chosen best baud before sending the reply.
++ **`recvMsg` errors** — garbage length, oversized message, and CRC16 mismatch all now log specific values.
++ **`recvMsg` success** — logs byte count on every successful delivery.
++ **`onPayload` app-buffer overflow** — logs bytes lost.
++ **`onFrameError`** — logs the per-frame CRC8/COBS rejection with running error count.
++ **Keepalive TX** — logs idle-RX age and limit each time a keepalive `0x00` is sent.
+
+---
+
+## v3.0.15
+
++ **Link-up settle delay in `UtilPing` (the connection root cause).** After Ping locks via fast-ack and transitions to OK, it was immediately filling the 8-message pipeline with random app data. At 115200 baud this floods the line with ~2300 bytes in the 200 ms window Pong needs to complete its own lock. Pong's sweep parser sees raw COBS frames instead of `0xAA 0x55 PING_CMD CRC8` command frames and scores 0/2 PINGs — so it never fast-acks. A 300 ms settle guard (`SETTLE_MS`) was added: after link-up, `UtilPing` withholds app sends for 300 ms, giving Pong a clean window to score PINGs and complete its lock. The settle period is logged at DEBUG as `settling N ms remaining`.
+
+---
+
+## v3.0.14
+
++ **Version logged after NTP sync.** `AutoLink: v3.0.14` is now emitted from `UtilMain::setupCommon()` after `mon_.begin()` returns (which includes WiFi connect + NTP sync). This means the version line appears in the web log panel, immediately after the `NTP synced:` line. On no-WiFi builds it appears at the same point in the serial log. The version log was removed from `AutoLink::begin()` to avoid a duplicate.
++ **`rx=0 B/sec` investigated — `rxBytes` is correct.** `rxBytes` is incremented in `onPayload()` (called by `UtilFrameRx` under the lock) for every successfully decoded reliable-mode frame. The persistent `rx=0` in logs reflects a genuine hardware issue: Pong's echoes are not reaching Ping's RX pin. The stat itself is not broken.
+
+---
+
+## v3.0.13
+
++ **`idleTimeoutMs` default increased from 3 s to 10 s.** The 3-second idle watchdog was firing before Pong had time to boot, connect to WiFi (NTP sync adds several seconds), and respond. Ping would fill its 8-message pipeline, get no echoes back within 3 s, drop the link, re-sweep — and miss Pong's response entirely. 10 s comfortably covers the worst-case startup time.
++ **SWP timer stall after error-threshold drop identified.** After `Error threshold exceeded` drops the link to SWP, Ping sends one PING at baud[0] then stops sweeping for 2+ minutes. Root cause appears to be a FreeRTOS timer command queue issue when `xTimerStart` is called from a high-priority context immediately after `uart_write_bytes_with_break`. Under investigation for 3.0.14.
+
+---
+
 ## v3.0.12
 
 + **Debug logging throughout `UtilPing`, `UtilPong`, `UtilMain`.** Key events now logged at `DEBUG` level:
