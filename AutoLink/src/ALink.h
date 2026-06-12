@@ -58,7 +58,7 @@ struct AutoLinkConfig {
     // ms the link is dropped and re-swept. 0 disables. While in OK each side
     // also sends a 1-byte keepalive (reliable mode only) when its TX has been
     // quiet for idleTimeoutMs/3, so a healthy-but-silent link never bounces.
-    int idleTimeoutMs = 3000;
+    int idleTimeoutMs = 10000;  // 10 s — long enough for Pong to boot, connect WiFi, and respond
     // Auto-baud reliability sweep. The Ping sends `pingSamplesPerBaud`
     // PINGs at each candidate baud; the Pong scores the success rate and
     // picks the highest baud whose rate is >= minAcceptRate. A 1-PING sweep
