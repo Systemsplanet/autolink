@@ -4,6 +4,49 @@ All releases, most recent first.
 
 ---
 
+## v3.0.11
+
++ **`master`/`slave` removed from all runtime log output, current docs, and tests.** The sweep/lock log lines now read `SWP Ping baud[...]`, `SWP Pong testing baud[...]`, `SWP Pong: full sweep done`, etc., and the role label logged at startup is `Ping`/`Pong`. The WIRING CHECK message now says "The Ping node's TX is not reaching this RX pin. Required: Ping TX -> Pong RX AND Pong TX -> Ping RX". Comments throughout `ALink.cpp`, `ALink.h`, `UtilBaudSweep.{h,cpp}`, the `docAPI.md` state-machine description, and the desktop test suite were updated to Ping/Pong as well. The C++ identifier `isMaster`/`isMasterNode` (the role bool in the `AutoLink`/`ALink` constructors) is unchanged to preserve API compatibility — it is never shown to users. Historical `docVersion.md` entries are left as-is as an accurate record. Desktop test suite re-run green after the rename.
+
+---
+
+## v3.0.10
+
+Diagnostic release to confirm two separate root causes for the ping/pong connection failures seen since v3.0.0.
+
++ **Core/priority diagnostic in `uart_event_task`.** The task now logs `uart_event_task running on core N, priority P` on startup. This confirms the v3.0.9 fix: before pinning, the task ran with no affinity at priority 12 and could land on core 0, starving its idle task and tripping the Task Watchdog at ~20 s (the consistent `rst:0x1` hard reset). After the fix this should print `core 1, priority 5`.
++ **FIFO desync diagnostic in `UtilPing`.** The `recv rejected` and `MISMATCH` log lines now include `pendCount`, `head`, and `tail`. This exposes the second, independent bug: the pipelined echo-compare FIFO (added in v3.0.0) drops exactly one pending entry per CRC reject, but a reject does not map cleanly to one echo. The FIFO drifts out of alignment with the real echo stream, so every subsequent good echo compares against the wrong entry and counts as a fresh error — a cascade of 6 errors that trips the link-drop threshold. A burst of rejects/mismatches with a shrinking `pendCount` is the desync signature.
+
+### Why ping/pong has not connected since v3.0.0
+
+Two regressions landed together in v3.0.0 and compound:
+
+1. **Pipelined echo verification (`UtilPing`).** Before v3.0.0, Ping sent one message and waited for its echo — a strict round-trip with no possibility of desync. v3.0.0 introduced an 8-deep in-flight window verified in FIFO order. A single link glitch desyncs the FIFO and cascades into a forced link drop; stale echoes queued on Pong then re-desync the fresh FIFO after every reconnect, so it never stabilises.
+2. **Unpinned high-priority UART task (`EspHal`).** The priority-12, no-affinity UART task periodically starved core 0's idle task and hard-reset the board (~20 s), injecting UART garbage on reboot that manifested as the CRC rejects feeding bug #1.
+
+v3.0.9 addressed #2 (pinning + priority). The FIFO desync (#1) is diagnosed here and should be fixed by reverting `UtilPing` to a strict round-trip or making the FIFO resync-safe — see next release.
+
+---
+
+## v3.0.9
+
++ **UART task: pinned to core 1, priority 12 → 5.** `uart_event_task` was created with `xTaskCreate` (no core affinity) at priority 12. On a dual-core ESP32, a priority-12 task with no affinity can land on core 0 and starve its idle task, tripping the Task Watchdog at ~20 seconds — exactly the hard reset seen in testing. Fixed by switching to `xTaskCreatePinnedToCore(..., 1)` so the task always runs on the same core as Arduino's `loop()`, leaving core 0's idle task free. Priority reduced to 5: well above `loop()` (1) and WiFi/BT tasks (3-4), but no longer able to starve system housekeeping.
+
+---
+
+## v3.0.8
+
++ **NTP log appears in web log panel.** `setSink()` was being called after the NTP sync block, so the `NTP synced:` and `NTP not available` lines went to serial only. Fixed by registering the sink immediately after the log ring is allocated, before NTP runs. The "Web monitor at …" line is now also captured.
+
+---
+
+## v3.0.7
+
++ **NTP wall-clock timestamps in web log.** `AutoLinkWeb::begin()` now calls `configTime()` immediately after WiFi connects and waits up to 5 s for an SNTP response. On success, `logSinkCb` uses `getLocalTime()` so the web log shows real EST/EDT wall-clock times that match ArduinoDroid. The timezone is `EST5EDT,M3.2.0,M11.1.0` (Eastern, auto-DST). A successful sync logs: `NTP synced: YYYY-MM-DD HH:MM:SS EST/EDT`.
++ **Uptime fallback with `*` marker.** If NTP doesn't respond within 5 s (no internet, isolated LAN, etc.) the web log falls back to `HH:MM:SS*` uptime timestamps. The `*` suffix makes it unambiguous that the time is uptime, not wall-clock. This is the same behaviour as before for no-WiFi builds, since `AutoLinkWeb` is only constructed when WiFi credentials are provided.
+
+---
+
 ## v3.0.6
 
 + **Live log timestamps.** Each log entry is now stored as `HH:MM:SS I Tag message` (uptime-based, from `millis()`). Previously the format was `[I][Tag] message` with no time component.
