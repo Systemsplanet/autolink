@@ -143,16 +143,22 @@ function togglePause(){
 
 function clearLog(){document.getElementById('log').innerHTML='';}
 
-async function copyLog(){
+function copyLog(){
   var lines=Array.from(document.getElementById('log').children).map(function(e){return e.textContent;});
   var b=document.getElementById('cbtn');
-  try{
-    await navigator.clipboard.writeText(lines.join('\n'));
-    b.textContent='✓ Copied';
-  }catch(e){
-    b.textContent='✗ Failed';
-  }
+  var text=lines.join('\n');
+  if(navigator.clipboard&&window.isSecureContext){
+    navigator.clipboard.writeText(text).then(function(){b.textContent='\u2713 Copied';},function(){fallbackCopy(text,b);});
+  }else{fallbackCopy(text,b);}
   setTimeout(function(){b.textContent='Copy';},1500);
+}
+function fallbackCopy(text,b){
+  var ta=document.createElement('textarea');
+  ta.value=text;ta.style.position='fixed';ta.style.opacity='0';
+  document.body.appendChild(ta);ta.focus();ta.select();
+  try{document.execCommand('copy');b.textContent='\u2713 Copied';}
+  catch(e){b.textContent='\u2717 Failed';}
+  document.body.removeChild(ta);
 }
 
 async function resetAll(){
@@ -189,7 +195,7 @@ function appendLog(sev,seq,text){
   var atEnd=p.scrollHeight-p.scrollTop<=p.clientHeight+12;
   var d=document.createElement('div');
   d.className=sev;d.textContent=text;p.appendChild(d);
-  while(p.children.length>200)p.removeChild(p.firstChild);
+  while(p.children.length>100)p.removeChild(p.firstChild);
   if(atEnd)p.scrollTop=p.scrollHeight;
   if(seq+1>lastSeq)lastSeq=seq+1;
 }
@@ -400,7 +406,11 @@ void AutoLinkWeb::logSinkCb(char sev, const char* tag, const char* msg, void* ct
     const uint32_t idx  = self->logHead_ % RING_CAP;
     self->logRing_[idx].seq = self->logHead_;
     self->logRing_[idx].sev = sev;
-    snprintf(self->logRing_[idx].line, LINE_CAP, "[%c][%s] %s", sev, tag, msg);
+    uint32_t ms = millis();
+    uint32_t s  = ms / 1000;
+    snprintf(self->logRing_[idx].line, LINE_CAP, "%02lu:%02lu:%02lu %c %s %s",
+             (unsigned long)(s / 3600), (unsigned long)(s % 3600 / 60), (unsigned long)(s % 60),
+             sev, tag, msg);
     self->logHead_++;
 
     xSemaphoreGive(self->logMtx_);
