@@ -32,7 +32,7 @@ public:
     // Optional peer pointer used by the asymmetric-recovery tests. On real
     // hardware, sendBreak() puts a break on the TX wire and the *other* ESP32
     // receives it on its RX pin asynchronously. The default MockHal deliver
-    // path (link->onBreak() on self) was right for the master-initiated
+    // path (link->onBreak() on self) was right for the ping-initiated
     // self-test, wrong for cross-node tests. When peer is set, sendBreak
     // delivers onBreak to the peer's link instead of self, mirroring the
     // wire-level semantics.
@@ -156,27 +156,27 @@ void run_test_basic_io() {
     std::cout << "\n=== Test: Basic Write/Read/Peek/Flush/Available ===" << std::endl;
     MockHal mHal, sHal;
     AutoLinkConfig cfg; cfg.reliableMode = false; // this test exercises the raw byte path
-    ALink master(mHal, true, cfg);
-    ALink slave(sHal, false, cfg);
+    ALink ping(mHal, true, cfg);
+    ALink pong(sHal, false, cfg);
     // Both nodes start in State::OK by constructor default. begin() is deliberately
     // not called here so this test exercises only the data path in isolation,
     // without negotiation. This mirrors a known-good-baud scenario (e.g. fixed config).
     uint8_t data[] = {0x11, 0x22};
-    master.write(data, 2);
-    master.flush();
+    ping.write(data, 2);
+    ping.flush();
     
-    slave.onRx(mHal.txBuf.data(), mHal.txBuf.size());
+    pong.onRx(mHal.txBuf.data(), mHal.txBuf.size());
     
-    assert(slave.available() == 2);
-    assert(slave.peek() == 0x11);
-    assert(slave.available() == 2);
+    assert(pong.available() == 2);
+    assert(pong.peek() == 0x11);
+    assert(pong.available() == 2);
     
     uint8_t rb_arr[10];
-    assert(slave.read(rb_arr, 10) == 2);
+    assert(pong.read(rb_arr, 10) == 2);
     assert(rb_arr[0] == 0x11);
     assert(rb_arr[1] == 0x22);
     
-    assert(slave.available() == 0);
+    assert(pong.available() == 0);
     std::cout << "PASS" << std::endl;
 }
 
@@ -184,16 +184,16 @@ void run_test_reliable_mode() {
     std::cout << "\n=== Test: Reliable Mode (COBS) ===" << std::endl;
     MockHal mHal, sHal;
     AutoLinkConfig cfg; cfg.reliableMode = true;
-    ALink master(mHal, true, cfg);
-    ALink slave(sHal, false, cfg);
+    ALink ping(mHal, true, cfg);
+    ALink pong(sHal, false, cfg);
     
     uint8_t data[] = {0xAA, 0xBB};
-    master.write(data, 2);
+    ping.write(data, 2);
     assert(!mHal.txBuf.empty());
     
-    slave.onRx(mHal.txBuf.data(), mHal.txBuf.size());
+    pong.onRx(mHal.txBuf.data(), mHal.txBuf.size());
     uint8_t rb_arr[10];
-    assert(slave.read(rb_arr, 10) == 2);
+    assert(pong.read(rb_arr, 10) == 2);
     assert(rb_arr[0] == 0xAA);
     assert(rb_arr[1] == 0xBB);
     
@@ -202,8 +202,8 @@ void run_test_reliable_mode() {
     // COBS encode of {0x01, 0x02, bad_crc}: all non-zero -> {0x04, 0x01, 0x02, bad_crc}
     // Frame on wire: 0x00 0x04 0x01 0x02 0xFF 0x00  (0xFF is the deliberately wrong CRC)
     uint8_t bad_crc_frame[] = {0x00, 0x04, 0x01, 0x02, 0xFF, 0x00};
-    slave.onRx(bad_crc_frame, sizeof(bad_crc_frame));
-    assert(slave.getErrCount() > 0);
+    pong.onRx(bad_crc_frame, sizeof(bad_crc_frame));
+    assert(pong.getErrCount() > 0);
     
     std::cout << "PASS" << std::endl;
 }
@@ -212,23 +212,23 @@ void run_test_error_threshold() {
     std::cout << "\n=== Test: Custom Error Thresholding ===" << std::endl;
     MockHal mHal;
     AutoLinkConfig cfg; cfg.allowedBauds = {9600, 115200}; cfg.errThreshold = 2; cfg.pingSamplesPerBaud = 1;
-    ALink master(mHal, true, cfg);
+    ALink ping(mHal, true, cfg);
     
-    assert(master.getState() == State::OK);
-    master.err();
-    assert(master.getState() == State::OK);
-    assert(master.getErrCount() == 1);
+    assert(ping.getState() == State::OK);
+    ping.err();
+    assert(ping.getState() == State::OK);
+    assert(ping.getErrCount() == 1);
     
-    master.clearErr();
-    assert(master.getErrCount() == 0);
+    ping.clearErr();
+    assert(ping.getErrCount() == 0);
     
-    master.err();
-    master.err();
-    assert(master.getState() == State::OK);
-    assert(master.getErrCount() == 2);
+    ping.err();
+    ping.err();
+    assert(ping.getState() == State::OK);
+    assert(ping.getErrCount() == 2);
     
-    master.err(); 
-    assert(master.getState() == State::SWP);
+    ping.err(); 
+    assert(ping.getState() == State::SWP);
     std::cout << "PASS" << std::endl;
 }
 
@@ -239,47 +239,47 @@ void run_test_negotiation_state_machine() {
     cfg.allowedBauds = {9600, 115200}; cfg.pingSamplesPerBaud = 1;
     // This test exercises the SWP -> LCK -> OK state transitions, not
     // the reliability sweep. One PING per baud keeps the state machine
-    // test focused and fast. Disable fast-ack so the slave uses the
+    // test focused and fast. Disable fast-ack so the pong uses the
     // legacy REQ_CMD path.
     cfg.pingSamplesPerBaud = 1;
     cfg.fastBaudLock = false;
-    ALink master(mHal, true, cfg);
-    ALink slave(sHal, false, cfg);
+    ALink ping(mHal, true, cfg);
+    ALink pong(sHal, false, cfg);
 
-    // master.begin() -> MockHal::sendBreak() -> onBreak() [exactly once].
-    // slave.begin()  -> arms SWP passively, no timer.
-    master.begin();
-    slave.begin();
+    // ping.begin() -> MockHal::sendBreak() -> onBreak() [exactly once].
+    // pong.begin()  -> arms SWP passively, no timer.
+    ping.begin();
+    pong.begin();
 
-    assert(master.getState() == State::SWP);
-    assert(slave.getState() == State::SWP);
+    assert(ping.getState() == State::SWP);
+    assert(pong.getState() == State::SWP);
     // Array-order sweep: start at index 0 (the top baud in the list --
     // 115200 is at index 0 with the default config).
-    assert(master.getCurrentSpdIndex() == 0);
-    assert(slave.getCurrentSpdIndex() == 0);
+    assert(ping.getCurrentSpdIndex() == 0);
+    assert(pong.getCurrentSpdIndex() == 0);
 
-    // Tick 1: master sends PING@9600 (index 0, the top baud in the
-    // test config {9600, 115200}), slave scores index 0.
-    master.onTimer();
+    // Tick 1: ping sends PING@9600 (index 0, the top baud in the
+    // test config {9600, 115200}), pong scores index 0.
+    ping.onTimer();
     pipe_data(mHal, sHal);
-    assert(master.getCurrentSpdIndex() == 1);   // master advanced
-    assert(slave.getCurrentSpdIndex() == 1);   // slave advanced after scoring
+    assert(ping.getCurrentSpdIndex() == 1);   // ping advanced
+    assert(pong.getCurrentSpdIndex() == 1);   // pong advanced after scoring
 
-    // Tick 2: master sends PING@115200 (index 1), slave scores index 1,
-    // master -> LCK (past end, spdI resets to 0 for the allowedBauds[0] tune).
-    master.onTimer();
+    // Tick 2: ping sends PING@115200 (index 1), pong scores index 1,
+    // ping -> LCK (past end, spdI resets to 0 for the allowedBauds[0] tune).
+    ping.onTimer();
     pipe_data(mHal, sHal);
-    assert(master.getCurrentSpdIndex() == 0);  // reset to 0 on LCK entry
-    assert(master.getState() == State::LCK);
+    assert(ping.getCurrentSpdIndex() == 0);  // reset to 0 on LCK entry
+    assert(ping.getState() == State::LCK);
 
-    // Tick 3: master sends REQ_CMD; slave handles from SWP -> OK, replies best index
-    master.onTimer();
+    // Tick 3: ping sends REQ_CMD; pong handles from SWP -> OK, replies best index
+    ping.onTimer();
     pipe_data(mHal, sHal);
-    assert(slave.getState() == State::OK);
+    assert(pong.getState() == State::OK);
 
-    // Master receives slave's baud-index reply -> OK
+    // Ping receives pong's baud-index reply -> OK
     pipe_data(sHal, mHal);
-    assert(master.getState() == State::OK);
+    assert(ping.getState() == State::OK);
 
     std::cout << "PASS" << std::endl;
 }
@@ -290,8 +290,8 @@ void run_test_throughput_and_sizes() {
     AutoLinkConfig cfg; 
     cfg.reliableMode = true; 
     cfg.streamBufferSize = 32000; 
-    ALink master(mHal, true, cfg);
-    ALink slave(sHal, false, cfg);
+    ALink ping(mHal, true, cfg);
+    ALink pong(sHal, false, cfg);
     
     std::vector<int> sizes = {0, 1, 2, 4, 8, 16, 32, 64, 128, 512, 1024, 2048, 4096, 8000, 16000};
     
@@ -311,7 +311,7 @@ void run_test_throughput_and_sizes() {
         auto start = std::chrono::high_resolution_clock::now();
         
         if (sz > 0) {
-            master.write(txData.data(), sz);
+            ping.write(txData.data(), sz);
         }
         
         pipe_data(mHal, sHal);
@@ -320,7 +320,7 @@ void run_test_throughput_and_sizes() {
         if (sz > 0) {
             // Read until all bytes are consumed
             int chunk;
-            while ((chunk = slave.read(rxData.data() + bytesRead, sz - bytesRead)) > 0) {
+            while ((chunk = pong.read(rxData.data() + bytesRead, sz - bytesRead)) > 0) {
                 bytesRead += chunk;
             }
         }
@@ -361,26 +361,26 @@ void run_test_readme_usage() {
     ALink txNode(txHal, true, cfg);
     ALink link(rxHal, false, cfg);
 
-    txNode.begin(); // master: MockHal::sendBreak() -> onBreak() [once], timer armed
-    link.begin();   // slave:  SWP, no timer
+    txNode.begin(); // ping: MockHal::sendBreak() -> onBreak() [once], timer armed
+    link.begin();   // pong:  SWP, no timer
 
     // Fast-forward negotiation to OK.
     // With 2 bauds: 2 SWP timer ticks send PINGs (spdI 0->1->2 -> LCK), then
-    // 1 LCK tick sends REQ_CMD. Slave handles REQ from SWP directly -> OK.
+    // 1 LCK tick sends REQ_CMD. Pong handles REQ from SWP directly -> OK.
     txNode.onTimer(); pipe_data(txHal, rxHal); // SWP: PING@9600, spdI->1
     txNode.onTimer(); pipe_data(txHal, rxHal); // SWP: PING@115200, spdI->2 -> LCK
-    txNode.onTimer(); pipe_data(txHal, rxHal); // LCK: REQ_CMD; slave -> OK, replies index
-    pipe_data(rxHal, txHal);                   // master receives baud index -> OK
+    txNode.onTimer(); pipe_data(txHal, rxHal); // LCK: REQ_CMD; pong -> OK, replies index
+    pipe_data(rxHal, txHal);                   // ping receives baud index -> OK
 
     assert(txNode.getState() == State::OK);
     assert(link.getState()   == State::OK);
 
     // --- Execution Phase ---
-    // Simulate master sending 3 bytes
+    // Simulate ping sending 3 bytes
     uint8_t payload[] = {0xAB, 0xCD, 0xEF};
     txNode.write(payload, 3);
 
-    // Simulate UART RX interrupt delivering bytes to slave
+    // Simulate UART RX interrupt delivering bytes to pong
     pipe_data(txHal, rxHal);
 
     // --- Loop Phase ---
@@ -719,7 +719,7 @@ void run_test_error_counter() {
         assert(berr == 0);
 
         // After the ack, a second drop still counts cleanly.
-        b.begin();   // returns the master to SWP from OK-or-wherever
+        b.begin();   // returns the ping to SWP from OK-or-wherever
         b.err(); b.err(); b.err(); b.err(); b.err(); b.err();
         // begin() goes to SWP (no drop counted), but b.err() while in
         // SWP is gated to a no-op. So we can't easily force a second
@@ -751,7 +751,7 @@ void run_test_error_counter() {
 }
 
 void run_test_error_counter_during_swp() {
-    // Regression: a cable bounce drops the link, the master spends a few
+    // Regression: a cable bounce drops the link, the ping spends a few
     // seconds in SWP/LCK re-locking, and recovers. With the per-drop
     // semantic, this is ONE disconnect event -- not N+1 from the noise
     // bytes that arrive during the sweep. The threshold window (`errs`)
@@ -760,45 +760,45 @@ void run_test_error_counter_during_swp() {
     std::cout << "\n=== Test: One Count Per Cable Bounce ===" << std::endl;
     MockHal mHal, sHal;
     AutoLinkConfig cfg; cfg.allowedBauds = {9600, 115200}; cfg.pingSamplesPerBaud = 1;
-    ALink master(mHal, true, cfg);
-    ALink slave(sHal, false, cfg);
-    master.begin(); slave.begin();
+    ALink ping(mHal, true, cfg);
+    ALink pong(sHal, false, cfg);
+    ping.begin(); pong.begin();
 
     // Negotiate to OK.
-    master.onTimer(); pipe_data(mHal, sHal);
-    master.onTimer(); pipe_data(mHal, sHal);
-    master.onTimer(); pipe_data(mHal, sHal);
+    ping.onTimer(); pipe_data(mHal, sHal);
+    ping.onTimer(); pipe_data(mHal, sHal);
+    ping.onTimer(); pipe_data(mHal, sHal);
     pipe_data(sHal, mHal);
-    assert(master.getState() == State::OK);
+    assert(ping.getState() == State::OK);
 
     uint64_t tx0, rx0, e0;
-    master.getStats(tx0, rx0, e0);
+    ping.getStats(tx0, rx0, e0);
     assert(e0 == 0);
 
     // Trip the threshold to force one disconnect event.
-    for (int i = 0; i < 6; i++) master.err();
-    assert(master.getState() == State::SWP);
-    master.getStats(tx0, rx0, e0);
+    for (int i = 0; i < 6; i++) ping.err();
+    assert(ping.getState() == State::SWP);
+    ping.getStats(tx0, rx0, e0);
     assert(e0 == 1);
 
     // Simulate the post-drop SWP noise: a flurry of err() calls. The
     // threshold window resets on drop, so these contribute nothing to
     // `errs` until they reach 5+ again. And per-byte noise shouldn't
     // count toward the disconnect counter anyway.
-    for (int i = 0; i < 100; i++) master.err();
-    master.getStats(tx0, rx0, e0);
+    for (int i = 0; i < 100; i++) ping.err();
+    ping.getStats(tx0, rx0, e0);
     assert(e0 == 1);   // still one disconnect, no per-byte inflation
 
-    // Recover. (The slave is still in OK from before the drop. Master is
+    // Recover. (The pong is still in OK from before the drop. Ping is
     // back in SWP and re-sweeps. We don't drive a full re-lock here --
     // that's covered by the negotiation test -- we just confirm the
     // counter hasn't inflated from the post-drop noise.)
     for (int i = 0; i < 3; i++) {
-        master.onTimer();
+        ping.onTimer();
         if (!mHal.txBuf.empty()) pipe_data(mHal, sHal);
     }
     // The post-drop noise did not add any new disconnects.
-    master.getStats(tx0, rx0, e0);
+    ping.getStats(tx0, rx0, e0);
     assert(e0 == 1);
 
     std::cout << "PASS" << std::endl;
@@ -816,11 +816,11 @@ void run_test_error_counter_link_failures() {
     {
         MockHal mHal, sHal;
         AutoLinkConfig cfg; cfg.allowedBauds = {9600, 115200}; cfg.pingSamplesPerBaud = 1;
-        ALink master(mHal, true, cfg);
-        ALink slave(sHal, false, cfg);
-        master.begin(); slave.begin();
+        ALink ping(mHal, true, cfg);
+        ALink pong(sHal, false, cfg);
+        ping.begin(); pong.begin();
         uint64_t tx0, rx0, e0;
-        master.getStats(tx0, rx0, e0);
+        ping.getStats(tx0, rx0, e0);
         assert(e0 == 0);
     }
 
@@ -830,21 +830,21 @@ void run_test_error_counter_link_failures() {
         AutoLinkConfig cfg;
         cfg.allowedBauds = {9600, 115200}; cfg.pingSamplesPerBaud = 1;
         cfg.idleTimeoutMs = 100;
-        ALink master(mHal, true, cfg);
-        ALink slave(sHal, false, cfg);
-        master.begin(); slave.begin();
-        master.onTimer(); pipe_data(mHal, sHal);
-        master.onTimer(); pipe_data(mHal, sHal);
-        master.onTimer(); pipe_data(mHal, sHal);
+        ALink ping(mHal, true, cfg);
+        ALink pong(sHal, false, cfg);
+        ping.begin(); pong.begin();
+        ping.onTimer(); pipe_data(mHal, sHal);
+        ping.onTimer(); pipe_data(mHal, sHal);
+        ping.onTimer(); pipe_data(mHal, sHal);
         pipe_data(sHal, mHal);
-        assert(master.getState() == State::OK);
+        assert(ping.getState() == State::OK);
 
         mHal.now = cfg.idleTimeoutMs + 50;
-        master.onTimer();
-        assert(master.getState() == State::SWP);
+        ping.onTimer();
+        assert(ping.getState() == State::SWP);
 
         uint64_t tx1, rx1, e1;
-        master.getStats(tx1, rx1, e1);
+        ping.getStats(tx1, rx1, e1);
         assert(e1 == 1);
     }
 
@@ -852,20 +852,20 @@ void run_test_error_counter_link_failures() {
     {
         MockHal mHal, sHal;
         AutoLinkConfig cfg; cfg.allowedBauds = {9600, 115200}; cfg.pingSamplesPerBaud = 1;
-        ALink master(mHal, true, cfg);
-        ALink slave(sHal, false, cfg);
-        master.begin(); slave.begin();
-        master.onTimer(); pipe_data(mHal, sHal);
-        master.onTimer(); pipe_data(mHal, sHal);
-        master.onTimer(); pipe_data(mHal, sHal);
+        ALink ping(mHal, true, cfg);
+        ALink pong(sHal, false, cfg);
+        ping.begin(); pong.begin();
+        ping.onTimer(); pipe_data(mHal, sHal);
+        ping.onTimer(); pipe_data(mHal, sHal);
+        ping.onTimer(); pipe_data(mHal, sHal);
         pipe_data(sHal, mHal);
-        assert(master.getState() == State::OK);
+        assert(ping.getState() == State::OK);
 
-        master.onBreak();
-        assert(master.getState() == State::SWP);
+        ping.onBreak();
+        assert(ping.getState() == State::SWP);
 
         uint64_t tx, rx, e;
-        master.getStats(tx, rx, e);
+        ping.getStats(tx, rx, e);
         assert(e == 1);
     }
 
@@ -875,38 +875,38 @@ void run_test_error_counter_link_failures() {
     {
         MockHal mHal, sHal;
         AutoLinkConfig cfg; cfg.allowedBauds = {9600, 115200}; cfg.pingSamplesPerBaud = 1;
-        ALink master(mHal, true, cfg);
-        ALink slave(sHal, false, cfg);
-        master.begin(); slave.begin();
-        master.onTimer(); pipe_data(mHal, sHal);
-        master.onTimer(); pipe_data(mHal, sHal);
-        master.onTimer(); pipe_data(mHal, sHal);
+        ALink ping(mHal, true, cfg);
+        ALink pong(sHal, false, cfg);
+        ping.begin(); pong.begin();
+        ping.onTimer(); pipe_data(mHal, sHal);
+        ping.onTimer(); pipe_data(mHal, sHal);
+        ping.onTimer(); pipe_data(mHal, sHal);
         pipe_data(sHal, mHal);
-        assert(master.getState() == State::OK);
+        assert(ping.getState() == State::OK);
 
         // Now in OK. Re-enter LCK by forcing a drop (threshold trip) and
-        // letting the master sweep up to LCK. The slave is silent now.
-        for (int i = 0; i < 6; i++) master.err();
-        assert(master.getState() == State::SWP);
+        // letting the ping sweep up to LCK. The pong is silent now.
+        for (int i = 0; i < 6; i++) ping.err();
+        assert(ping.getState() == State::SWP);
         uint64_t tx, rx, e;
-        master.getStats(tx, rx, e);
+        ping.getStats(tx, rx, e);
         assert(e == 1);  // the threshold trip counted
 
-        // Now drive the master from SWP up to LCK, then time out the LCK.
-        // But wait -- the master is in SWP at spdI=0. onTimer() sends
-        // PINGs, but the slave is also in OK from before. PINGs to an
-        // OK-mode slave just become frame rejects. Use a direct path:
-        // put the master into LCK via begin() + drive it to LCK.
+        // Now drive the ping from SWP up to LCK, then time out the LCK.
+        // But wait -- the ping is in SWP at spdI=0. onTimer() sends
+        // PINGs, but the pong is also in OK from before. PINGs to an
+        // OK-mode pong just become frame rejects. Use a direct path:
+        // put the ping into LCK via begin() + drive it to LCK.
         // Simpler: just test that an OK->SWP counts and a SWP->LCK
         // timeout during recovery does NOT inflate the count.
-        for (int i = 0; i < 100; i++) master.onTimer();
+        for (int i = 0; i < 100; i++) ping.onTimer();
         uint64_t tx2, rx2, e2;
-        master.getStats(tx2, rx2, e2);
+        ping.getStats(tx2, rx2, e2);
         assert(e2 == 1);  // still 1, post-drop SWP noise did not inflate
     }
 
     // ----- Case 5: cable-bounce simulation. begin, negotiate, bounce the
-    // slave (silent past idleTimeout), let master recover. Expect exactly
+    // pong (silent past idleTimeout), let ping recover. Expect exactly
     // one count, no matter how many SWP-noise errs the parser would
     // otherwise log. -----
     {
@@ -914,66 +914,66 @@ void run_test_error_counter_link_failures() {
         AutoLinkConfig cfg;
         cfg.allowedBauds = {9600, 115200}; cfg.pingSamplesPerBaud = 1;
         cfg.idleTimeoutMs = 100;
-        ALink master(mHal, true, cfg);
-        ALink slave(sHal, false, cfg);
-        master.begin(); slave.begin();
-        master.onTimer(); pipe_data(mHal, sHal);
-        master.onTimer(); pipe_data(mHal, sHal);
-        master.onTimer(); pipe_data(mHal, sHal);
+        ALink ping(mHal, true, cfg);
+        ALink pong(sHal, false, cfg);
+        ping.begin(); pong.begin();
+        ping.onTimer(); pipe_data(mHal, sHal);
+        ping.onTimer(); pipe_data(mHal, sHal);
+        ping.onTimer(); pipe_data(mHal, sHal);
         pipe_data(sHal, mHal);
-        assert(master.getState() == State::OK);
+        assert(ping.getState() == State::OK);
 
-        // Slave "dies": master sees no RX, watchdog fires, master drops.
+        // Pong "dies": ping sees no RX, watchdog fires, ping drops.
         mHal.now = cfg.idleTimeoutMs + 50;
-        master.onTimer();
-        assert(master.getState() == State::SWP);
+        ping.onTimer();
+        assert(ping.getState() == State::SWP);
 
         // A flurry of parser errs during the re-sweep window. None of
         // these should inflate the disconnect count.
-        for (int i = 0; i < 20; i++) master.err();
-        for (int i = 0; i < 5; i++) master.err();
+        for (int i = 0; i < 20; i++) ping.err();
+        for (int i = 0; i < 5; i++) ping.err();
 
-        // Slave "comes back": finish the re-sweep and re-lock.
-        master.onTimer(); pipe_data(mHal, sHal);
-        master.onTimer(); pipe_data(mHal, sHal);
-        master.onTimer(); pipe_data(mHal, sHal);
+        // Pong "comes back": finish the re-sweep and re-lock.
+        ping.onTimer(); pipe_data(mHal, sHal);
+        ping.onTimer(); pipe_data(mHal, sHal);
+        ping.onTimer(); pipe_data(mHal, sHal);
         pipe_data(sHal, mHal);
 
         uint64_t tx, rx, e;
-        master.getStats(tx, rx, e);
+        ping.getStats(tx, rx, e);
         assert(e == 1);   // one bounce, one count
     }
 
-    // ----- Case 6: a slave reset that emits many BREAKs in a row while
-    // the master is in SWP should still count as ONE event. This is the
+    // ----- Case 6: a pong reset that emits many BREAKs in a row while
+    // the ping is in SWP should still count as ONE event. This is the
     // exact pattern from the user's field log: peer detected trouble
-    // (1 BREAK -> 1 count), then the master sweeps up to LCK, then 3
+    // (1 BREAK -> 1 count), then the ping sweeps up to LCK, then 3
     // LCK timeouts before the peer finally responds. The user's log
     // showed err=9 for one reset -- the new rule brings this to 1. -----
     {
         MockHal mHal, sHal;
         AutoLinkConfig cfg; cfg.allowedBauds = {9600, 115200}; cfg.pingSamplesPerBaud = 1;
-        ALink master(mHal, true, cfg);
-        ALink slave(sHal, false, cfg);
-        master.begin(); slave.begin();
-        master.onTimer(); pipe_data(mHal, sHal);
-        master.onTimer(); pipe_data(mHal, sHal);
-        master.onTimer(); pipe_data(mHal, sHal);
+        ALink ping(mHal, true, cfg);
+        ALink pong(sHal, false, cfg);
+        ping.begin(); pong.begin();
+        ping.onTimer(); pipe_data(mHal, sHal);
+        ping.onTimer(); pipe_data(mHal, sHal);
+        ping.onTimer(); pipe_data(mHal, sHal);
         pipe_data(sHal, mHal);
-        assert(master.getState() == State::OK);
+        assert(ping.getState() == State::OK);
 
-        // Slave reboots and emits several BREAKs.
-        master.onBreak();
-        assert(master.getState() == State::SWP);
-        for (int i = 0; i < 5; i++) master.onBreak();   // spurious, in SWP
+        // Pong reboots and emits several BREAKs.
+        ping.onBreak();
+        assert(ping.getState() == State::SWP);
+        for (int i = 0; i < 5; i++) ping.onBreak();   // spurious, in SWP
         uint64_t tx, rx, e;
-        master.getStats(tx, rx, e);
+        ping.getStats(tx, rx, e);
         assert(e == 1);
 
-        // Master sweeps up to LCK. Several LCK timeouts while the slave
+        // Ping sweeps up to LCK. Several LCK timeouts while the pong
         // is still rebooting. None of these should inflate the count.
-        for (int i = 0; i < 200; i++) master.onTimer();
-        master.getStats(tx, rx, e);
+        for (int i = 0; i < 200; i++) ping.onTimer();
+        ping.getStats(tx, rx, e);
         assert(e == 1);
     }
 
@@ -982,14 +982,14 @@ void run_test_error_counter_link_failures() {
 
 void run_test_best_baud_selection() {
     std::cout << "\n=== Test: Best-Baud Picks Highest Working Index ===" << std::endl;
-    // 4 bauds. Feed the slave 3 PINGs (it scores indices 0,1,2) then a REQ.
+    // 4 bauds. Feed the pong 3 PINGs (it scores indices 0,1,2) then a REQ.
     // It must reply with index 2 (fastest baud that scored), not 3.
     MockHal sHal;
     AutoLinkConfig cfg; cfg.allowedBauds = {9600, 19200, 38400, 57600}; cfg.pingSamplesPerBaud = 1;
     cfg.fastBaudLock = false;  // legacy scoring test
-    ALink slave(sHal, false, cfg);
-    slave.begin();
-    assert(slave.getState() == State::SWP);
+    ALink pong(sHal, false, cfg);
+    pong.begin();
+    assert(pong.getState() == State::SWP);
 
     auto frame = [&](uint8_t cmd, uint8_t* out) {
         out[0] = 0xAA; out[1] = 0x55; out[2] = cmd;
@@ -1005,14 +1005,14 @@ void run_test_best_baud_selection() {
 
     uint8_t pf[4]; frame(PING_CMD, pf);
     // Array-order sweep: start at index 0 (9600), advance as we score.
-    slave.onRx(pf, 4); // scores[0]++, spdI->1
-    slave.onRx(pf, 4); // scores[1]++, spdI->2
-    slave.onRx(pf, 4); // scores[2]++, spdI->3
-    assert(slave.getCurrentSpdIndex() == 3);
+    pong.onRx(pf, 4); // scores[0]++, spdI->1
+    pong.onRx(pf, 4); // scores[1]++, spdI->2
+    pong.onRx(pf, 4); // scores[2]++, spdI->3
+    assert(pong.getCurrentSpdIndex() == 3);
 
     uint8_t rf[4]; frame(REQ_CMD, rf);
-    slave.onRx(rf, 4); // slave replies best index and goes OK
-    assert(slave.getState() == State::OK);
+    pong.onRx(rf, 4); // pong replies best index and goes OK
+    assert(pong.getState() == State::OK);
 
     // Reply frame is {0xAA,0x55,best,crc}; best is 2 (38400, the highest
     // baud that scored in this sweep with threshold 1 hit). With
@@ -1025,16 +1025,16 @@ void run_test_best_baud_selection() {
 }
 
 void run_test_top_down_fast_ack_locks_top() {
-    // The user-requested behavior: the master tests the fastest baud
+    // The user-requested behavior: the ping tests the fastest baud
     // first. If it passes, lock there. Don't waste time testing lower
-    // bauds. With top-down sweep + fast-ack, the slave sends the
-    // best-ack after 4 PINGs at 115200, and the master locks in 4
+    // bauds. With top-down sweep + fast-ack, the pong sends the
+    // best-ack after 4 PINGs at 115200, and the ping locks in 4
     // ticks total.
     std::cout << "\n=== Test: Top-Down Sweep + Fast-Ack Locks Top Baud ===" << std::endl;
 
     AutoLinkConfig cfg;
     // Array-order sweep: the first entry in the list is the one the
-    // master tries first. With this order, 115200 (the user's preferred
+    // ping tries first. With this order, 115200 (the user's preferred
     // top baud) is at index 0 and tested first.
     cfg.allowedBauds = {115200, 57600, 38400, 19200, 9600};
     cfg.pingSamplesPerBaud = 4;
@@ -1042,35 +1042,35 @@ void run_test_top_down_fast_ack_locks_top() {
     MockHal mHal, sHal;
     mHal.peer = &sHal;
     sHal.peer = &mHal;
-    ALink master(mHal, true, cfg);
-    ALink slave(sHal, false, cfg);
-    master.begin(); slave.begin();
+    ALink ping(mHal, true, cfg);
+    ALink pong(sHal, false, cfg);
+    ping.begin(); pong.begin();
 
-    // Master starts at index 0 (115200), sends 4 PINGs. All delivered.
-    // Slave scores 4, hits the 2-hit threshold, fast-acks.
+    // Ping starts at index 0 (115200), sends 4 PINGs. All delivered.
+    // Pong scores 4, hits the 2-hit threshold, fast-acks.
     for (int s = 0; s < 4; s++) {
-        master.onTimer();
+        ping.onTimer();
         pipe_data(mHal, sHal);
     }
     int fastAckPayload = sHal.txBuf[2];
     pipe_data(sHal, mHal);
 
-    assert(master.getState() == State::OK);
-    assert(slave.getState()   == State::OK);
+    assert(ping.getState() == State::OK);
+    assert(pong.getState()   == State::OK);
     assert(fastAckPayload == 0);  // index 0 = 115200
-    // The other bauds (1, 2, 3, 4) were never tested. The master
+    // The other bauds (1, 2, 3, 4) were never tested. The ping
     // didn't waste ticks on them.
 
     std::cout << "PASS" << std::endl;
 }
 
 // Asymmetric peer-death recovery. This is the scenario the v2.4 release
-// couldn't handle: the slave restarts (or its UART goes silent) while the
-// master is in OK. Before v2.5 the master would never see RX errors (its
-// RX pin is idle because it's the originator of traffic), so the master
-// would stay in OK forever, never re-sweep, and the freshly-booted slave
+// couldn't handle: the pong restarts (or its UART goes silent) while the
+// ping is in OK. Before v2.5 the ping would never see RX errors (its
+// RX pin is idle because it's the originator of traffic), so the ping
+// would stay in OK forever, never re-sweep, and the freshly-booted pong
 // at 9600 baud would never hear a PING. v2.5 added the idle-channel
-// watchdog so the master drops to SWP and re-sweeps on its own.
+// watchdog so the ping drops to SWP and re-sweeps on its own.
 //
 // The MockHal doesn't have a real wall clock, so nowMs() returns 0 on the
 // host build. To trigger the idle watchdog without a clock we have two
@@ -1093,90 +1093,90 @@ void run_test_asymmetric_peer_death_recovery() {
     cfg.idleTimeoutMs = 0;  // disable the watchdog for this test -- we drive err directly
 
     MockHal mHal, sHal;
-    mHal.peer = &sHal;  // master.sendBreak() now delivers to the slave
-    sHal.peer = &mHal;  // slave.sendBreak() now delivers to the master
-    ALink master(mHal, true, cfg);
-    ALink slave(sHal, false, cfg);
+    mHal.peer = &sHal;  // ping.sendBreak() now delivers to the pong
+    sHal.peer = &mHal;  // pong.sendBreak() now delivers to the ping
+    ALink ping(mHal, true, cfg);
+    ALink pong(sHal, false, cfg);
 
     // Get to OK the same way the existing negotiation test does: run
     // begin() and 3 onTimer() ticks (2 PINGs + 1 REQ), pipe data each step.
-    master.begin();
-    slave.begin();
-    master.onTimer(); pipe_data(mHal, sHal);   // PING@9600
-    master.onTimer(); pipe_data(mHal, sHal);   // PING@115200 -> LCK
-    master.onTimer(); pipe_data(mHal, sHal);   // REQ -> slave replies, both go OK
+    ping.begin();
+    pong.begin();
+    ping.onTimer(); pipe_data(mHal, sHal);   // PING@9600
+    ping.onTimer(); pipe_data(mHal, sHal);   // PING@115200 -> LCK
+    ping.onTimer(); pipe_data(mHal, sHal);   // REQ -> pong replies, both go OK
     pipe_data(sHal, mHal);
-    assert(master.getState() == State::OK);
-    assert(slave.getState()   == State::OK);
+    assert(ping.getState() == State::OK);
+    assert(pong.getState()   == State::OK);
 
-    // Now simulate the asymmetric death: the slave's parser sees so much
+    // Now simulate the asymmetric death: the pong's parser sees so much
     // garbage that err_unlocked() trips. The mock doesn't have a real
-    // peer death, so we synthesize the failure: hand the slave a flood
+    // peer death, so we synthesize the failure: hand the pong a flood
     // of non-zero bytes that overflow relRxBuf and trip err_unlocked.
     // Each overflow is one err. errThreshold defaults to 5, so 10
     // overflows will trip the threshold.
-    int sendBreakCallsBeforeSlave = sHal.sendBreakCalls;
-    int sendBreakCallsBeforeMaster = mHal.sendBreakCalls;
-    int errsBefore = slave.getErrCount();
+    int sendBreakCallsBeforePong = sHal.sendBreakCalls;
+    int sendBreakCallsBeforePing = mHal.sendBreakCalls;
+    int errsBefore = pong.getErrCount();
 
     for (int burst = 0; burst < 20; burst++) {
         std::vector<uint8_t> garbage(300, 0xCC);  // 300 non-zero bytes -> relRxBuf overflows
-        slave.onRx(garbage.data(), (int)garbage.size());
+        pong.onRx(garbage.data(), (int)garbage.size());
         // If the err threshold tripped, the state has already been reset
-        // to SWP and the slave is in the middle of dropping. We can stop
+        // to SWP and the pong is in the middle of dropping. We can stop
         // flooding now and verify the side effects.
-        if (slave.getErrCount() < errsBefore) break;
+        if (pong.getErrCount() < errsBefore) break;
     }
 
     // The threshold should have tripped: errs reset to 0 inside dropLink_unlocked.
-    assert(slave.getErrCount() == 0);
-    // The slave's local state must be SWP (this is the v2.5 fix).
-    assert(slave.getState() == State::SWP);
-    // And the slave must have called sendBreak() exactly once (latched
+    assert(pong.getErrCount() == 0);
+    // The pong's local state must be SWP (this is the v2.5 fix).
+    assert(pong.getState() == State::SWP);
+    // And the pong must have called sendBreak() exactly once (latched
     // from onRx and emitted after the lock was released).
-    assert(sHal.sendBreakCalls == sendBreakCallsBeforeSlave + 1);
-    // The break must have been delivered to the master via the peer
-    // pointer, so the master's onBreak ran and dropped it to SWP too.
-    assert(master.getState() == State::SWP);
-    // And the master received the break (not a self-deliver), so its
+    assert(sHal.sendBreakCalls == sendBreakCallsBeforePong + 1);
+    // The break must have been delivered to the ping via the peer
+    // pointer, so the ping's onBreak ran and dropped it to SWP too.
+    assert(ping.getState() == State::SWP);
+    // And the ping received the break (not a self-deliver), so its
     // sendBreak counter is unchanged.
-    assert(mHal.sendBreakCalls == sendBreakCallsBeforeMaster);
+    assert(mHal.sendBreakCalls == sendBreakCallsBeforePing);
 
-    // Now the master sweeps on its own. We tick the timer and confirm
-    // it sends a PING (the master is the proactive side).
-    master.onTimer();
+    // Now the ping sweeps on its own. We tick the timer and confirm
+    // it sends a PING (the ping is the proactive side).
+    ping.onTimer();
     assert(!mHal.txBuf.empty());
     // The PING is a 4-byte command frame {0xAA,0x55,PING,CRC}.
     assert(mHal.txBuf.size() == 4);
     assert(mHal.txBuf[2] == PING_CMD);
 
-    // The slave is in SWP and receives the PING at whatever baud the
-    // master is currently at. The master just set the baud to
-    // allowedBauds[0] (9600) before the first PING. The slave, after
-    // dropLink_unlocked, is also at 9600. Pipe the PING to the slave
-    // and assert the slave scored it (spdI advanced to 1).
+    // The pong is in SWP and receives the PING at whatever baud the
+    // ping is currently at. The ping just set the baud to
+    // allowedBauds[0] (9600) before the first PING. The pong, after
+    // dropLink_unlocked, is also at 9600. Pipe the PING to the pong
+    // and assert the pong scored it (spdI advanced to 1).
     pipe_data(mHal, sHal);
-    assert(slave.getCurrentSpdIndex() == 1);
-    assert(slave.getErrCount() == 0);
+    assert(pong.getCurrentSpdIndex() == 1);
+    assert(pong.getErrCount() == 0);
 
     std::cout << "PASS" << std::endl;
 }
 
 
-// Bring a master/slave MockHal pair to OK. Shared by the watchdog tests.
-static void negotiate_to_ok(ALink& master, ALink& slave, MockHal& mHal, MockHal& sHal) {
-    master.begin();
-    slave.begin();
-    master.onTimer(); pipe_data(mHal, sHal);   // PING@baud[0]
-    master.onTimer(); pipe_data(mHal, sHal);   // PING@baud[1] -> LCK
-    master.onTimer(); pipe_data(mHal, sHal);   // REQ -> slave OK, replies index
-    pipe_data(sHal, mHal);                      // master receives index -> OK
-    assert(master.getState() == State::OK);
-    assert(slave.getState() == State::OK);
+// Bring a ping/pong MockHal pair to OK. Shared by the watchdog tests.
+static void negotiate_to_ok(ALink& ping, ALink& pong, MockHal& mHal, MockHal& sHal) {
+    ping.begin();
+    pong.begin();
+    ping.onTimer(); pipe_data(mHal, sHal);   // PING@baud[0]
+    ping.onTimer(); pipe_data(mHal, sHal);   // PING@baud[1] -> LCK
+    ping.onTimer(); pipe_data(mHal, sHal);   // REQ -> pong OK, replies index
+    pipe_data(sHal, mHal);                      // ping receives index -> OK
+    assert(ping.getState() == State::OK);
+    assert(pong.getState() == State::OK);
 }
 
 // Idle watchdog: with the clock advanced past idleTimeoutMs and no RX, the
-// master must drop to SWP and BREAK the peer. Also checks the OK tick was
+// ping must drop to SWP and BREAK the peer. Also checks the OK tick was
 // armed on entering OK (the v2.5 watchdog never re-armed and so never fired).
 void run_test_idle_watchdog() {
     std::cout << "\n=== Test: Idle Watchdog Drops a Silent Link ===" << std::endl;
@@ -1185,9 +1185,9 @@ void run_test_idle_watchdog() {
     cfg.idleTimeoutMs = 3000;
     MockHal mHal, sHal;
     mHal.peer = &sHal; sHal.peer = &mHal;
-    ALink master(mHal, true, cfg);
-    ALink slave(sHal, false, cfg);
-    negotiate_to_ok(master, slave, mHal, sHal);
+    ALink ping(mHal, true, cfg);
+    ALink pong(sHal, false, cfg);
+    negotiate_to_ok(ping, pong, mHal, sHal);
 
     // Entering OK must arm the watchdog tick.
     assert(mHal.timerActive);
@@ -1196,16 +1196,16 @@ void run_test_idle_watchdog() {
 
     // Quiet tick: no drop, timer re-armed.
     mHal.now = 500;
-    master.onTimer();
-    assert(master.getState() == State::OK);
+    ping.onTimer();
+    assert(ping.getState() == State::OK);
 
-    // Silence past the limit: master drops, peer is broken to SWP too.
+    // Silence past the limit: ping drops, peer is broken to SWP too.
     mHal.now = 4000;
     int breaks = mHal.sendBreakCalls;
-    master.onTimer();
-    assert(master.getState() == State::SWP);
+    ping.onTimer();
+    assert(ping.getState() == State::SWP);
     assert(mHal.sendBreakCalls == breaks + 1);
-    assert(slave.getState() == State::SWP);
+    assert(pong.getState() == State::SWP);
     std::cout << "PASS" << std::endl;
 }
 
@@ -1220,54 +1220,54 @@ void run_test_keepalive() {
     cfg.idleTimeoutMs = 3000;
     MockHal mHal, sHal;
     mHal.peer = &sHal; sHal.peer = &mHal;
-    ALink master(mHal, true, cfg);
-    ALink slave(sHal, false, cfg);
-    negotiate_to_ok(master, slave, mHal, sHal);
+    ALink ping(mHal, true, cfg);
+    ALink pong(sHal, false, cfg);
+    negotiate_to_ok(ping, pong, mHal, sHal);
     mHal.clearTx(); sHal.clearTx();
 
-    // App is silent. Tick the master at t=1000: keepalive byte goes out.
+    // App is silent. Tick the ping at t=1000: keepalive byte goes out.
     mHal.now = 1000;
-    master.onTimer();
+    ping.onTimer();
     assert(mHal.txBuf.size() == 1 && mHal.txBuf[0] == 0x00);
 
-    // Deliver it: the slave must stay OK, see no app data, count no errors.
+    // Deliver it: the pong must stay OK, see no app data, count no errors.
     sHal.now = 1000;
     pipe_data(mHal, sHal);
-    assert(slave.getState() == State::OK);
-    assert(slave.available() == 0);
-    assert(slave.getErrCount() == 0);
+    assert(pong.getState() == State::OK);
+    assert(pong.available() == 0);
+    assert(pong.getErrCount() == 0);
 
-    // Slave keepalives back; master's watchdog at t=2900 must NOT fire,
+    // Pong keepalives back; ping's watchdog at t=2900 must NOT fire,
     // because the keepalive refreshed lastRxMs.
-    slave.onTimer();
+    pong.onTimer();
     mHal.now = 2900;
     pipe_data(sHal, mHal);
-    master.onTimer();
-    assert(master.getState() == State::OK);
+    ping.onTimer();
+    assert(ping.getState() == State::OK);
     std::cout << "PASS" << std::endl;
 }
 
-// LCK timeout: master with a dead peer must re-sweep instead of sending REQ
+// LCK timeout: ping with a dead peer must re-sweep instead of sending REQ
 // forever.
 void run_test_lck_timeout() {
     std::cout << "\n=== Test: LCK Timeout Restarts the Sweep ===" << std::endl;
     AutoLinkConfig cfg;
     cfg.allowedBauds = {9600, 115200}; cfg.pingSamplesPerBaud = 1;
     MockHal mHal;   // no peer: REQs go nowhere
-    ALink master(mHal, true, cfg);
-    master.begin();
-    master.onTimer();              // PING@9600
-    master.onTimer();              // PING@115200 -> LCK
-    assert(master.getState() == State::LCK);
+    ALink ping(mHal, true, cfg);
+    ping.begin();
+    ping.onTimer();              // PING@9600
+    ping.onTimer();              // PING@115200 -> LCK
+    assert(ping.getState() == State::LCK);
 
     // 2 * bauds = 4 allowed REQ ticks; the 5th trips the timeout.
-    for (int i = 0; i < 4; i++) master.onTimer();
-    assert(master.getState() == State::LCK);
-    master.onTimer();
-    assert(master.getState() == State::SWP);
+    for (int i = 0; i < 4; i++) ping.onTimer();
+    assert(ping.getState() == State::LCK);
+    ping.onTimer();
+    assert(ping.getState() == State::SWP);
     // Top-down sweep restarts at the top baud (index = N-1 = 1).
     // Array-order sweep: restarts at index 0.
-    assert(master.getCurrentSpdIndex() == 0);
+    assert(ping.getCurrentSpdIndex() == 0);
     std::cout << "PASS" << std::endl;
 }
 
@@ -1306,8 +1306,8 @@ void run_test_parser_yields_after_drop() {
                                // parser yielding, not the fast-ack
     MockHal mHal, sHal;
     sHal.peer = &mHal;   // BREAK goes to the peer, not back to self
-    ALink master(mHal, true, cfg);
-    ALink slave(sHal, false, cfg);   // constructor default state is OK
+    ALink pingNode(mHal, true, cfg);
+    ALink pong(sHal, false, cfg);   // constructor default state is OK
 
     // Two bad frames trip threshold 1 (errs > 1), then a valid PING follows
     // in the SAME event. {0x02, 0xFF} decodes to one byte = CRC-only = err.
@@ -1323,13 +1323,13 @@ void run_test_parser_yields_after_drop() {
 
     std::vector<uint8_t> event(bad, bad + sizeof(bad));
     event.insert(event.end(), ping, ping + 4);
-    slave.onRx(event.data(), (int)event.size());
+    pong.onRx(event.data(), (int)event.size());
 
-    assert(slave.getState() == State::SWP);
+    assert(pong.getState() == State::SWP);
     // The PING at the tail must have been scored by the command parser.
     // Array-order: spdI starts at 0, advances to 1 after scoring the
     // single PING.
-    assert(slave.getCurrentSpdIndex() == 1);
+    assert(pong.getCurrentSpdIndex() == 1);
     std::cout << "PASS" << std::endl;
 }
 
