@@ -55,7 +55,7 @@ main{padding:14px;max-width:540px;margin:0 auto}
 .btn.on{background:#dbeafe;color:#1d4ed8;border-color:#93c5fd}
 .btn.rst{background:#fee2e2;color:#dc2626;border-color:#fca5a5}
 .btn.rbt{background:#fef3c7;color:#b45309;border-color:#fcd34d}
-.log{background:#ffffff;border:1px solid #d1d5db;border-radius:12px;padding:12px;height:240px;overflow-y:auto;font-family:ui-monospace,'Cascadia Code','Courier New',monospace;font-size:12px;line-height:1.65;-webkit-overflow-scrolling:touch}
+.log-wrap{position:relative}.log{background:#ffffff;border:1px solid #d1d5db;border-radius:12px 12px 0 0;padding:12px;height:240px;overflow-y:auto;font-family:ui-monospace,'Cascadia Code','Courier New',monospace;font-size:12px;line-height:1.65;-webkit-overflow-scrolling:touch}.log-fill-bar{height:5px;border-radius:0 0 8px 8px;background:linear-gradient(to right,#22c55e var(--pct,0%),#e5e7eb var(--pct,0%));border:1px solid #d1d5db;border-top:none;transition:background 0.3s}.log-overlay{display:none;position:fixed;inset:0;z-index:9999;background:#fff;flex-direction:column}.log-overlay.open{display:flex}.log-overlay .log{flex:1;height:auto;border-radius:0;border:none;border-bottom:1px solid #d1d5db}.log-overlay .log-fill-bar{border-radius:0;border:none;border-top:1px solid #e5e7eb}.log-overlay-hdr{display:flex;align-items:center;justify-content:space-between;padding:8px 14px;border-bottom:1px solid #d1d5db;background:#f9fafb}.log-overlay-hdr>span{font-weight:600;font-size:14px}
 .E{color:#dc2626}.I{color:#374151}.D{color:#9ca3af}
 .footer{text-align:center;padding:16px;font-size:12px;color:#9ca3af}
 </style>
@@ -106,13 +106,30 @@ main{padding:14px;max-width:540px;margin:0 auto}
       <button class="btn" onclick="clearLog()">Clear</button>
       <button class="btn" id="cbtn" onclick="copyLog()">Copy</button>
       <button class="btn" id="pbtn" onclick="togglePause()">&#9646;&#9646; Pause</button>
+      <button class="btn" onclick="openLogFull()" title="Maximize">&#x26F6;</button>
     </div>
   </div>
-  <div class="log" id="log"></div>
+  <div class="log-wrap">
+    <div class="log" id="log"></div>
+    <div class="log-fill-bar" id="logFill"></div>
+  </div>
+  <div class="log-overlay" id="logOverlay">
+    <div class="log-overlay-hdr">
+      <span>Live Log</span>
+      <div class="btns">
+        <button class="btn" onclick="clearLog()">Clear</button>
+        <button class="btn" id="cbtn2" onclick="copyLog()">Copy</button>
+        <button class="btn" id="pbtn2" onclick="togglePause()">&#9646;&#9646; Pause</button>
+        <button class="btn" onclick="closeLogFull()" title="Minimize">&#x2715; Close</button>
+      </div>
+    </div>
+    <div class="log" id="logFull"></div>
+    <div class="log-fill-bar" id="logFillFull"></div>
+  </div>
 </main>
 <div class="footer"><span id="ver"></span> AutoLink Web Monitor &#x2014; <span id="host"></span></div>
 <script>
-var paused=false,lastSeq=0,fails=0,busy=false;
+var logPaused=false,logFullOpen=false,lastSeq=0,fails=0,busy=false;
 document.getElementById('host').textContent=location.host;
 
 // Fetch with an AbortController timeout (ms). Prevents stalled requests from
@@ -135,14 +152,14 @@ function hide(id){document.getElementById(id).style.display='none';}
 function setPill(st){var p=document.getElementById('pill');p.className='pill '+st.toLowerCase();p.textContent=st;}
 
 function togglePause(){
-  paused=!paused;
-  var b=document.getElementById('pbtn');
-  b.innerHTML=paused?'&#9654; Resume':'&#9646;&#9646; Pause';
-  b.className=paused?'btn on':'btn';
-  if(!paused)poll();
+  logPaused=!logPaused;
+  var lbl=logPaused?'&#9654; Resume':'&#9646;&#9646; Pause';
+  var cls=logPaused?'btn on':'btn';
+  ['pbtn','pbtn2'].forEach(function(id){var b=document.getElementById(id);if(b){b.innerHTML=lbl;b.className=cls;}});
+  if(!logPaused)poll();
 }
 
-function clearLog(){document.getElementById('log').innerHTML='';}
+function clearLog(){document.getElementById('log').innerHTML='';var f=document.getElementById('logFull');if(f)f.innerHTML='';updateFillBar();}
 
 function copyLog(){
   var lines=Array.from(document.getElementById('log').children).map(function(e){return e.textContent;});
@@ -174,6 +191,7 @@ async function resetAll(){
 
 async function reboot(){
   if(!confirm('Reboot the device now? The link will drop and reconnect in a few seconds.'))return;
+  clearLog();lastSeq=0;
   var b=document.getElementById('rebootBtn');
   b.textContent='Rebooting…';
   try{
@@ -191,21 +209,35 @@ async function reboot(){
   },1000);
 }
 
+function updateFillBar(){
+  var t=document.getElementById('log').textContent;
+  var pct=Math.min(100,Math.round(t.length/100))+'%';
+  ['logFill','logFillFull'].forEach(function(id){var b=document.getElementById(id);if(b)b.style.setProperty('--pct',pct);});
+}
+function openLogFull(){
+  logFullOpen=true;
+  var o=document.getElementById('logOverlay');o.classList.add('open');
+  var dst=document.getElementById('logFull');
+  dst.innerHTML=document.getElementById('log').innerHTML;
+  dst.scrollTop=dst.scrollHeight;updateFillBar();
+}
+function closeLogFull(){logFullOpen=false;document.getElementById('logOverlay').classList.remove('open');}
 function appendLog(sev,seq,text){
-  var p=document.getElementById('log');
-  var atEnd=p.scrollHeight-p.scrollTop<=p.clientHeight+12;
-  var d=document.createElement('div');
-  d.className=sev;d.textContent=text;p.appendChild(d);
-  // Only trim when the log panel exceeds 10 KB of text to preserve history.
-  if(p.textContent.length>10000){
-    while(p.children.length>1&&p.textContent.length>8000)p.removeChild(p.firstChild);
-  }
-  if(atEnd)p.scrollTop=p.scrollHeight;
   if(seq+1>lastSeq)lastSeq=seq+1;
+  if(logPaused)return;
+  function addTo(p){
+    var atEnd=p.scrollHeight-p.scrollTop<=p.clientHeight+12;
+    var d=document.createElement('div');d.className=sev;d.textContent=text;p.appendChild(d);
+    if(p.textContent.length>10000){while(p.children.length>1&&p.textContent.length>8000)p.removeChild(p.firstChild);}
+    if(atEnd)p.scrollTop=p.scrollHeight;
+  }
+  addTo(document.getElementById('log'));
+  if(logFullOpen)addTo(document.getElementById('logFull'));
+  updateFillBar();
 }
 
 async function poll(){
-  if(paused||busy)return;
+  if(busy)return;
   busy=true;
   try{
     var r=await tfetch('/stats',null,2500);
@@ -242,7 +274,7 @@ async function poll(){
   busy=false;
 }
 
-document.addEventListener('visibilitychange',function(){if(!document.hidden&&!paused)poll();});
+document.addEventListener('visibilitychange',function(){if(!document.hidden)poll();});
 setInterval(poll,1000);
 poll();
 </script>
