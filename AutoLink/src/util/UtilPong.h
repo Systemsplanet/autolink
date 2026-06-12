@@ -42,36 +42,57 @@ public:
     UtilPong& operator=(const UtilPong&) = delete;
 
     void setup() {
+        log_.debug("Pong", "setup: calling setupCommon");
         setupCommon();
+        log_.debug("Pong", "setup complete  BUF_SIZE=%d", BUF_SIZE);
     }
 
     void loop() {
         if (!comm_.ready()) {
-            log_.debug("Pong", "not ready");
+            if (wasReady_) {
+                log_.debug("Pong", "link lost  echoes_sent=%lu", (unsigned long)echoCount_);
+            } else {
+                log_.debug("Pong", "not ready");
+            }
             comm_.blinkWait(3, 100, 100, 2000);
             wasReady_ = false;
             return;
         }
         if (!wasReady_) {
-            log_.debug("Pong", "ready");
+            log_.debug("Pong", "link up  baud=%lu",
+                (unsigned long)comm_.getCurrentBaud());
             comm_.blinkWait(4, 100, 100, 2000);
             wasReady_ = true;
         }
 
         int n;
+        int recvThisLoop = 0;
         while ((n = comm_.recv(buf_, sizeof buf_)) > 0) {
-            log_.debug("Pong", "recv %d bytes", n);
+            recvThisLoop++;
             if (comm_.send(buf_, n)) {
-                log_.debug("Pong", "echoed %d bytes", n);
+                echoCount_++;
+                log_.debug("Pong", "echo #%lu  %d bytes  ok",
+                    (unsigned long)echoCount_, n);
             } else {
                 log_.error("Pong",
-                    "echo send failed (link dropped)  %d bytes dropped", n);
+                    "echo #%lu  %d bytes  SEND FAILED (link dropped)",
+                    (unsigned long)echoCount_, n);
             }
             comm_.blinkWait(1);   // one flash per echo — visual heartbeat
+        }
+        if (n < 0) {
+            log_.error("Pong", "recv rejected (CRC/desync)  echoCount=%lu",
+                (unsigned long)echoCount_);
+        }
+        if (recvThisLoop > 0) {
+            log_.debug("Pong", "processed %d msgs this loop  echoCount=%lu",
+                recvThisLoop, (unsigned long)echoCount_);
         }
 
         logStats("Pong");
     }
+private:
+    uint64_t echoCount_ = 0;   // lifetime echo counter for debug logging
 };
 
 } // namespace autolink
