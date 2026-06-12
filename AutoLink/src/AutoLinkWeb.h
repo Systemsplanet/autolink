@@ -62,7 +62,7 @@ public:
 
 private:
     // ---- tunables ----
-    static constexpr int         RING_CAP       = 48;     // log ring capacity (entries)
+    static constexpr int         RING_CAP       = 200;    // log ring capacity (entries)
     static constexpr int         LINE_CAP       = 180;    // max bytes per log line (incl. NUL)
     static constexpr uint32_t    WIFI_TIMEOUT_MS = 12000; // max ms to wait for WiFi
     static constexpr const char* TAG            = "ALinkWeb";
