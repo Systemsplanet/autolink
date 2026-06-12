@@ -8,7 +8,7 @@
 // Usage:
 //   #include "AutoLink.h"
 //   using namespace autolink;
-//   AutoLink comm(UART_NUM_2, 16, 17, /*isMaster=*/true);
+//   AutoLink comm(UART_NUM_2, 16, 17, /*Ping node=*/true);
 //   void setup() { comm.begin(); }
 //   void loop()  { comm.send(buf, n);  comm.recv(buf, sizeof buf); }
 #pragma once
@@ -36,7 +36,7 @@ namespace autolink {
 
 // Library version — keep in sync with library.properties. Logged at INFO
 // level by begin() so the running firmware version is always visible.
-#define AUTOLINK_VERSION "3.0.6"
+#define AUTOLINK_VERSION "3.0.11"
 
 // ----------------------------------------------------------------------------
 // AutoLink — the one-object public facade: construct as a global, begin(),
