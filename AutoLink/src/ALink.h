@@ -38,7 +38,7 @@ constexpr int MSG_HDR = 6;
 // ledPin) need to be touched.
 // ----------------------------------------------------------------------------
 struct AutoLinkConfig {
-    // Auto-baud sweep order. The master tests the first entry first and locks
+    // Auto-baud sweep order. The Ping tests the first entry first and locks
     // at the highest baud that meets the reliability threshold. The default
     // list is conservative — all five bauds work reliably with ordinary jumper
     // wires on standard ESP32 boards. High-speed bauds (≥230400) require short
@@ -59,21 +59,21 @@ struct AutoLinkConfig {
     // also sends a 1-byte keepalive (reliable mode only) when its TX has been
     // quiet for idleTimeoutMs/3, so a healthy-but-silent link never bounces.
     int idleTimeoutMs = 3000;
-    // Auto-baud reliability sweep. The master sends `pingSamplesPerBaud`
-    // PINGs at each candidate baud; the slave scores the success rate and
+    // Auto-baud reliability sweep. The Ping sends `pingSamplesPerBaud`
+    // PINGs at each candidate baud; the Pong scores the success rate and
     // picks the highest baud whose rate is >= minAcceptRate. A 1-PING sweep
-    // is fast but flaky: a single missed PING drops the slave to a slower
+    // is fast but flaky: a single missed PING drops the Pong to a slower
     // baud. Multiple samples favor stability over sweep speed. Set
     // pingSamplesPerBaud=1 to get the old "first one wins" behavior.
     int pingSamplesPerBaud = 4;
     // Minimum fraction of PINGs that must decode at a baud for it to be
     // considered reliable. 0.5 = at least half; 0.8 = strict; 0 = any
-    // success counts. The slave falls back to lower bauds if the top one
+    // success counts. The Pong falls back to lower bauds if the top one
     // doesn't meet the threshold.
     float minAcceptRate = 0.5f;
-    // Enable the "fast ack" path: the slave sends BEST_CMD (with its
+    // Enable the "fast ack" path: the Pong sends BEST_CMD (with its
     // current best baud index) as soon as it has enough PINGs to trust
-    // the current baud, instead of waiting for the master to sweep every
+    // the current baud, instead of waiting for the Ping to sweep every
     // baud and send REQ. With this on, a healthy top-baud link locks in
     // 4 ticks instead of N*M ticks. Set to false to use the legacy
     // "sweep every baud, then REQ" path.
@@ -95,9 +95,9 @@ class ALink : private UtilFrameRx::Listener {
     State state;
     int errs;
     int spdI;
-    int pingSample;             // master: which sample of N at the current baud
-    UtilBaudSweep baudSweep;    // per-baud decode scoring on the slave side
-    int emptySweeps_;           // slave: consecutive full sweeps with 0 PINGs at any baud
+    int pingSample;             // Ping: which sample of N at the current baud
+    UtilBaudSweep baudSweep;    // per-baud decode scoring on the Pong side
+    int emptySweeps_;           // Pong: consecutive full sweeps with 0 PINGs at any baud
 
     uint8_t rxBuf[4];  // 4-byte command frame accumulator in SWP/LCK state (0xAA 0x55 cmd crc8)
     int rxIdx;
@@ -108,7 +108,7 @@ class ALink : private UtilFrameRx::Listener {
     // Message reassembly state (read side).
     int      rxMsgLen;   // -1 = waiting on header
     uint16_t rxMsgCrc;
-    int      lckRetries;  // REQ_CMD attempts since entering LCK (master only)
+    int      lckRetries;  // REQ_CMD attempts since entering LCK (Ping only)
 
     // Idle watchdog / keepalive clocks (hw.nowMs() domain).
     uint32_t  lastRxMs;   // last RX activity while in OK
@@ -143,12 +143,12 @@ class ALink : private UtilFrameRx::Listener {
     int  bestSpd_unlocked() const;        // highest baud index that scored reliably
     int  readStream(uint8_t* b, int n);   // pull up to n bytes from the app buffer
 
-    // Reset all link state, retune to allowedBauds[0], master arms the sweep
+    // Reset all link state, retune to allowedBauds[0], Ping arms the sweep
     // timer. Idempotent. Caller must hold the lock. Counts as one disconnect
     // event for the lifetime error counter *only when the link was actually
     // up* (state == OK at entry) -- a single "thing happened" from the app's
     // perspective. Spurious onBreak() calls and threshold trips that happen
-    // while already in SWP/LCK (e.g. a slave emitting multiple BREAKs while
+    // while already in SWP/LCK (e.g. a Pong emitting multiple BREAKs while
     // rebooting) are part of the same recovery and do not inflate the count.
     // begin() uses reset_unlocked() to do the same work without counting.
     void dropLink_unlocked();
