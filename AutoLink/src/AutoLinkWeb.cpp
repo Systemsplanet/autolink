@@ -211,7 +211,7 @@ async function reboot(){
 
 function updateFillBar(){
   var t=document.getElementById('log').textContent;
-  var pct=Math.min(100,Math.round(t.length/100))+'%';
+  var pct=Math.min(100,Math.round(t.length/5000))+'%';  // 100% = 500 KB
   ['logFill','logFillFull'].forEach(function(id){var b=document.getElementById(id);if(b)b.style.setProperty('--pct',pct);});
 }
 function openLogFull(){
@@ -228,7 +228,7 @@ function appendLog(sev,seq,text){
   function addTo(p){
     var atEnd=p.scrollHeight-p.scrollTop<=p.clientHeight+12;
     var d=document.createElement('div');d.className=sev;d.textContent=text;p.appendChild(d);
-    if(p.textContent.length>10000){while(p.children.length>1&&p.textContent.length>8000)p.removeChild(p.firstChild);}
+    if(p.textContent.length>500000){while(p.children.length>1&&p.textContent.length>400000)p.removeChild(p.firstChild);}
     if(atEnd)p.scrollTop=p.scrollHeight;
   }
   addTo(document.getElementById('log'));
