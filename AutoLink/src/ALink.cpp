@@ -48,7 +48,7 @@ ALink::ALink(ILink& h, bool isMasterNode, const AutoLinkConfig& config)
     baudSweep.configure(sc);
     hw.bind(this);
     Log::getLog().info(ALINK_TAG, "Initialized as %s. Reliable Mode: %s",
-                       isMaster ? "Master" : "Slave", cfg.reliableMode ? "ON" : "OFF");
+                       isMaster ? "Ping" : "Pong", cfg.reliableMode ? "ON" : "OFF");
     if (cfg.maxMsg > cfg.streamBufferSize) {
         Log::getLog().error(ALINK_TAG,
             "maxMsg (%u) > streamBufferSize (%u): large messages cannot be reassembled",
@@ -60,7 +60,7 @@ void ALink::begin() {
     // Log the full baud sweep config so connection issues are immediately visible.
     if (!cfg.allowedBauds.empty()) {
         Log::getLog().info(ALINK_TAG, "%s: %d bauds %lu..%lu, %d samples/baud, fastAck=%s",
-            isMaster ? "Master" : "Slave",
+            isMaster ? "Ping" : "Pong",
             (int)cfg.allowedBauds.size(),
             (unsigned long)cfg.allowedBauds.front(),
             (unsigned long)cfg.allowedBauds.back(),
@@ -87,10 +87,10 @@ void ALink::begin() {
         hw.unlock();
         hw.clearAppBuf();
         hw.setSpd(cfg.allowedBauds[spdI]);
-        Log::getLog().info(ALINK_TAG, "SWP slave testing baud[0]=%lu",
+        Log::getLog().info(ALINK_TAG, "SWP Pong testing baud[0]=%lu",
             (unsigned long)cfg.allowedBauds[0]);
-        // Slave sweep timer: fires every pingSamplesPerBaud*delayMs so the
-        // slave advances in lockstep with the master even when a baud is too
+        // Pong sweep timer: fires every pingSamplesPerBaud*delayMs so the
+        // Pong advances in lockstep with the Ping even when a baud is too
         // fast for the physical wiring and produces zero decodable PINGs.
         hw.startTimer(cfg.pingSamplesPerBaud * cfg.delayMs);
     }
@@ -424,11 +424,11 @@ void ALink::onRx(const uint8_t* data, int len) {
                         } else if (isMaster && cfg.fastBaudLock
                                    && payload != PING_CMD && payload != REQ_CMD
                                    && payload < (int)cfg.allowedBauds.size()) {
-                            // Fast-ack from the slave: it has enough
+                            // Fast-ack from the Pong: it has enough
                             // confidence at the current baud and is
                             // telling us to lock here. Same frame format
                             // as the existing LCK best-reply, so the
-                            // master just treats any in-range payload
+                            // Ping just treats any in-range payload
                             // (that's not PING/REQ) as a best-ack.
                             hw.setSpd(cfg.allowedBauds[payload]);
                             spdI = (int)payload;  // track the actual locked baud index
@@ -444,11 +444,11 @@ void ALink::onRx(const uint8_t* data, int len) {
                             baudSweep.score(spdI);
                             // Fast-ack path: if we've scored enough PINGs
                             // at the current baud to trust it, send a
-                            // best-ack immediately and lock. The master
+                            // best-ack immediately and lock. The Ping
                             // is at the same baud (lockstep), so it sees
                             // the ack and jumps to OK. Same one-frame
                             // format as the existing LCK best-reply, so
-                            // the master just treats any in-range payload
+                            // the Ping just treats any in-range payload
                             // in SWP the same way it does in LCK.
                             if (cfg.fastBaudLock && baudSweep.scoreAt(spdI) >= baudSweep.minHitsForReliable()) {
                                 int best = baudSweep.pickBest();
@@ -464,7 +464,7 @@ void ALink::onRx(const uint8_t* data, int len) {
                                 if (cfg.idleTimeoutMs > 0) hw.startTimer(okTickMs());
                             } else {
                                 // Reliability sweep: stay at this baud for
-                                // `pingSamplesPerBaud` PINGs so the slave
+                                // `pingSamplesPerBaud` PINGs so the Pong
                                 // can score the decode rate. Only advance
                                 // spdI and retune when we have a full sample.
                                 int samples = baudSweep.samplesPerBaud();
@@ -473,7 +473,7 @@ void ALink::onRx(const uint8_t* data, int len) {
                                 // confirm the physical layer is working there.
                                 if (baudSweep.scoreAt(spdI) == 1) {
                                     Log::getLog().info(ALINK_TAG,
-                                        "SWP slave: first PING at baud[%d]=%lu",
+                                        "SWP Pong: first PING at baud[%d]=%lu",
                                         spdI, (unsigned long)cfg.allowedBauds[spdI]);
                                 }
                                 if (++pingSample >= samples) {
@@ -481,7 +481,7 @@ void ALink::onRx(const uint8_t* data, int len) {
                                     spdI++;
                                     int next = (spdI < (int)cfg.allowedBauds.size()) ? spdI : 0;
                                     hw.setSpd(cfg.allowedBauds[next]);
-                                    // Reset the baud-window timer so the master
+                                    // Reset the baud-window timer so the Ping
                                     // gets a fresh window at the new baud.
                                     hw.startTimer(cfg.pingSamplesPerBaud * cfg.delayMs);
                                 }
@@ -529,19 +529,19 @@ void ALink::onRx(const uint8_t* data, int len) {
 
 // Reset all per-link state and retune to allowedBauds[0]. Idempotent.
 // Caller must hold the lock; it is held throughout (HAL calls never take it).
-// Master arms the sweep timer; slave waits passively. Counts as one
+// Ping arms the sweep timer; Pong waits passively. Counts as one
 // disconnect event for the lifetime error counter; use reset_unlocked()
 // from begin() to do the same work without counting.
 void ALink::dropLink_unlocked() {
     // Count exactly one event per OK -> SWP transition. While already in
     // SWP/LCK, additional onBreak() calls, threshold trips, and LCK timeouts
-    // are all part of the same recovery (e.g. a slave that emits multiple
+    // are all part of the same recovery (e.g. a Pong that emits multiple
     // BREAKs while rebooting) and must not inflate the count. The user's
-    // mental model: "one slave reset = one count, no matter how noisy the
+    // mental model: "one Pong reset = one count, no matter how noisy the
     // recovery was."
     if (state == State::OK) totalErrs++;
     changeState_unlocked(State::SWP);
-    // Sweep in array order: see begin()'s slave branch for the
+    // Sweep in array order: see begin()'s Pong branch for the
     // rationale. The lockstep is preserved.
     spdI = 0;
     pingSample = 0;
@@ -564,7 +564,7 @@ void ALink::dropLink_unlocked() {
 // Used by begin() to do the initial local reset on startup.
 void ALink::reset_unlocked() {
     changeState_unlocked(State::SWP);
-    // Sweep in array order: see begin()'s slave branch for the
+    // Sweep in array order: see begin()'s Pong branch for the
     // rationale. The lockstep is preserved.
     spdI = 0;
     rxIdx = 0;
@@ -614,7 +614,7 @@ void ALink::onTimer() {
     int curSpd = spdI;
 
     // OK: idle watchdog + keepalive, then re-arm the tick. The watchdog is
-    // how the master notices a silently dead slave (its RX pin just goes
+    // how the Ping notices a silently dead Pong (its RX pin just goes
     // quiet); the keepalive is what stops a healthy-but-quiet link from
     // tripping the peer's watchdog.
     if (s == State::OK) {
@@ -648,17 +648,17 @@ void ALink::onTimer() {
 
     if (s == State::SWP) {
         // Reliability sweep: send `pingSamplesPerBaud` PINGs at each
-        // baud in array order, so the slave can score decode rates.
-        // The master stays on the same baud for N consecutive timer
+        // baud in array order, so the Pong can score decode rates.
+        // The Ping stays on the same baud for N consecutive timer
         // ticks (driven by `pingSample`); only when the local count
-        // reaches samplesPerBaud does the master advance spdI and
-        // retune. Once we've covered the whole list without the slave
+        // reaches samplesPerBaud does the Ping advance spdI and
+        // retune. Once we've covered the whole list without the Pong
         // acking, fall through to LCK and use the legacy REQ_CMD path.
         if (isMaster && curSpd < (int)cfg.allowedBauds.size()) {
             // Log once at the start of each baud window so connection issues
             // are easy to spot in the serial monitor.
             if (pingSample == 0) {
-                Log::getLog().info(ALINK_TAG, "SWP master baud[%d]=%lu",
+                Log::getLog().info(ALINK_TAG, "SWP Ping baud[%d]=%lu",
                     curSpd, (unsigned long)cfg.allowedBauds[curSpd]);
             }
             sendFrame(PING_CMD);
@@ -693,9 +693,9 @@ void ALink::onTimer() {
                 hw.startTimer(cfg.delayMs);
             }
         } else if (!isMaster) {
-            // Slave sweep timer: one baud window (pingSamplesPerBaud * delayMs)
+            // Pong sweep timer: one baud window (pingSamplesPerBaud * delayMs)
             // has elapsed. If we didn't score enough PINGs to fast-ack, advance
-            // to the next baud so the slave stays in lockstep with the master
+            // to the next baud so the Pong stays in lockstep with the Ping
             // even when the current baud is too fast for the physical wiring.
             hw.lock();
             if (state == State::SWP) {
@@ -703,7 +703,7 @@ void ALink::onTimer() {
                 int needed = baudSweep.minHitsForReliable();
                 if (scored < needed) {
                     Log::getLog().info(ALINK_TAG,
-                        "SWP slave baud[%d]=%lu scored %d/%d (%d raw bytes rx), advancing",
+                        "SWP Pong baud[%d]=%lu scored %d/%d (%d raw bytes rx), advancing",
                         spdI,
                         (unsigned long)(spdI < (int)cfg.allowedBauds.size()
                                         ? cfg.allowedBauds[spdI] : 0),
@@ -719,7 +719,7 @@ void ALink::onTimer() {
                             if (baudSweep.scoreAt(i) > 0) { anyPinged = true; break; }
                         }
                         Log::getLog().info(ALINK_TAG,
-                            "SWP slave: full sweep done, restarting from baud[0]=%lu",
+                            "SWP Pong: full sweep done, restarting from baud[0]=%lu",
                             (unsigned long)cfg.allowedBauds[0]);
                         spdI = 0;
                         baudSweep.resetAll();  // fresh scores for the next sweep
@@ -730,13 +730,13 @@ void ALink::onTimer() {
                                 Log::getLog().error(ALINK_TAG,
                                     "WIRING CHECK (%d empty sweep(s)): "
                                     "0 raw bytes received at any baud. "
-                                    "The master's TX is not reaching this RX pin. "
-                                    "Required: master TX -> slave RX  AND  slave TX -> master RX "
+                                    "The Ping node's TX is not reaching this RX pin. "
+                                    "Required: Ping TX -> Pong RX  AND  Pong TX -> Ping RX "
                                     "(crossover — TX to RX, not TX to TX). "
                                     "Also check GND is shared. "
                                     "FireBeetle ESP32: GPIO16=D11, GPIO17=D10 on the header — "
-                                    "connect master D10(GPIO17,TX)->slave D11(GPIO16,RX) "
-                                    "and slave D10(GPIO17,TX)->master D11(GPIO16,RX).",
+                                    "connect Ping D10(GPIO17,TX)->Pong D11(GPIO16,RX) "
+                                    "and Pong D10(GPIO17,TX)->Ping D11(GPIO16,RX).",
                                     emptySweeps_);
                             }
                         } else {
@@ -744,7 +744,7 @@ void ALink::onTimer() {
                         }
                     }
                     pingSample = 0;
-                    Log::getLog().info(ALINK_TAG, "SWP slave testing baud[%d]=%lu",
+                    Log::getLog().info(ALINK_TAG, "SWP Pong testing baud[%d]=%lu",
                         spdI, (unsigned long)cfg.allowedBauds[spdI]);
                     hw.setSpd(cfg.allowedBauds[spdI]);
                 }
@@ -760,14 +760,14 @@ void ALink::onTimer() {
         hw.lock();
         lckRetries++;
         hw.unlock();
-        // If we've sent REQ too many times with no slave response, the peer
+        // If we've sent REQ too many times with no Pong response, the peer
         // is gone -- restart the sweep from scratch. The next sweep will
-        // either find a freshly-booted slave at 9600 or give up again.
+        // either find a freshly-booted Pong at 9600 or give up again.
         if (lckRetries > (int)cfg.allowedBauds.size() * 2) {
             Log::getLog().info(ALINK_TAG, "LCK timeout: no peer reply after %d REQs -> re-sweep",
                                lckRetries);
             hw.lock();
-            // No slave answered REQ -- either the peer is dead or its baud
+            // No Pong answered REQ -- either the peer is dead or its baud
             // drifted. One disconnect event.
             dropLink_unlocked();
             hw.unlock();
