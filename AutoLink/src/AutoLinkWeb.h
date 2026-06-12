@@ -89,6 +89,7 @@ private:
     AutoLink&          link_;
     uint16_t           port_      = 8765;
     bool               enabled_   = false;
+    bool               ntpSynced_ = false; // true once SNTP wall-clock is valid
 
     // Stats snapshot — written by 1 Hz timer, read by /stats handler.
     Snapshot           snap_      = {};
