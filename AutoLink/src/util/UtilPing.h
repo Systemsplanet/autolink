@@ -69,10 +69,12 @@ public:
             return;
         }
         if (!wasReady_) {
-            log_.debug("Ping", "link up  baud=%lu  seq=%lu",
-                (unsigned long)comm_.getCurrentBaud(), (unsigned long)msgSeq_);
+            log_.debug("Ping", "link up  baud=%lu  seq=%lu  settling %lu ms",
+                (unsigned long)comm_.getCurrentBaud(), (unsigned long)msgSeq_,
+                (unsigned long)SETTLE_MS);
             drainAndCompare_();   // drain anything queued during the gap
             comm_.blinkWait(4);
+            tReady_ = millis();
             wasReady_ = true;
         }
 
@@ -101,8 +103,11 @@ public:
             tStall_ = 0;   // echoes are flowing — reset the stall clock
         }
 
+        // Settle guard: don't send app data for SETTLE_MS after link-up.
+        // Gives Pong time to complete its own fast-ack before we flood the
+        // line with COBS frames that bury the sweep PING commands.
         int sentThisLoop = 0;
-        while (pendCount_ < WINDOW) {
+        if (millis() - tReady_ >= SETTLE_MS) while (pendCount_ < WINDOW) {
             int n = random(1, 1024);
             fill_(buf_, n);
             if (!comm_.send(buf_, n)) {
@@ -120,6 +125,9 @@ public:
         if (sentThisLoop > 0) {
             log_.debug("Ping", "sent %d msgs  pendCount=%d  seq=%lu",
                 sentThisLoop, pendCount_, (unsigned long)msgSeq_);
+        } else if (millis() - tReady_ < SETTLE_MS) {
+            log_.debug("Ping", "settling  %lu ms remaining",
+                (unsigned long)(SETTLE_MS - (millis() - tReady_)));
         }
 
         drainAndCompare_();
@@ -186,8 +194,13 @@ private:
     }
 
     // ── pipelined send state ──────────────────────────────────────────────
-    static constexpr int      WINDOW   = 8;      // max messages in flight at once
-    static constexpr uint32_t STALL_MS = 3000;   // ms of no echoes before FIFO reset
+    static constexpr int      WINDOW     = 8;      // max messages in flight at once
+    static constexpr uint32_t STALL_MS   = 3000;   // ms of no echoes before FIFO reset
+    // After locking, Pong needs one baud-window (pingSamplesPerBaud×delayMs = 200 ms)
+    // to complete its own fast-ack. If Ping starts sending app data immediately,
+    // the COBS frames flood the line and bury the PING command frames, so Pong
+    // never scores enough to lock. SETTLE_MS gives Pong that window.
+    static constexpr uint32_t SETTLE_MS  = 300;    // ms to wait before first app send
     struct Pending { int len; uint16_t crc; uint32_t seq; };
     Pending  pend_[WINDOW];    // FIFO ring of in-flight sends (len + crc + seq)
     int      pendHead_  = 0;   // index of oldest pending entry
@@ -195,6 +208,7 @@ private:
     int      pendCount_ = 0;   // number of entries currently in flight
     uint32_t msgSeq_    = 0;   // monotonically increasing send counter
     uint32_t tStall_    = 0;   // millis() when pipeline first went full with no drain
+    uint32_t tReady_    = 0;   // millis() when link last became ready
 };
 
 } // namespace autolink
