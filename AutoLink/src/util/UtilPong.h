@@ -54,7 +54,7 @@ public:
             } else {
                 log_.debug("Pong", "not ready");
             }
-            comm_.blinkWait(3, 100, 100, 2000);
+            comm_.blinkWait(3, 100, 100, 0);   // async — no blocking delay; prevents timer queue overflow
             wasReady_ = false;
             return;
         }
