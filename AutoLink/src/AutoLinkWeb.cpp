@@ -110,9 +110,9 @@ main{padding:14px;max-width:540px;margin:0 auto}
   </div>
   <div class="log" id="log"></div>
 </main>
-<div class="footer">AutoLink Web Monitor &#x2014; <span id="host"></span></div>
+<div class="footer"><span id="ver"></span> AutoLink Web Monitor &#x2014; <span id="host"></span></div>
 <script>
-var logPaused=false,lastSeq=0,fails=0,busy=false;
+var paused=false,lastSeq=0,fails=0,busy=false;
 document.getElementById('host').textContent=location.host;
 
 // Fetch with an AbortController timeout (ms). Prevents stalled requests from
@@ -135,14 +135,11 @@ function hide(id){document.getElementById(id).style.display='none';}
 function setPill(st){var p=document.getElementById('pill');p.className='pill '+st.toLowerCase();p.textContent=st;}
 
 function togglePause(){
-  logPaused=!logPaused;
+  paused=!paused;
   var b=document.getElementById('pbtn');
-  b.innerHTML=logPaused?'&#9654; Resume':'&#9646;&#9646; Pause';
-  b.className=logPaused?'btn on':'btn';
-  // Stats polling continues regardless — only log appending is paused.
-  // On resume, advance lastSeq so we only show new lines, not a flood
-  // of everything that arrived while paused.
-  if(!logPaused)poll();
+  b.innerHTML=paused?'&#9654; Resume':'&#9646;&#9646; Pause';
+  b.className=paused?'btn on':'btn';
+  if(!paused)poll();
 }
 
 function clearLog(){document.getElementById('log').innerHTML='';}
@@ -195,19 +192,20 @@ async function reboot(){
 }
 
 function appendLog(sev,seq,text){
-  // Always advance lastSeq so we don't re-fetch while paused.
-  if(seq+1>lastSeq)lastSeq=seq+1;
-  if(logPaused)return;
   var p=document.getElementById('log');
   var atEnd=p.scrollHeight-p.scrollTop<=p.clientHeight+12;
   var d=document.createElement('div');
   d.className=sev;d.textContent=text;p.appendChild(d);
-  while(p.children.length>100)p.removeChild(p.firstChild);
+  // Only trim when the log panel exceeds 10 KB of text to preserve history.
+  if(p.textContent.length>10000){
+    while(p.children.length>1&&p.textContent.length>8000)p.removeChild(p.firstChild);
+  }
   if(atEnd)p.scrollTop=p.scrollHeight;
+  if(seq+1>lastSeq)lastSeq=seq+1;
 }
 
 async function poll(){
-  if(busy)return;
+  if(paused||busy)return;
   busy=true;
   try{
     var r=await tfetch('/stats',null,2500);
@@ -232,6 +230,7 @@ async function poll(){
     }
     set('uptime','up '+hms(d.uptimeS));
     setPill(d.state);
+    if(d.version)document.getElementById('ver').textContent='v'+d.version;
     fails=0;hide('alert');
   }catch(e){if(++fails>=3)show('alert');}
   try{
@@ -243,7 +242,7 @@ async function poll(){
   busy=false;
 }
 
-document.addEventListener('visibilitychange',function(){if(!document.hidden)poll();});
+document.addEventListener('visibilitychange',function(){if(!document.hidden&&!paused)poll();});
 setInterval(poll,1000);
 poll();
 </script>
@@ -499,7 +498,7 @@ esp_err_t AutoLinkWeb::handleStats(httpd_req_t* req) {
         "\"txBps\":%lu,\"rxBps\":%lu,"
         "\"txTotal\":%llu,\"rxTotal\":%llu,"
         "\"rssi\":%d,\"freeHeap\":%lu,\"uptimeS\":%lu,"
-        "\"baudRate\":%lu}",
+        "\"baudRate\":%lu,\"version\":\"" AUTOLINK_VERSION "\"}",
         s.state,
         (unsigned long)s.errCount,
         (unsigned long long)s.errTotal,
