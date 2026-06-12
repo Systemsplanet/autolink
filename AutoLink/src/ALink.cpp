@@ -259,6 +259,14 @@ int ALink::writeLocked(const uint8_t* b, int len) {
     return offset;
 }
 
+void ALink::dropLink() {
+    hw.lock();
+    dropLink_unlocked();
+    bool needBreak = (state == State::SWP);   // dropLink_unlocked moves to SWP
+    hw.unlock();
+    if (needBreak) hw.sendBreak();   // wake the peer
+}
+
 void ALink::flush() { hw.flushTx(); }
 
 bool ALink::sendMsg(const uint8_t* b, int len) {
@@ -397,7 +405,11 @@ void ALink::onRx(const uint8_t* data, int len) {
                 int n = len - i;
                 int acc = hw.pushAppBuf(data + i, n);
                 rxBytes += acc;
-                if (acc < n && err_unlocked()) needSendBreak = true;
+                if (acc < n) {
+                    if (err_unlocked()) needSendBreak = true;
+                } else if (errs > 0) {
+                    errs = 0;   // clean accept -> consecutive-error run is broken
+                }
                 i = len;
             }
         }
@@ -591,6 +603,12 @@ bool ALink::onPayload(const uint8_t* b, int n) {
         // App buffer full: bytes lost, stream desynced. Count the loss.
         return err_unlocked();
     }
+    // A good frame proves the link is healthy. errThreshold counts
+    // *consecutive* failures, not lifetime ones -- a handful of CRC rejects
+    // scattered across hundreds of good frames is ordinary RF noise and must
+    // not drop a working link. Clear the counter so only a genuine run of
+    // back-to-back errors (a truly broken line) trips the threshold.
+    if (errs > 0) errs = 0;
     return false;
 }
 
