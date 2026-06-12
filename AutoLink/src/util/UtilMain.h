@@ -79,9 +79,6 @@ protected:
         } else {
             log_.debug("UtilMain", "WiFi disabled — skipping web monitor");
         }
-        // Log the version here — after mon_.begin() so the sink is registered
-        // and the line appears in the web log panel (after NTP sync line).
-        log_.info("AutoLink", "v" AUTOLINK_VERSION);
         comm_.blinkWait(2, 100, 100, 2000);
         log_.debug("UtilMain", "setupCommon complete");
     }
