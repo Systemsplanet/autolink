@@ -6,9 +6,9 @@
 // ----------------------------------------------------------------------------
 // UtilBaudSweep — auto-baud reliability scoring.
 //
-// The auto-baud handshake sends PING frames from the master at every
-// candidate baud in `allowedBauds`. The slave scores each decoded PING into
-// a per-baud bucket. At REQ time the slave picks the highest baud whose
+// The auto-baud handshake sends PING frames from the Ping at every
+// candidate baud in `allowedBauds`. The Pong scores each decoded PING into
+// a per-baud bucket. At REQ time the Pong picks the highest baud whose
 // success rate meets a threshold, instead of the old "any PING wins"
 // behavior that one missed PING could drop the link to a much slower rate.
 //
@@ -23,7 +23,7 @@ public:
     // Config — sweep parameters mirrored from AutoLinkConfig. Wired in via
     // configure() once the baud list size is known; not changed after that.
     struct Config {
-        int   pingSamplesPerBaud = 4;   // PINGs the master emits per baud
+        int   pingSamplesPerBaud = 4;   // PINGs the Ping emits per baud
         float minAcceptRate       = 0.5f; // min fraction of PINGs that must decode
                                           // at a baud for it to be considered reliable
         int   expectedSamples     = -1;  // if -1, configure() derives this from
@@ -44,7 +44,7 @@ public:
     // Mark a PING window as "we're done with this baud" -- resets the
     // running score for that index to 0 so a fresh sweep starts clean. Not
     // needed for the simple "send N PINGs, pick at end" model, but useful
-    // if the slave ever wants to re-evaluate mid-sweep.
+    // if the Pong ever wants to re-evaluate mid-sweep.
     void resetIndex(int idx) { if (idx >= 0 && idx < (int)scores_.size()) scores_[idx] = 0; }
 
     // Reset the whole sweep (call on link drop / start of new negotiation).
@@ -55,10 +55,10 @@ public:
     // is expected to fall back to baud[0] in that case.
     int pickBest() const;
 
-    // How many PINGs the master should send at each baud.
+    // How many PINGs the Ping should send at each baud.
     int samplesPerBaud() const { return cfg_.pingSamplesPerBaud; }
 
-    // The minimum number of decodes at a baud before the slave considers
+    // The minimum number of decodes at a baud before the Pong considers
     // it "reliable" and sends the fast-ack. Mirrors the threshold used
     // by pickBest(); exposed so the SWP handler can decide mid-sweep
     // whether to keep going or commit to the current baud.
