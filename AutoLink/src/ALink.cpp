@@ -729,6 +729,8 @@ void ALink::onTimer() {
                     hw.setSpd(cfg.allowedBauds[curSpd]);
                     hw.startTimer(cfg.delayMs);
                 } else {
+                    Log::getLog().debug(ALINK_TAG,
+                        "SWP Ping: full sweep done, no fast-ack -> LCK");
                     hw.lock();
                     changeState_unlocked(State::LCK);
                     lckRetries = 0;
