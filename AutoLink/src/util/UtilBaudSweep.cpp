@@ -17,7 +17,7 @@ void UtilBaudSweep::resetAll() {
 int UtilBaudSweep::pickBest() const {
     // The reliability sweep is "send N PINGs at each baud, pick the highest
     // baud whose decode rate meets the threshold." Without this, a single
-    // missed PING would drop the slave to a slower baud permanently.
+    // missed PING would drop the Pong to a slower baud permanently.
     //
     // The pick is conservative: a baud is only "reliable" if at least
     // minAcceptRate * expectedSamples PINGs decoded. If the top baud
