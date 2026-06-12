@@ -4,6 +4,23 @@ All releases, most recent first.
 
 ---
 
+## v3.1.5
+
++ **Log fix.** v3.1.4 introduced two undeclared JS variables (`logPaused`, `logFullOpen`) that caused a `ReferenceError` on page load, killing the entire script and breaking the log. The `var` declaration line was never updated from `var paused=false,...` to include the new variables, and `togglePause` still referenced the old `paused` name. Fixed.
+
+---
+
+## v3.1.4
+
++ **Log fill bar.** A 5px green progress strip sits below the log panel showing how full it is relative to the 10 KB trim threshold. Fills left-to-right from green to grey.
++ **Maximize / minimize log.** A ⛶ button next to Pause opens the log fullscreen as an overlay with its own toolbar (Clear, Copy, Pause, Close). The fullscreen panel mirrors the inline log and stays in sync. Close (✕) returns to normal view.
++ **Reboot clears log.** The reboot button calls `clearLog()` and resets `lastSeq=0` so the panel shows only lines from the new boot session.
++ **Version in footer.** `vX.Y.Z` is served in the `/stats` JSON and shown in the footer, updated each poll.
++ **Pause pauses log only.** Stats, gauges, uptime, RSSI, and heap keep updating. `lastSeq` advances during pause so resume shows only new lines.
++ **Baud shows sweep state.** `SWP` → `115200 ⇄ sweeping`; `LCK` → `115200 ⇄ locking`; `OK` → `115200 baud`.
+
+---
+
 ## v3.1.3
 
 + **Log truncation fixed.** The web log DOM was trimmed at 100 entries regardless of size. Changed to size-based trimming: the log is only trimmed when it exceeds 10 KB of text content, preserving full session history for analysis. The server-side ring was also increased from 48 to 200 entries so recently connected clients see more history.
