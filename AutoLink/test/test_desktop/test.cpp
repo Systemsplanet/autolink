@@ -1296,6 +1296,45 @@ void run_test_app_buffer_overflow_errs() {
     std::cout << "PASS" << std::endl;
 }
 
+// Regression: a good frame must reset the consecutive-error counter, so
+// occasional CRC rejects scattered between healthy traffic never drop a
+// working link. Only a genuine *run* of back-to-back errors should trip the
+// threshold. (Before this fix, errs was a lifetime counter: 16 perfect
+// echoes followed by the Nth scattered reject killed a fine link, and the
+// resulting BREAK storm made the two nodes thrash in SWP forever.)
+void run_test_scattered_errors_dont_drop() {
+    std::cout << "\n=== Test: Scattered Errors Don't Drop a Working Link ===" << std::endl;
+    AutoLinkConfig cfg; cfg.reliableMode = true; cfg.errThreshold = 5;
+    cfg.streamBufferSize = 8192;
+    MockHal mHal, sHal;
+    ALink a(mHal, true, cfg);   // both start in OK (constructor default)
+    ALink b(sHal, false, cfg);
+
+    // One corrupt COBS frame: a lone 0x00 delimiter pair wrapping a single
+    // byte decodes to a payload whose CRC can't match -> exactly one onFrameError.
+    uint8_t badFrame[] = {0x00, 0x02, 0xFF, 0x00};
+    uint8_t msg[] = {0x11, 0x22, 0x33, 0x44};
+
+    // Interleave: bad, good, bad, good... 20 rejects total -- four times the
+    // threshold -- but never two in a row. The link must stay up the whole time.
+    for (int k = 0; k < 20; k++) {
+        b.onRx(badFrame, sizeof(badFrame));     // one error
+        assert(b.getState() == State::OK);      // single error never drops
+        assert(a.sendMsg(msg, sizeof(msg)));
+        pipe_data(mHal, sHal);                  // one good frame -> errs back to 0
+        assert(b.getState() == State::OK);
+        uint8_t rx[16];
+        assert(b.recvMsg(rx, sizeof(rx)) == (int)sizeof(msg));
+        assert(b.getErrCount() == 0);           // good frame cleared the counter
+    }
+
+    // Now a genuine bad line: errThreshold+1 corrupt frames back to back with
+    // no good traffic between them. This MUST drop the link.
+    for (int k = 0; k <= (int)cfg.errThreshold; k++) b.onRx(badFrame, sizeof(badFrame));
+    assert(b.getState() == State::SWP);
+    std::cout << "PASS" << std::endl;
+}
+
 // After the err threshold trips mid-event, the rest of the same UART event
 // must be handed to the command parser, not consumed as OK-mode frame bytes.
 void run_test_parser_yields_after_drop() {
@@ -1357,6 +1396,7 @@ int main() {
     run_test_keepalive();
     run_test_lck_timeout();
     run_test_app_buffer_overflow_errs();
+    run_test_scattered_errors_dont_drop();
     run_test_parser_yields_after_drop();
     std::cout << "\n=== All Tests Completed Successfully ===" << std::endl;
     return 0;
