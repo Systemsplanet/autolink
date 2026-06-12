@@ -36,7 +36,7 @@ namespace autolink {
 
 // Library version — keep in sync with library.properties. Logged at INFO
 // level by begin() so the running firmware version is always visible.
-#define AUTOLINK_VERSION "3.0.12"
+#define AUTOLINK_VERSION "3.0.16"
 
 // ----------------------------------------------------------------------------
 // AutoLink — the one-object public facade: construct as a global, begin(),
@@ -74,7 +74,6 @@ public:
     }
 
     void begin() {
-        Log::getLog().info("AutoLink", "v" AUTOLINK_VERSION);
         hal->begin();
     }
     // Flash the status LED n times.
