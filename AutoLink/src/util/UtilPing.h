@@ -110,12 +110,13 @@ private:
 
             if (got != p.len) {
                 log_.error("Ping",
-                    "MISMATCH seq=%lu  sent=%d bytes  echoed=%d bytes",
-                    (unsigned long)p.seq, p.len, got);
+                    "MISMATCH seq=%lu  sent=%d bytes  echoed=%d bytes  "
+                    "pendCount=%d (length mismatch often = FIFO desync, not corruption)",
+                    (unsigned long)p.seq, p.len, got, pendCount_);
             } else if (UtilCrc::crc16(buf_, got) != p.crc) {
                 log_.error("Ping",
-                    "MISMATCH seq=%lu  %d bytes, CRC differs (corruption in echo)",
-                    (unsigned long)p.seq, got);
+                    "MISMATCH seq=%lu  %d bytes, CRC differs  pendCount=%d",
+                    (unsigned long)p.seq, got, pendCount_);
             } else {
                 log_.debug("Ping", "echo ok seq=%lu  %d bytes",
                            (unsigned long)p.seq, got);
@@ -126,7 +127,18 @@ private:
         if (got < 0) {
             // CRC reject — bad message drained and counted. Drop the oldest
             // pending entry so the FIFO stays aligned with the echo stream.
-            log_.error("Ping", "recv rejected (CRC/desync)");
+            //
+            // DIAGNOSTIC (v3.0.9): a single reject does NOT reliably map to
+            // one echo — the link layer may have dropped, merged, or split
+            // frames. Dropping exactly one pending entry here can leave the
+            // FIFO misaligned with the real echo stream, which then makes
+            // every following good echo compare against the wrong entry and
+            // count as a fresh error. Log the FIFO depth so the cascade is
+            // visible: a burst of rejects with shrinking pendCount is the
+            // desync signature.
+            log_.error("Ping",
+                "recv rejected (CRC/desync)  pendCount=%d head=%d tail=%d",
+                pendCount_, pendHead_, pendTail_);
             if (pendCount_ > 0) {
                 pendHead_ = (pendHead_ + 1) % WINDOW;
                 pendCount_--;
