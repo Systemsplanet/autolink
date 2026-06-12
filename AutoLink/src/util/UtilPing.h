@@ -48,20 +48,29 @@ public:
     UtilPing& operator=(const UtilPing&) = delete;
 
     void setup() {
+        log_.debug("Ping", "setup: seeding RNG, calling setupCommon");
         randomSeed(esp_random());
         setupCommon();
+        log_.debug("Ping", "setup complete  WINDOW=%d  BUF_SIZE=%d", WINDOW, BUF_SIZE);
     }
 
     void loop() {
         if (!comm_.ready()) {
-            log_.debug("Ping", "not ready");
+            if (wasReady_) {
+                // Log once on transition, not every loop iteration
+                log_.debug("Ping", "link lost  pendCount was %d  seq=%lu",
+                    pendCount_, (unsigned long)msgSeq_);
+            } else {
+                log_.debug("Ping", "not ready");
+            }
             comm_.blinkWait(3, 100, 100, 2000);
             wasReady_ = false;
             pendHead_ = pendTail_ = pendCount_ = 0;  // link drop voids in-flight compares
             return;
         }
         if (!wasReady_) {
-            log_.debug("Ping", "ready");
+            log_.debug("Ping", "link up  baud=%lu  seq=%lu",
+                (unsigned long)comm_.getCurrentBaud(), (unsigned long)msgSeq_);
             drainAndCompare_();   // drain anything queued during the gap
             comm_.blinkWait(4);
             wasReady_ = true;
@@ -72,15 +81,45 @@ public:
         // direction idle while the other transmits, capping throughput at ~half
         // the line rate. Filling a window lets Pong's echoes flow back while
         // we're still sending, roughly doubling effective throughput.
+        //
+        // Stall detection: if the pipeline is full and no echoes have arrived
+        // for STALL_MS, the FIFO is desynchronised and Ping has gone silent.
+        // Reset pendCount so sending resumes; the link itself stays up.
+        uint32_t now = millis();
+        if (pendCount_ == WINDOW) {
+            if (tStall_ == 0) tStall_ = now;   // start the stall clock
+            if (now - tStall_ > STALL_MS) {
+                log_.error("Ping",
+                    "pipeline stall — WINDOW=%d full for %lu ms, no echoes."
+                    "  Resetting FIFO. seq=%lu  head=%d tail=%d",
+                    WINDOW, (unsigned long)(now - tStall_),
+                    (unsigned long)msgSeq_, pendHead_, pendTail_);
+                pendHead_ = pendTail_ = pendCount_ = 0;
+                tStall_ = 0;
+            }
+        } else {
+            tStall_ = 0;   // echoes are flowing — reset the stall clock
+        }
+
+        int sentThisLoop = 0;
         while (pendCount_ < WINDOW) {
             int n = random(1, 1024);
             fill_(buf_, n);
-            if (!comm_.send(buf_, n)) break;   // link busy/dropped — try again next loop
+            if (!comm_.send(buf_, n)) {
+                log_.debug("Ping",
+                    "send failed (link busy/dropped)  n=%d  pendCount=%d", n, pendCount_);
+                break;
+            }
             pend_[pendTail_].len = n;
             pend_[pendTail_].crc = UtilCrc::crc16(buf_, n);
             pend_[pendTail_].seq = msgSeq_++;
             pendTail_ = (pendTail_ + 1) % WINDOW;
             pendCount_++;
+            sentThisLoop++;
+        }
+        if (sentThisLoop > 0) {
+            log_.debug("Ping", "sent %d msgs  pendCount=%d  seq=%lu",
+                sentThisLoop, pendCount_, (unsigned long)msgSeq_);
         }
 
         drainAndCompare_();
@@ -147,13 +186,15 @@ private:
     }
 
     // ── pipelined send state ──────────────────────────────────────────────
-    static constexpr int WINDOW = 8;   // max messages in flight at once
+    static constexpr int      WINDOW   = 8;      // max messages in flight at once
+    static constexpr uint32_t STALL_MS = 3000;   // ms of no echoes before FIFO reset
     struct Pending { int len; uint16_t crc; uint32_t seq; };
     Pending  pend_[WINDOW];    // FIFO ring of in-flight sends (len + crc + seq)
     int      pendHead_  = 0;   // index of oldest pending entry
     int      pendTail_  = 0;   // next free slot
     int      pendCount_ = 0;   // number of entries currently in flight
     uint32_t msgSeq_    = 0;   // monotonically increasing send counter
+    uint32_t tStall_    = 0;   // millis() when pipeline first went full with no drain
 };
 
 } // namespace autolink
