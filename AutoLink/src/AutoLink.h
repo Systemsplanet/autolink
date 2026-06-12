@@ -36,7 +36,7 @@ namespace autolink {
 
 // Library version — keep in sync with library.properties. Logged at INFO
 // level by begin() so the running firmware version is always visible.
-#define AUTOLINK_VERSION "3.0.16"
+#define AUTOLINK_VERSION "3.1.0"
 
 // ----------------------------------------------------------------------------
 // AutoLink — the one-object public facade: construct as a global, begin(),
@@ -63,10 +63,11 @@ public:
     {
         blinkHal.bind(&blinker);
 
-        // Auto-size the reassembly buffer to two full messages so RX keeps
-        // flowing while the app is briefly busy. The user never has to reason
-        // about the maxMsg/streamBufferSize relationship.
-        size_t need = 2 * (cfg.maxMsg + MSG_HDR);
+        // Auto-size the reassembly buffer to hold 10 full messages.
+        // UtilPing pipelines up to WINDOW=8 messages in flight; all their
+        // echoes can arrive before the app drains them, so we need room
+        // for at least WINDOW messages plus headroom. 10x is the safe default.
+        size_t need = 10 * (cfg.maxMsg + MSG_HDR);
         if (cfg.streamBufferSize < need) cfg.streamBufferSize = need;
 
         hal = std::make_unique<EspHal>(u_num, rx_pin, tx_pin, cfg);
