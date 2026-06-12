@@ -36,7 +36,7 @@ namespace autolink {
 
 // Library version — keep in sync with library.properties. Logged at INFO
 // level by begin() so the running firmware version is always visible.
-#define AUTOLINK_VERSION "3.1.5"
+#define AUTOLINK_VERSION "3.2.0"
 
 // ----------------------------------------------------------------------------
 // AutoLink — the one-object public facade: construct as a global, begin(),
@@ -95,6 +95,7 @@ public:
     int  send(const uint8_t* b, int len) { return link->sendMsg(b, len) ? len : 0; }
     int  recv(uint8_t* b, int max_len)   { return link->recvMsg(b, max_len); }
     bool ready() const { return link->getState() == State::OK; }
+    void dropLink() { link->dropLink(); }  // send BREAK + restart sweep (use from app to recover from SWP stall)
 
     // Optional: app-stream throughput + lifetime disconnect count.
     //
