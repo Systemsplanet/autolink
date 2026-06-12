@@ -177,6 +177,7 @@ public:
     // reliableMode for integrity. sendMsg returns true if fully queued.
     // recvMsg returns >0 = message length, 0 = nothing complete yet, -1 = error/drop.
     bool sendMsg(const uint8_t* b, int len);
+    void dropLink();   // send BREAK and transition to SWP (restarts sweep from app code)
     int  recvMsg(uint8_t* b, int max_len);
 
     // Throughput. Counters are app-stream bytes since the last reset.
