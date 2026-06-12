@@ -4,59 +4,18 @@ All releases, most recent first.
 
 ---
 
-## v3.1.0
+## v3.1.3
 
-First release with a stable bidirectional link. The core throughput demonstration is working.
-
-+ **FIFO pipeline restored with desync safety.** The 8-message pipeline is retained for ~2× throughput. Four safety fixes eliminate the desync: (1) any length or CRC mismatch now calls `resetFifo_()` and stops processing further echoes that loop, rather than advancing the FIFO by one and comparing subsequent echoes against the wrong slot; (2) a link-layer CRC reject now calls `resetFifo_()` rather than blindly dropping one entry; (3) TX and RX use separate buffers (`sendBuf_` / `recvBuf_`) so `recv()` can never overwrite a payload whose CRC is still pending; (4) on link-up, the receive buffer is fully drained before any new sends so stale echoes from the previous session never corrupt the fresh FIFO.
-+ **Pause button pauses log only.** Stats, gauges, uptime, RSSI, and heap continue updating while the log is paused. `lastSeq` still advances during pause so resuming shows only new lines.
-+ **Baud display shows sweep state.** During `SWP` the baud field shows the baud currently being tested with a `⇄ sweeping` suffix; during `LCK` it shows `⇄ locking`; in `OK` it shows the locked baud cleanly.
++ **Log truncation fixed.** The web log DOM was trimmed at 100 entries regardless of size. Changed to size-based trimming: the log is only trimmed when it exceeds 10 KB of text content, preserving full session history for analysis. The server-side ring was also increased from 48 to 200 entries so recently connected clients see more history.
 
 ---
 
-## v3.0.17
+## v3.1.2
 
-+ **Stream buffer overflow fixed.** `AutoLink` auto-sized the reassembly buffer to `2 × (maxMsg + MSG_HDR) = ~2 KB`. With `UtilPing`'s 8-message pipeline, all 8 echoes can arrive before `drainAndCompare_()` drains them — ~8 KB of payload. Changed auto-size multiplier from 2× to 10× (`~10 KB`). The overflow was causing `onPayload: app buffer overflow` errors, which tripped the error threshold and dropped the link immediately after the settle period.
-+ **Not-ready `blinkWait` delay removed.** Both `UtilPing` and `UtilPong` called `blinkWait(3, 100, 100, 2000)` in their not-ready loop — blocking `loop()` for 2600 ms on every iteration. During this block, the FreeRTOS sweep timer was firing every 50 ms and its command queue (depth 10) overflowed after 500 ms, causing `xTimerStart` to silently fail. The sweep would send 4 PINGs for baud[0], advance to baud[1], then the queue backed up and the timer stopped — Ping got stuck in SWP for 30+ seconds. Fixed by switching to async blink (`delay=0`).
-+ **`SWP Ping: full sweep done -> LCK` debug line** added so the sweep-to-LCK transition is visible in the log.
-
----
-
-## v3.0.16
-
-Debug logging pass over `ALink.cpp` — all previously silent decision points now emit `[D]` lines:
-
-+ **Command frame CRC fail** — when a 4-byte `AA 55 cmd crc` frame arrives with a bad CRC (noise or baud mismatch), logs the raw bytes and the expected CRC.
-+ **PING decoded by Pong** — every successfully decoded PING now logs `baud[N]=X score=M/K` so the running score is visible.
-+ **Pong fast-ack decision** — logs score, threshold, and chosen baud index before sending the ack frame.
-+ **Ping fast-ack received** — logs the payload baud index and current `spdI` so it's clear which baud Pong selected.
-+ **SWP Ping per-sample** — every PING sent now logs sample number (e.g. `sample=2/4`), not just the first of each window.
-+ **LCK REQ received by Pong** — logs the chosen best baud before sending the reply.
-+ **`recvMsg` errors** — garbage length, oversized message, and CRC16 mismatch all now log specific values.
-+ **`recvMsg` success** — logs byte count on every successful delivery.
-+ **`onPayload` app-buffer overflow** — logs bytes lost.
-+ **`onFrameError`** — logs the per-frame CRC8/COBS rejection with running error count.
-+ **Keepalive TX** — logs idle-RX age and limit each time a keepalive `0x00` is sent.
-
----
-
-## v3.0.15
-
-+ **Link-up settle delay in `UtilPing` (the connection root cause).** After Ping locks via fast-ack and transitions to OK, it was immediately filling the 8-message pipeline with random app data. At 115200 baud this floods the line with ~2300 bytes in the 200 ms window Pong needs to complete its own lock. Pong's sweep parser sees raw COBS frames instead of `0xAA 0x55 PING_CMD CRC8` command frames and scores 0/2 PINGs — so it never fast-acks. A 300 ms settle guard (`SETTLE_MS`) was added: after link-up, `UtilPing` withholds app sends for 300 ms, giving Pong a clean window to score PINGs and complete its lock. The settle period is logged at DEBUG as `settling N ms remaining`.
-
----
-
-## v3.0.14
-
-+ **Version logged after NTP sync.** `AutoLink: v3.0.14` is now emitted from `UtilMain::setupCommon()` after `mon_.begin()` returns (which includes WiFi connect + NTP sync). This means the version line appears in the web log panel, immediately after the `NTP synced:` line. On no-WiFi builds it appears at the same point in the serial log. The version log was removed from `AutoLink::begin()` to avoid a duplicate.
-+ **`rx=0 B/sec` investigated — `rxBytes` is correct.** `rxBytes` is incremented in `onPayload()` (called by `UtilFrameRx` under the lock) for every successfully decoded reliable-mode frame. The persistent `rx=0` in logs reflects a genuine hardware issue: Pong's echoes are not reaching Ping's RX pin. The stat itself is not broken.
-
----
-
-## v3.0.13
-
-+ **`idleTimeoutMs` default increased from 3 s to 10 s.** The 3-second idle watchdog was firing before Pong had time to boot, connect to WiFi (NTP sync adds several seconds), and respond. Ping would fill its 8-message pipeline, get no echoes back within 3 s, drop the link, re-sweep — and miss Pong's response entirely. 10 s comfortably covers the worst-case startup time.
-+ **SWP timer stall after error-threshold drop identified.** After `Error threshold exceeded` drops the link to SWP, Ping sends one PING at baud[0] then stops sweeping for 2+ minutes. Root cause appears to be a FreeRTOS timer command queue issue when `xTimerStart` is called from a high-priority context immediately after `uart_write_bytes_with_break`. Under investigation for 3.0.14.
++ **Reboot clears log.** The reboot button now calls `clearLog()` and resets `lastSeq=0` before sending the reboot command, so the log panel shows only lines from the new boot session.
++ **Version shown in web GUI footer.** Version is added to the `/stats` JSON and displayed as `vX.Y.Z` in the footer. Updates on each poll.
++ **Pause only pauses log.** Stats, gauges, uptime, RSSI, and heap continue updating. `lastSeq` advances during pause so resume shows only new lines.
++ **Baud shows sweep/locking state.** `SWP` → `115200 ⇄ sweeping`; `LCK` → `115200 ⇄ locking`; `OK` → `115200 baud`.
 
 ---
 
