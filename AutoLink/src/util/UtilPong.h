@@ -51,16 +51,25 @@ public:
         if (!comm_.ready()) {
             if (wasReady_) {
                 log_.debug("Pong", "link lost  echoes_sent=%lu", (unsigned long)echoCount_);
+                wasReady_ = false;
+                tNotReady_ = millis();   // start rate limiter
             } else {
-                log_.debug("Pong", "not ready");
+                uint32_t now = millis();
+                if (now - tNotReady_ >= 1000) {
+                    log_.debug("Pong", "not ready");
+                    tNotReady_ = now;
+                }
             }
-            comm_.blinkWait(3, 100, 100, 2000);
-            wasReady_ = false;
+            comm_.blinkWait(3, 100, 100, 0);
             return;
         }
         if (!wasReady_) {
             log_.debug("Pong", "link up  baud=%lu",
                 (unsigned long)comm_.getCurrentBaud());
+            // Drain any stale bytes from the RX buffer that accumulated
+            // during SWP. Without this, the COBS frame parser starts
+            // mid-frame and rejects every valid PING from Ping.
+            { uint8_t tmp[128]; while (comm_.recv(tmp, sizeof tmp) > 0) {} }
             comm_.blinkWait(4, 100, 100, 2000);
             wasReady_ = true;
         }
@@ -93,6 +102,7 @@ public:
     }
 private:
     uint64_t echoCount_ = 0;   // lifetime echo counter for debug logging
+    uint32_t tNotReady_ = 0;   // millis() of last not-ready log (rate limiter)
 };
 
 } // namespace autolink
