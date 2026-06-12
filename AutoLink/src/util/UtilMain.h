@@ -66,10 +66,21 @@ protected:
         esp_log_level_set("*", ESP_LOG_VERBOSE);
         log_.setLevel(Log::DEBUG);
         Serial.begin(debugBaud_);
+        log_.debug("UtilMain", "setupCommon: debug baud=%lu  role=%s  WiFi=%s",
+            (unsigned long)debugBaud_,
+            ssid_ ? "Ping+Web" : "Ping",   // overridden by subclass tag in practice
+            ssid_ ? ssid_ : "disabled");
         comm_.blinkWait(1, 100, 100, 2000);
+        log_.debug("UtilMain", "calling comm_.begin()");
         comm_.begin();
-        if (ssid_) mon_.begin(ssid_, password_, webPort_);
+        if (ssid_) {
+            log_.debug("UtilMain", "starting web monitor (port %u)", (unsigned)webPort_);
+            mon_.begin(ssid_, password_, webPort_);
+        } else {
+            log_.debug("UtilMain", "WiFi disabled — skipping web monitor");
+        }
         comm_.blinkWait(2, 100, 100, 2000);
+        log_.debug("UtilMain", "setupCommon complete");
     }
 
     // Emit a throughput line at most once every 5 seconds.
