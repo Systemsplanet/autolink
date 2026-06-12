@@ -52,6 +52,13 @@ class EspHal : public ILink {
     static void uart_event_task(void *pvParameters) {
         EspHal* hal = (EspHal*)pvParameters;
         uart_event_t event;
+        // Diagnostic: confirm the task is pinned to the intended core.
+        // Before v3.0.9 this ran with no affinity at priority 12 and could
+        // land on core 0, starving its idle task and tripping the WDT.
+        Log::getLog().info(HAL_TAG,
+            "uart_event_task running on core %d, priority %u",
+            xPortGetCoreID(),
+            (unsigned)uxTaskPriorityGet(NULL));
         // Heap scratch buffer sized to the per-event read cap. Allocated once
         // for the task's lifetime; alloca here would overflow the 4 KB stack
         // for large rxBufferSize configs.
@@ -165,7 +172,12 @@ public:
         // which floods the event queue and can hang the system.
         gpio_set_pull_mode((gpio_num_t)rx_pin, GPIO_PULLUP_ONLY);
         
-        if (xTaskCreate(uart_event_task, "uart_ev_task", 4096, this, 12, &task_handle) != pdPASS) {
+        // Pin to core 1 (same as Arduino loop()) so core 0's idle task
+        // always runs freely. Priority 5 is well above loop() (1) but
+        // leaves headroom for system tasks; priority 12 was starving the
+        // idle task on core 0 and triggering the Task Watchdog (~20 s).
+        if (xTaskCreatePinnedToCore(uart_event_task, "uart_ev_task", 4096,
+                                    this, 5, &task_handle, 1) != pdPASS) {
             Log::getLog().error(HAL_TAG, "Failed to create UART event task");
             uart_driver_delete(uart_num);
             cleanup_resources();
