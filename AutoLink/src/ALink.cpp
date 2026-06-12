@@ -296,9 +296,9 @@ int ALink::recvMsg(uint8_t* out, int max_len) {
                      ((uint32_t)h[2] << 16) | ((uint32_t)h[3] << 24);
         rxMsgCrc = (uint16_t)h[4] | ((uint16_t)h[5] << 8);
         if (L == 0 || L > cfg.maxMsg) {
-            Log::getLog().error(ALINK_TAG,
-                "recvMsg: garbage length %lu (maxMsg=%u) — stream desynced, flushing",
-                (unsigned long)L, (unsigned)cfg.maxMsg);
+            // Garbage length: stream is desynced. Flush and signal an error so
+            // the link can drop and re-negotiate. err() takes the lock itself,
+            // so release first.
             hw.clearAppBuf();
             rxMsgLen = -1;
             hw.unlock();
@@ -315,9 +315,7 @@ int ALink::recvMsg(uint8_t* out, int max_len) {
     rxMsgLen = -1;
 
     if (len > max_len) {
-        Log::getLog().error(ALINK_TAG,
-            "recvMsg: message %d B > caller buffer %d B — draining and erroring",
-            len, max_len);
+        // Caller's buffer is too small: drain to stay in sync, report error.
         uint8_t sink[256];
         int left = len;
         while (left > 0) left -= readStream(sink, std::min(left, (int)sizeof(sink)));
@@ -327,16 +325,9 @@ int ALink::recvMsg(uint8_t* out, int max_len) {
     }
 
     readStream(out, len);
-    uint16_t gotCrc = UtilCrc::crc16(out, len);
-    bool ok = (gotCrc == expectedCrc);
+    bool ok = (UtilCrc::crc16(out, len) == expectedCrc);
     hw.unlock();
-    if (!ok) {
-        Log::getLog().error(ALINK_TAG,
-            "recvMsg: CRC16 mismatch  len=%d  expected=0x%04X  got=0x%04X",
-            len, (unsigned)expectedCrc, (unsigned)gotCrc);
-        err(); return -1;
-    }
-    Log::getLog().debug(ALINK_TAG, "recvMsg: delivered %d bytes ok", len);
+    if (!ok) { err(); return -1; }
     return len;
 }
 
@@ -418,16 +409,7 @@ void ALink::onRx(const uint8_t* data, int len) {
 
             if (rxIdx == 4) {
                 rxIdx = 0;
-                if (UtilCrc::crc8(rxBuf, 3) != rxBuf[3]) {
-                    // Bad CRC on a 4-byte command frame — noise or mismatched baud.
-                    // Log payload bytes so we can see what arrived.
-                    Log::getLog().debug(ALINK_TAG,
-                        "cmd CRC fail  state=%s  bytes=%02X %02X %02X %02X  "
-                        "expected_crc=%02X",
-                        StateToStr(state),
-                        rxBuf[0], rxBuf[1], rxBuf[2], rxBuf[3],
-                        UtilCrc::crc8(rxBuf, 3));
-                } else {
+                if (UtilCrc::crc8(rxBuf, 3) == rxBuf[3]) {
                     uint8_t payload = rxBuf[2];
                     if (cur_state == State::SWP) {
                         if (!isMaster && payload == REQ_CMD) {
@@ -444,13 +426,10 @@ void ALink::onRx(const uint8_t* data, int len) {
                                    && payload < (int)cfg.allowedBauds.size()) {
                             // Fast-ack from the Pong: it has enough
                             // confidence at the current baud and is
-                            // telling us to lock here.
-                            Log::getLog().debug(ALINK_TAG,
-                                "SWP Ping: fast-ack received  payload=baud[%d]=%lu"
-                                "  curSpdI=%d  locking",
-                                (int)payload,
-                                (unsigned long)cfg.allowedBauds[payload],
-                                spdI);
+                            // telling us to lock here. Same frame format
+                            // as the existing LCK best-reply, so the
+                            // Ping just treats any in-range payload
+                            // (that's not PING/REQ) as a best-ack.
                             hw.setSpd(cfg.allowedBauds[payload]);
                             spdI = (int)payload;  // track the actual locked baud index
                             errs = 0;
@@ -463,11 +442,6 @@ void ALink::onRx(const uint8_t* data, int len) {
                             hw.stopTimer();
                         } else if (payload == PING_CMD && spdI < (int)cfg.allowedBauds.size()) {
                             baudSweep.score(spdI);
-                            Log::getLog().debug(ALINK_TAG,
-                                "SWP Pong: PING decoded  baud[%d]=%lu  score=%d/%d",
-                                spdI, (unsigned long)cfg.allowedBauds[spdI],
-                                baudSweep.scoreAt(spdI),
-                                baudSweep.minHitsForReliable());
                             // Fast-ack path: if we've scored enough PINGs
                             // at the current baud to trust it, send a
                             // best-ack immediately and lock. The Ping
@@ -479,13 +453,6 @@ void ALink::onRx(const uint8_t* data, int len) {
                             if (cfg.fastBaudLock && baudSweep.scoreAt(spdI) >= baudSweep.minHitsForReliable()) {
                                 int best = baudSweep.pickBest();
                                 if (best < 0) best = spdI;
-                                Log::getLog().debug(ALINK_TAG,
-                                    "SWP Pong: fast-ack  score=%d/%d  best=baud[%d]=%lu  "
-                                    "sending ack frame",
-                                    baudSweep.scoreAt(spdI),
-                                    baudSweep.minHitsForReliable(),
-                                    best,
-                                    (unsigned long)cfg.allowedBauds[best]);
                                 sendFrame_unlocked((uint8_t)best);
                                 hw.setSpd(cfg.allowedBauds[best]);
                                 spdI = best;   // track the actual locked baud index
@@ -536,11 +503,6 @@ void ALink::onRx(const uint8_t* data, int len) {
                         } else {
                             if (payload == REQ_CMD) {
                                 int best = bestSpd_unlocked();
-                                Log::getLog().debug(ALINK_TAG,
-                                    "LCK Pong: REQ received  best=baud[%d]=%lu  "
-                                    "sending reply",
-                                    best,
-                                    (unsigned long)cfg.allowedBauds[best]);
                                 sendFrame_unlocked(best);
                                 hw.setSpd(cfg.allowedBauds[best]);
                                 spdI = best;   // track the actual locked baud index
@@ -625,12 +587,8 @@ void ALink::reset_unlocked() {
 bool ALink::onPayload(const uint8_t* b, int n) {
     int acc = hw.pushAppBuf(b, n);
     rxBytes += acc;
-    Log::getLog().debug(ALINK_TAG,
-        "onPayload: %d bytes pushed to app buf  (accepted=%d)", n, acc);
     if (acc < n) {
-        Log::getLog().error(ALINK_TAG,
-            "onPayload: app buffer overflow — %d/%d bytes lost, desyncing",
-            n - acc, n);
+        // App buffer full: bytes lost, stream desynced. Count the loss.
         return err_unlocked();
     }
     return false;
@@ -638,8 +596,6 @@ bool ALink::onPayload(const uint8_t* b, int n) {
 
 // UtilFrameRx::Listener -- corrupt/oversize/desynced frame.
 bool ALink::onFrameError() {
-    Log::getLog().debug(ALINK_TAG,
-        "onFrameError: COBS/CRC8 frame rejected  errs=%d/%d", errs + 1, cfg.errThreshold);
     return err_unlocked();
 }
 
@@ -680,9 +636,6 @@ void ALink::onTimer() {
                 uint8_t z = 0;
                 hw.tx(&z, 1);
                 lastTxMs = now;
-                Log::getLog().debug(ALINK_TAG,
-                    "OK keepalive sent  idleRx=%u ms  limit=%d ms",
-                    (unsigned)(now - lastRxMs), cfg.idleTimeoutMs);
             }
             hw.unlock();
             hw.startTimer(okTickMs());
@@ -708,11 +661,6 @@ void ALink::onTimer() {
                 Log::getLog().info(ALINK_TAG, "SWP Ping baud[%d]=%lu",
                     curSpd, (unsigned long)cfg.allowedBauds[curSpd]);
             }
-            Log::getLog().debug(ALINK_TAG,
-                "SWP Ping: sending PING  baud[%d]=%lu  sample=%d/%d",
-                curSpd, (unsigned long)cfg.allowedBauds[curSpd],
-                pingSample + 1,
-                baudSweep.samplesPerBaud() > 0 ? baudSweep.samplesPerBaud() : 1);
             sendFrame(PING_CMD);
             int samples = baudSweep.samplesPerBaud();
             if (samples < 1) samples = 1;
@@ -729,8 +677,6 @@ void ALink::onTimer() {
                     hw.setSpd(cfg.allowedBauds[curSpd]);
                     hw.startTimer(cfg.delayMs);
                 } else {
-                    Log::getLog().debug(ALINK_TAG,
-                        "SWP Ping: full sweep done, no fast-ack -> LCK");
                     hw.lock();
                     changeState_unlocked(State::LCK);
                     lckRetries = 0;
