@@ -4,6 +4,16 @@ All releases, most recent first.
 
 ---
 
+## v3.0.12
+
++ **Debug logging throughout `UtilPing`, `UtilPong`, `UtilMain`.** Key events now logged at `DEBUG` level:
+  + `UtilMain`: role, baud, WiFi SSID (or "disabled"), and "setupCommon complete" bracket the startup sequence.
+  + `UtilPing`: link-up (with baud) and link-lost (with `pendCount` and `seq`) on transitions; per-loop send count and `pendCount` after each fill; stall detection log when pipeline is full ≥3 s with no echoes (including a FIFO reset); `send failed` on `comm_.send()` returning false.
+  + `UtilPong`: link-up (with baud) and link-lost (with lifetime echo count) on transitions; per-echo log with sequence number and byte count; CRC-reject log; per-loop processed message count.
++ **Pipeline stall recovery in `UtilPing`.** If `pendCount == WINDOW` for ≥3 s with no echoes draining the pipeline (e.g. because Pong rebooted and Ping's link stayed in OK), `pendHead_/pendTail_/pendCount_` are reset to 0 and an `[E]` log is emitted. This prevents Ping from freezing silently when Pong drops mid-session.
+
+---
+
 ## v3.0.11
 
 + **`master`/`slave` removed from all runtime log output, current docs, and tests.** The sweep/lock log lines now read `SWP Ping baud[...]`, `SWP Pong testing baud[...]`, `SWP Pong: full sweep done`, etc., and the role label logged at startup is `Ping`/`Pong`. The WIRING CHECK message now says "The Ping node's TX is not reaching this RX pin. Required: Ping TX -> Pong RX AND Pong TX -> Ping RX". Comments throughout `ALink.cpp`, `ALink.h`, `UtilBaudSweep.{h,cpp}`, the `docAPI.md` state-machine description, and the desktop test suite were updated to Ping/Pong as well. The C++ identifier `isMaster`/`isMasterNode` (the role bool in the `AutoLink`/`ALink` constructors) is unchanged to preserve API compatibility — it is never shown to users. Historical `docVersion.md` entries are left as-is as an accurate record. Desktop test suite re-run green after the rename.
