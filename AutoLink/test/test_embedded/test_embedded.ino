@@ -13,7 +13,7 @@
 using namespace autolink;
 
 // Single-board self-loopback: jumper GPIO17 -> GPIO16 on the same board.
-AutoLink link(UART_NUM_2, 16, 17, /*isMaster=*/true);
+AutoLink link(UART_NUM_2, 16, 17, /*Ping node=*/true);
 
 static uint32_t sent = 0, ok = 0, bad = 0;
 static uint8_t  buf[256];
