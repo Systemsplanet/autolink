@@ -25,18 +25,10 @@ namespace autolink {
 // ----------------------------------------------------------------------------
 // UtilPing — plug-and-play AutoLink ping node.
 //
-// Sends random-length messages (1–1023 bytes), keeps up to WINDOW messages
-// in flight simultaneously (pipelined for ~2× throughput), and verifies each
-// echo in FIFO order by length + CRC-16.
-//
-// FIFO safety rules (v3.1.0):
-//   • Any mismatch or CRC reject clears the entire FIFO rather than trying
-//     to advance by one. A single desync makes every subsequent comparison
-//     wrong; a full clear is the only safe recovery.
-//   • TX and RX use separate buffers (sendBuf_ / recvBuf_) so a recv can
-//     never overwrite a payload whose CRC hasn't been recorded yet.
-//   • On link-up, the receive buffer is fully drained before any new sends,
-//     so stale echoes from the previous session never corrupt the fresh FIFO.
+// Sends random-length messages (1–1023 bytes), waits for Pong to echo each
+// one back, compares byte-for-byte, and logs throughput every 5 s.
+// Mismatches are logged as [E] MISMATCH lines (visible in serial and on the
+// web dashboard). Reconnects after any link disruption automatically.
 // ----------------------------------------------------------------------------
 class UtilPing : public UtilMain {
 public:
@@ -51,6 +43,7 @@ public:
                    ssid, password, webPort)
     {}
 
+    // Non-copyable — hardware resources are owned by the base.
     UtilPing(const UtilPing&)            = delete;
     UtilPing& operator=(const UtilPing&) = delete;
 
@@ -64,66 +57,61 @@ public:
     void loop() {
         if (!comm_.ready()) {
             if (wasReady_) {
+                // Log once on transition, not every loop iteration
                 log_.debug("Ping", "link lost  pendCount was %d  seq=%lu",
                     pendCount_, (unsigned long)msgSeq_);
             } else {
                 log_.debug("Ping", "not ready");
             }
-            comm_.blinkWait(3, 100, 100, 0);
+            comm_.blinkWait(3, 100, 100, 2000);
             wasReady_ = false;
-            resetFifo_("link drop");
+            pendHead_ = pendTail_ = pendCount_ = 0;  // link drop voids in-flight compares
             return;
         }
         if (!wasReady_) {
-            log_.debug("Ping", "link up  baud=%lu  seq=%lu  settling %lu ms",
-                (unsigned long)comm_.getCurrentBaud(), (unsigned long)msgSeq_,
-                (unsigned long)SETTLE_MS);
-            // Drain ALL stale echoes before sending anything new.
-            // Echoes from the previous session would desync the fresh FIFO.
-            int drained = 0;
-            while (comm_.recv(recvBuf_, sizeof recvBuf_) > 0) drained++;
-            if (drained) log_.debug("Ping", "drained %d stale echo(s)", drained);
+            log_.debug("Ping", "link up  baud=%lu  seq=%lu",
+                (unsigned long)comm_.getCurrentBaud(), (unsigned long)msgSeq_);
+            drainAndCompare_();   // drain anything queued during the gap
             comm_.blinkWait(4);
-            tReady_ = millis();
             wasReady_ = true;
         }
 
-        // Settle guard — give Pong's sweep time to complete its own lock.
-        if (millis() - tReady_ < SETTLE_MS) {
-            log_.debug("Ping", "settling  %lu ms remaining",
-                (unsigned long)(SETTLE_MS - (millis() - tReady_)));
-            return;
-        }
-
-        // Pipeline stall detection — if the window is full and nothing drains
-        // for STALL_MS, clear the FIFO and let new sends proceed.
+        // Pipeline: keep up to WINDOW messages in flight so both TX and RX
+        // directions stay busy. A strict one-at-a-time round-trip leaves each
+        // direction idle while the other transmits, capping throughput at ~half
+        // the line rate. Filling a window lets Pong's echoes flow back while
+        // we're still sending, roughly doubling effective throughput.
+        //
+        // Stall detection: if the pipeline is full and no echoes have arrived
+        // for STALL_MS, the FIFO is desynchronised and Ping has gone silent.
+        // Reset pendCount so sending resumes; the link itself stays up.
         uint32_t now = millis();
         if (pendCount_ == WINDOW) {
-            if (tStall_ == 0) tStall_ = now;
+            if (tStall_ == 0) tStall_ = now;   // start the stall clock
             if (now - tStall_ > STALL_MS) {
                 log_.error("Ping",
-                    "pipeline stall — WINDOW=%d full for %lu ms, no echoes. "
-                    "Clearing FIFO. seq=%lu  head=%d tail=%d",
+                    "pipeline stall — WINDOW=%d full for %lu ms, no echoes."
+                    "  Resetting FIFO. seq=%lu  head=%d tail=%d",
                     WINDOW, (unsigned long)(now - tStall_),
                     (unsigned long)msgSeq_, pendHead_, pendTail_);
-                resetFifo_("stall");
+                pendHead_ = pendTail_ = pendCount_ = 0;
+                tStall_ = 0;
             }
         } else {
-            tStall_ = 0;
+            tStall_ = 0;   // echoes are flowing — reset the stall clock
         }
 
-        // Fill the send window.
         int sentThisLoop = 0;
         while (pendCount_ < WINDOW) {
             int n = random(1, 1024);
-            fill_(sendBuf_, n);
-            if (!comm_.send(sendBuf_, n)) {
+            fill_(buf_, n);
+            if (!comm_.send(buf_, n)) {
                 log_.debug("Ping",
-                    "send failed (link dropped)  n=%d  pendCount=%d", n, pendCount_);
+                    "send failed (link busy/dropped)  n=%d  pendCount=%d", n, pendCount_);
                 break;
             }
             pend_[pendTail_].len = n;
-            pend_[pendTail_].crc = UtilCrc::crc16(sendBuf_, n);
+            pend_[pendTail_].crc = UtilCrc::crc16(buf_, n);
             pend_[pendTail_].seq = msgSeq_++;
             pendTail_ = (pendTail_ + 1) % WINDOW;
             pendCount_++;
@@ -134,88 +122,79 @@ public:
                 sentThisLoop, pendCount_, (unsigned long)msgSeq_);
         }
 
-        // Drain available echoes and verify each against the oldest pending slot.
-        int got;
-        while ((got = comm_.recv(recvBuf_, sizeof recvBuf_)) > 0) {
-            if (pendCount_ == 0) {
-                log_.error("Ping",
-                    "recv %d bytes with no in-flight send (stale echo?) — discarding",
-                    got);
-                continue;
-            }
-            comm_.blinkWait(1);
-            Pending& p = pend_[pendHead_];
-
-            if (got != p.len) {
-                log_.error("Ping",
-                    "MISMATCH seq=%lu  sent=%d bytes  echoed=%d bytes  "
-                    "pendCount=%d — clearing FIFO (desync)",
-                    (unsigned long)p.seq, p.len, got, pendCount_);
-                resetFifo_("length mismatch");
-                break;   // don't process further echoes against a cleared FIFO
-            } else if (UtilCrc::crc16(recvBuf_, got) != p.crc) {
-                log_.error("Ping",
-                    "MISMATCH seq=%lu  %d bytes  CRC differs  pendCount=%d "
-                    "— clearing FIFO (desync)",
-                    (unsigned long)p.seq, got, pendCount_);
-                resetFifo_("CRC mismatch");
-                break;
-            } else {
-                log_.debug("Ping", "echo ok seq=%lu  %d bytes",
-                           (unsigned long)p.seq, got);
-                pendHead_ = (pendHead_ + 1) % WINDOW;
-                pendCount_--;
-            }
-        }
-        if (got < 0) {
-            // Link-layer CRC/desync reject — clear the whole FIFO.
-            // A single reject doesn't map to one echo reliably.
-            log_.error("Ping",
-                "recv rejected (CRC/desync)  pendCount=%d head=%d tail=%d "
-                "— clearing FIFO",
-                pendCount_, pendHead_, pendTail_);
-            resetFifo_("recv reject");
-        }
-
+        drainAndCompare_();
         logStats("Ping");
     }
 
 private:
+    // Fill a buffer with random bytes.
     static void fill_(uint8_t* b, int n) {
         for (int i = 0; i < n; i++) b[i] = (uint8_t)random(256);
     }
 
-    // Clear the in-flight FIFO. Called on any desync event so that the next
-    // batch of sends starts with a clean slate. Does NOT reset msgSeq_ — the
-    // sequence counter is monotonic for diagnostic purposes.
-    void resetFifo_(const char* reason) {
-        if (pendCount_ > 0) {
-            log_.debug("Ping", "FIFO cleared (%s)  dropped=%d  seq was=%lu",
-                reason, pendCount_, (unsigned long)msgSeq_);
+    // Drain all complete echoes and verify each against the OLDEST pending send
+    // (FIFO). Echoes come back in send order, so comparing length + CRC-16 to
+    // the head of the pending ring is an unambiguous, byte-equivalent check
+    // without needing to stash every full payload.
+    void drainAndCompare_() {
+        int got;
+        while ((got = comm_.recv(buf_, sizeof buf_)) > 0) {
+            if (pendCount_ == 0) {
+                log_.error("Ping",
+                    "recv %d bytes with no in-flight send (stale echo?)", got);
+                continue;
+            }
+            Pending& p = pend_[pendHead_];
+            comm_.blinkWait(1);   // one flash per verified echo
+
+            if (got != p.len) {
+                log_.error("Ping",
+                    "MISMATCH seq=%lu  sent=%d bytes  echoed=%d bytes  "
+                    "pendCount=%d (length mismatch often = FIFO desync, not corruption)",
+                    (unsigned long)p.seq, p.len, got, pendCount_);
+            } else if (UtilCrc::crc16(buf_, got) != p.crc) {
+                log_.error("Ping",
+                    "MISMATCH seq=%lu  %d bytes, CRC differs  pendCount=%d",
+                    (unsigned long)p.seq, got, pendCount_);
+            } else {
+                log_.debug("Ping", "echo ok seq=%lu  %d bytes",
+                           (unsigned long)p.seq, got);
+            }
+            pendHead_ = (pendHead_ + 1) % WINDOW;
+            pendCount_--;
         }
-        pendHead_ = pendTail_ = pendCount_ = 0;
-        tStall_ = 0;
+        if (got < 0) {
+            // CRC reject — bad message drained and counted. Drop the oldest
+            // pending entry so the FIFO stays aligned with the echo stream.
+            //
+            // DIAGNOSTIC (v3.0.9): a single reject does NOT reliably map to
+            // one echo — the link layer may have dropped, merged, or split
+            // frames. Dropping exactly one pending entry here can leave the
+            // FIFO misaligned with the real echo stream, which then makes
+            // every following good echo compare against the wrong entry and
+            // count as a fresh error. Log the FIFO depth so the cascade is
+            // visible: a burst of rejects with shrinking pendCount is the
+            // desync signature.
+            log_.error("Ping",
+                "recv rejected (CRC/desync)  pendCount=%d head=%d tail=%d",
+                pendCount_, pendHead_, pendTail_);
+            if (pendCount_ > 0) {
+                pendHead_ = (pendHead_ + 1) % WINDOW;
+                pendCount_--;
+            }
+        }
     }
 
-    // ── pipeline state ────────────────────────────────────────────────────
-    static constexpr int      WINDOW    = 8;     // messages in flight at once
-    static constexpr uint32_t STALL_MS  = 3000;  // ms full window with no drain
-    static constexpr uint32_t SETTLE_MS = 300;   // ms after link-up before sending
-
+    // ── pipelined send state ──────────────────────────────────────────────
+    static constexpr int      WINDOW   = 8;      // max messages in flight at once
+    static constexpr uint32_t STALL_MS = 3000;   // ms of no echoes before FIFO reset
     struct Pending { int len; uint16_t crc; uint32_t seq; };
-    Pending  pend_[WINDOW];
-
-    int      pendHead_  = 0;
-    int      pendTail_  = 0;
-    int      pendCount_ = 0;
-    uint32_t msgSeq_    = 0;
-    uint32_t tStall_    = 0;
-    uint32_t tReady_    = 0;
-
-    // Separate TX/RX buffers so recv() can never overwrite a payload whose
-    // CRC is still pending comparison.
-    uint8_t sendBuf_[BUF_SIZE];
-    uint8_t recvBuf_[BUF_SIZE];
+    Pending  pend_[WINDOW];    // FIFO ring of in-flight sends (len + crc + seq)
+    int      pendHead_  = 0;   // index of oldest pending entry
+    int      pendTail_  = 0;   // next free slot
+    int      pendCount_ = 0;   // number of entries currently in flight
+    uint32_t msgSeq_    = 0;   // monotonically increasing send counter
+    uint32_t tStall_    = 0;   // millis() when pipeline first went full with no drain
 };
 
 } // namespace autolink
