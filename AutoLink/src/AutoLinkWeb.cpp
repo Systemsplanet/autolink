@@ -1,3 +1,4 @@
+#include <time.h>
 // AutoLinkWeb.cpp — AutoLinkWeb implementation (Arduino/ESP32 only).
 //
 // Embeds the full dashboard HTML/CSS/JS as a raw string literal, connects
@@ -302,6 +303,32 @@ bool AutoLinkWeb::begin(const char* ssid, const char* pass, uint16_t port) {
         goto fail;
     }
 
+    // Register sink now — ring and mutex are ready; NTP and "Web monitor"
+    // log lines below will flow into the ring and appear in the web log panel.
+    Log::getLog().setSink(logSinkCb, this);
+
+    // ----- NTP sync — EST/EDT (UTC-5/UTC-4 with auto DST) -----
+    // configTime uses the POSIX tz string; SNTP runs in the background.
+    // We poll up to 5 s for a valid time; if it doesn't arrive we fall
+    // back to uptime timestamps (marked with * in the log).
+    configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+    setenv("TZ", "EST5EDT,M3.2.0,M11.1.0", 1);
+    tzset();
+    {
+        struct tm ti = {};
+        const uint32_t ntpStart = millis();
+        while (!getLocalTime(&ti, 0) && millis() - ntpStart < 5000) delay(100);
+        if (getLocalTime(&ti, 0)) {
+            ntpSynced_ = true;
+            log.info(TAG, "NTP synced: %04d-%02d-%02d %02d:%02d:%02d EST/EDT",
+                ti.tm_year+1900, ti.tm_mon+1, ti.tm_mday,
+                ti.tm_hour, ti.tm_min, ti.tm_sec);
+        } else {
+            log.info(TAG, "NTP not available — timestamps are uptime (HH:MM:SS*)");
+        }
+    }
+
+
     {   // 1 Hz periodic stats timer
         const esp_timer_create_args_t ta = {
             .callback              = statTimerCb,
@@ -341,9 +368,6 @@ bool AutoLinkWeb::begin(const char* ssid, const char* pass, uint16_t port) {
         httpd_register_uri_handler(server_, &r3);
         httpd_register_uri_handler(server_, &r4);
     }
-
-    // Register the log sink last — from this point emit() calls logSinkCb.
-    Log::getLog().setSink(logSinkCb, this);
 
     enabled_ = true;
     log.info(TAG, "Web monitor at http://%s:%u", WiFi.localIP().toString().c_str(), port_);
@@ -406,11 +430,25 @@ void AutoLinkWeb::logSinkCb(char sev, const char* tag, const char* msg, void* ct
     const uint32_t idx  = self->logHead_ % RING_CAP;
     self->logRing_[idx].seq = self->logHead_;
     self->logRing_[idx].sev = sev;
-    uint32_t ms = millis();
-    uint32_t s  = ms / 1000;
-    snprintf(self->logRing_[idx].line, LINE_CAP, "%02lu:%02lu:%02lu %c %s %s",
-             (unsigned long)(s / 3600), (unsigned long)(s % 3600 / 60), (unsigned long)(s % 60),
-             sev, tag, msg);
+    char ts[12]; // "HH:MM:SS" or "HH:MM:SS*"
+    if (self->ntpSynced_) {
+        struct tm ti = {};
+        if (getLocalTime(&ti, 0)) {
+            snprintf(ts, sizeof(ts), "%02d:%02d:%02d",
+                     ti.tm_hour, ti.tm_min, ti.tm_sec);
+        } else {
+            // NTP was synced but getLocalTime failed (rare) — use uptime
+            uint32_t s = millis() / 1000;
+            snprintf(ts, sizeof(ts), "%02lu:%02lu:%02lu*",
+                     (unsigned long)(s/3600), (unsigned long)(s%3600/60), (unsigned long)(s%60));
+        }
+    } else {
+        // No NTP — uptime with * suffix so the reader knows it's not wall-clock
+        uint32_t s = millis() / 1000;
+        snprintf(ts, sizeof(ts), "%02lu:%02lu:%02lu*",
+                 (unsigned long)(s/3600), (unsigned long)(s%3600/60), (unsigned long)(s%60));
+    }
+    snprintf(self->logRing_[idx].line, LINE_CAP, "%s %c %s %s", ts, sev, tag, msg);
     self->logHead_++;
 
     xSemaphoreGive(self->logMtx_);
