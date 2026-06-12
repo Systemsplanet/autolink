@@ -4,6 +4,34 @@ All releases, most recent first.
 
 ---
 
+## v3.2.0
+
++ **Root-cause fix for the connect/disconnect thrash.** `errs` (the error-threshold counter) was effectively a *lifetime* counter in the OK state: `onPayload` pushed good frames but never cleared it, while `onFrameError` kept incrementing. A link could move dozens of messages perfectly and still get dropped the moment the Nth scattered CRC reject (ordinary RF noise) pushed the lifetime total past `errThreshold`. Each drop sent a BREAK, the peer re-swept and BREAKed back, and the two nodes thrashed in SWP indefinitely — the logs showed 16 clean echoes immediately followed by `Error threshold exceeded (6 > 5)`. Now a successfully received frame resets `errs` to 0 in both reliable (`onPayload`) and raw (`pushAppBuf`) paths, so the threshold counts *consecutive* failures. Scattered noise is tolerated; only a genuine run of back-to-back errors (a truly broken line) drops the link.
++ **Regression test added** (`Scattered Errors Don't Drop a Working Link`): interleaves 20 corrupt frames with good traffic and asserts the link stays in OK, then sends `errThreshold+1` corrupt frames back-to-back and asserts it drops. Verified to fail against the old lifetime-counter behaviour.
+
+---
+
+## v3.1.8
+
++ **`UtilPong`: rate-limit "not ready" log.** The `not ready` line was logged every loop iteration (~every 3–4 ms) with no throttle, producing hundreds of entries per second and burying all meaningful log output. Now rate-limited to 1/sec using `tNotReady_`, matching the behaviour in `UtilPing`.
++ **`UtilPong`: drain stale RX bytes on link-up.** When Pong transitions from SWP to OK, the UART RX buffer contains residual bytes from the baud sweep (partial PING frames at the wrong baud, garbage, etc.). These cause the COBS frame parser to start mid-frame and reject every valid PING that follows, producing `0/2` scores despite Ping sending continuously. Fixed by draining the buffer in a tight recv loop immediately on link-up before entering the echo loop.
+
+---
+
+## v3.1.7
+
++ **Compile fix.** `tNotReady_` was used in `UtilPing` but only declared in `UtilMain` — which uses it for a different purpose in a different source tree. Added `tNotReady_` directly as a private member of `UtilPing`.
+
+---
+
+## v3.1.6
+
++ **SWP stall watchdog in `UtilPing`.** After an error-threshold link drop, the FreeRTOS timer service queue can overflow (the UART task at priority 5 queues faster than the timer task at priority 1 can drain), causing `xTimerStart` to silently fail. The sweep sends one PING at baud[0] then hangs for minutes. Fixed: `UtilPing` now tracks time spent in `!ready()` state. If no sweep progress occurs for 5 s (`SWEEP_STALL_MS`), `comm_.dropLink()` is called to send a BREAK and restart the sweep from the application layer, bypassing the stalled timer. The log shows `E Ping SWP stall — forcing BREAK` when triggered.
++ **`AutoLink::dropLink()` / `ALink::dropLink()` added.** Public method that acquires the lock, calls `dropLink_unlocked()`, then sends a BREAK to wake the peer. Safe to call from `loop()`.
++ **Log DOM limit increased to 500 KB** (from 10 KB). Trim target is 400 KB, keeping ~15,000+ lines of history. Fill bar scale updated to match (100% = 500 KB).
+
+---
+
 ## v3.1.5
 
 + **Log fix.** v3.1.4 introduced two undeclared JS variables (`logPaused`, `logFullOpen`) that caused a `ReferenceError` on page load, killing the entire script and breaking the log. The `var` declaration line was never updated from `var paused=false,...` to include the new variables, and `togglePause` still referenced the old `paused` name. Fixed.
