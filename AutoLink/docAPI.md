@@ -31,7 +31,7 @@ Most sketches never need anything below this line. The simple `send`/`recv`/`rea
 If you don't need message boundaries, `AutoLink` is still a drop-in `Stream`. Set `cfg.reliableMode = false` for an unframed pass-through, or leave it on for COBS+CRC-8 framed bytes:
 
 ```cpp
-const char* str = "Hello Slave!";
+const char* str = "Hello Pong!";
 comm.write((const uint8_t*)str, strlen(str));
 
 while (comm.available()) {
@@ -70,8 +70,8 @@ if (comm.ready() && comm.available() >= 5) {
 + **Native PC Testing:** Because of that abstraction, the entire stack runs on your computer. From `test/test_desktop/`, `make` builds and runs five suites: `UtilCrcTest`, `UtilCobsTest`, `UtilBlinkTest`, `UtilFrameRxTest`, and the protocol/integration tests in `test.cpp`. Everything compiles `-Wall -Wextra` clean. On-hardware tests live in `test/test_embedded/`.
 
 + **State Machine:**
-  + `SWP` (Sweep): master iterates allowed bauds sending `PING`; the slave retunes per ping and scores each baud it decodes.
-  + `LCK` (Lock): master requests the best baud; the slave replies with the fastest scored index and both switch.
+  + `SWP` (Sweep): the Ping node iterates allowed bauds sending `PING`; the Pong node retunes per ping and scores each baud it decodes.
+  + `LCK` (Lock): the Ping node requests the best baud; the Pong node replies with the fastest scored index and both switch.
   + `OK` (Connected): raw bytes or reliable frames / messages are exchanged.
 
 + **Reliable Mode:** User data is encapsulated in COBS frames (≤250 B payload each) with a trailing CRC-8, delimited by `0x00` sentinels, so the receiver can discard a corrupt frame without losing stream sync. Note that "reliable" means *detected-and-dropped*, not retransmitted — for guaranteed delivery, layer an ack/retry on top (the ping-pong echo pattern in the README is one approach).
