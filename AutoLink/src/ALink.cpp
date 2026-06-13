@@ -647,12 +647,14 @@ void ALink::onTimer() {
                 hw.sendBreak();   // tell the peer to re-sweep too
                 return;
             }
-            // Keepalive: a lone 0x00 the peer's reliable parser skips as a
-            // stray inter-frame zero, but which still feeds its watchdog.
-            // Raw mode would see it as data, so it only runs in reliable mode.
+            // Keepalive: 0x00 0x00 — a self-resyncing empty frame. See
+            // UtilFrameRx::feed(). Emitted only in OK under lock, so the
+            // sender is always at a frame boundary; the receiver
+            // interprets the pair at a clean boundary as a no-op or as
+            // a one-error partial-flush mid-COBS. Reliable mode only.
             if (cfg.reliableMode && (uint32_t)(now - lastTxMs) >= (uint32_t)okTickMs()) {
-                uint8_t z = 0;
-                hw.tx(&z, 1);
+                uint8_t ka[2] = { 0x00, 0x00 };
+                hw.tx(ka, 2);
                 lastTxMs = now;
             }
             hw.unlock();
