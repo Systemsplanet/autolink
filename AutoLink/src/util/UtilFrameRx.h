@@ -7,11 +7,16 @@
 // Feed it raw wire bytes; it collects 0x00-delimited COBS frames, decodes
 // them, verifies the trailing CRC-8, and hands validated payloads to a
 // Listener. Bad CRC, malformed COBS, CRC-only frames, and oversize frames
-// are reported as frame errors. Stray zeros between frames (the link
-// keepalive) are skipped silently. If the Listener reports that the link
-// dropped, feed() stops consuming and returns early so the caller can hand
-// the rest of the event to its command parser. No locking, no allocation;
-// thread safety is the caller's job.
+// are reported as frame errors.
+//
+// The keepalive is the two-byte sequence 0x00 0x00. feed() consumes the
+// pair at a clean boundary with no callback; mid-COBS the first 0x00 closes
+// the partial (one onFrameError) and the second is skipped. Stray single
+// 0x00s are still skipped for back-compat.
+//
+// If the Listener reports a link drop, feed() stops and returns how far it
+// got so the caller can hand the rest of the event to its command parser.
+// No locking, no allocation; thread safety is the caller's job.
 // ----------------------------------------------------------------------------
 
 namespace autolink {
