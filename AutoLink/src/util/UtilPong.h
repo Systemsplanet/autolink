@@ -50,7 +50,7 @@ public:
     void loop() {
         if (!comm_.ready()) {
             if (wasReady_) {
-                log_.debug("Pong", "link lost  echoes_sent=%lu", (unsigned long)echoCount_);
+                log_.info("Pong", "link lost  echoes_sent=%lu", (unsigned long)echoCount_);
                 wasReady_ = false;
                 tNotReady_ = millis();   // start rate limiter
             } else {
@@ -67,16 +67,21 @@ public:
             log_.debug("Pong", "link up  baud=%lu",
                 (unsigned long)comm_.getCurrentBaud());
             // Drain any stale bytes from the RX buffer that accumulated
-            // during SWP. Without this, the COBS frame parser starts
-            // mid-frame and rejects every valid PING from Ping.
-            { uint8_t tmp[128]; while (comm_.recv(tmp, sizeof tmp) > 0) {} }
+            // during SWP. The drain loop exits on the first recv=-1 (partial
+            // or corrupt message), which leaves residual bytes in the buffer.
+            // The flushRx() call afterwards clears both the stream buffer and
+            // the UART driver ring so the first echo attempt is always clean.
+            { uint8_t tmp[BUF_SIZE]; int n; while ((n = comm_.recv(tmp, sizeof tmp)) > 0) {}
+              if (n < 0) log_.error("Pong", "drain: partial msg at link-up — flushing hw ring");
+            }
+            comm_.flushRx();
             comm_.blinkWait(4, 100, 100, 2000);
             wasReady_ = true;
         }
 
         int n;
         int recvThisLoop = 0;
-        while ((n = comm_.recv(buf_, sizeof buf_)) > 0) {
+        while ((n = comm_.recv(buf_, sizeof buf_)) > 0 && recvThisLoop < MAX_TX_PER_LOOP) {
             recvThisLoop++;
             if (comm_.send(buf_, n)) {
                 echoCount_++;
@@ -92,6 +97,11 @@ public:
         if (n < 0) {
             log_.error("Pong", "recv rejected (CRC/desync)  echoCount=%lu",
                 (unsigned long)echoCount_);
+            // Flush both the stream buffer and the UART ring so stale Ping
+            // bytes do not keep rejecting every subsequent recv. Note: if the
+            // reject storm persists, Ping's idle watchdog will drop and BREAK
+            // after 5 s, which stops Ping's TX and lets both sides re-sweep.
+            comm_.flushRx();
         }
         if (recvThisLoop > 0) {
             log_.debug("Pong", "processed %d msgs this loop  echoCount=%lu",
@@ -103,6 +113,11 @@ public:
 private:
     uint64_t echoCount_ = 0;   // lifetime echo counter for debug logging
     uint32_t tNotReady_ = 0;   // millis() of last not-ready log (rate limiter)
+
+    // Limit echoes per loop() call so large back-to-back sends don't fill the
+    // UART TX ring and block uart_write_bytes while holding the ALink lock,
+    // which would starve the UART event task and overflow the RX ring.
+    static constexpr int MAX_TX_PER_LOOP = 2;
 };
 
 } // namespace autolink
