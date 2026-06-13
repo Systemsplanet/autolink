@@ -4,6 +4,68 @@ All releases, most recent first.
 
 ---
 
+## v3.2.10
+
+Adds the `test_embedded.ino` self-loopback test for the `AutoLink` facade and hardens `UtilBlink::flashBlocking()` against the race where the esp_timer task is still dispatching the previous async pattern's callback when `setup()` calls the blocking variant.
+
+**Embedded facade test (`test/test_embedded/test_embedded.ino`).** New self-contained on-hardware test that covers the public surface that the host test suite cannot reach: real UART peripheral, FreeRTOS stream buffer, esp_timer, and the AutoLink wiring. Flash to a single board with GPIO17 (TX) jumpered to GPIO16 (RX) — external self-loopback, the board talks to itself — and watch the serial monitor. Eleven sub-tests cover construction, state API (`ready`, `getCurrentBaud`, `getErrCount`, `getLifetimeErrors`), the two- and three-arg `getStats`/`resetStats`/`resetErrors` forms, the Stream byte API (`available`/`peek`/`flush`/`write`), the message API (`sendMsg`/`recvMsg`), `isHealthy`, the async and blocking `blinkWait` paths, the `n<=0` ignored case, `dropLink()` safety before negotiation, and `err()`/`clearErr()`. The host test suite covers `ALink`, `UtilBlink`, `UtilCobs`, `UtilCrc`, `UtilFrameRx`, `UtilBaudSweep`, and the `AutoLink` facade stubs; this file is the missing end-to-end coverage path for the hardware layer.
+
+**`UtilBlink::flashBlocking()` race fix.** The blocking variant calls `cancel()` to stop any in-flight async pattern. If the esp_timer task is currently dispatching the previous pattern's callback (i.e. `cb()` is mid-execution on the timer task), `esp_timer_stop()` returns `ESP_ERR_INVALID_STATE` without waiting for the callback to finish, and the callback runs to completion on the timer task. In the embedded test this manifested as the second `blinkWait(2, 50, 50, 100)` apparently "hanging" at the very start — `[t8]a` printed but `[t8]b` never did, because the previous async `blinkWait(1, 60, 60, 0)`'s 60 ms one-shot fired during the next test's `Serial.printf` and the callback re-armed itself just as the blocking call entered its loop. Fixed by:
++ Adding a `portYIELD()` immediately after `cancel()` in `flashBlocking()` so any in-flight `cb()` is guaranteed to complete (and not re-arm via `startOnce()`) before the blocking loop starts toggling the pin.
++ Making `EspBlinkHal::startOnce()` skip the `esp_timer_stop()` call if the timer's pending expiry is at most one tick away (the callback is about to fire anyway, calling `esp_timer_stop` mid-dispatch wastes a queue slot and can briefly mask the next arm).
++ Adding diagnostic prints inside `flashBlocking()` (`[t8]a1`..`[t8]a5`) so any future hang is immediately pinpointed to a specific phase: pre-cancel, post-cancel-yield, before-on, before-off, after-loop. Remove for production.
+
+**`docVersion.md` reorder.** The v3.2.6 / v3.2.7 / v3.2.9 entries were appended at the bottom of the file even though the header says "most recent first" — they now sit in the correct position immediately below v3.2.5, restoring the descending-order invariant.
+
+---
+
+## v3.2.9
+
+Fixes auto-baud negotiation locking at the wrong (slower) baud when both Ping and Pong enter the sweep state simultaneously, and fixes a stale-echo contamination window in Ping's post-reconnect settle period.
+
+**Root cause 1 — `pickBest()` iterated slowest-first:** The loop in `UtilBaudSweep::pickBest()` searched from the highest baud index (9600, slowest) to the lowest (115200, fastest), returning the first baud that met the reliability threshold. When late SWP entry caused Ping to miss the first one or two 115200-baud PINGs (score 2/4, threshold 3), 115200 fell below the threshold while 19200 accumulated a full score (3/4) later in the sweep. `pickBest()` returned 19200 and both sides locked there, producing a 2-minute re-negotiation storm as Ping continued sweeping at 115200 while Pong was locked at 19200.
+
+**Root cause 2 — fast-ack and `bestSpd_unlocked()` did not prefer faster bauds with partial scores:** Even after fixing the loop direction, a slower baud that happens to be the only one meeting the strict threshold was still selected. A faster baud (e.g. 115200) that scored 2/4 is physically reachable — it missed the threshold due to timing jitter, not a link failure — and should always be preferred over a slower baud.
+
+**Root cause 3 — post-settle stale-echo window in UtilPing:** The pre-settle drain in `UtilPing` ran immediately on link-up, before Pong's TX ring had finished draining residual echoes from the previous session. Those bytes arrived at Ping's UART during the 300 ms settle and were not cleared, causing the first one or two echoes of the new session to be mismatched against the wrong message.
+
++ **`UtilBaudSweep::pickBest()`** — loop direction reversed to fastest-first (j = 0 → size-1). Now returns the fastest baud meeting the threshold rather than the slowest. Fallback (no baud meets the strict threshold) also searches fastest-first, returning the fastest baud with any score instead of the slowest.
++ **Fast-ack baud preference in `ALink.cpp` (Pong SWP path):** After `pickBest()` selects a baud, a secondary scan checks whether any faster baud (lower index) also received PINGs. If so, that faster baud is used regardless of whether it met the strict threshold. Locking at the fastest physically-reachable baud is always correct; downgrading to a slower baud because timing jitter reduced its score is not.
++ **`ALink::bestSpd_unlocked()` (LCK path):** Same fastest-with-any-score preference applied to the non-fast-ack negotiation path.
++ **`UtilPing` post-settle re-drain:** A second drain pass now runs after the 300 ms settle timer expires, immediately before the first new send. This catches stale echoes that arrived at Ping's UART during the settle window. A `comm_.flushRx()` follows to clear any residual partial frame. The drain guard (`postSettleDrained_`) resets on each link-loss so it re-arms for every reconnect.
+
+---
+
+## v3.2.7
+
+Fixes TX ring overflow causing silent frame truncation, and adds Pong pacing to prevent TX/RX lock contention.
+
+**Root cause:** `uart_write_bytes` return value was silently ignored throughout. A maxMsg=1024 payload produces ~1270 COBS bytes on the wire. With txBufferSize=1024 (previously shared with rxBufferSize), the TX ring overflowed on the 5th frame of a max-size message. uart_write_bytes accepted fewer bytes than requested, the frame was truncated, and the receiver got a CRC8 mismatch — logged as a frame error with no indication that TX was the source. Separately, when Pong echoed multiple large messages per loop() in a tight while loop, uart_write_bytes blocked (portMAX_DELAY) while holding the ALink protocol lock, preventing the UART event task (which also needs the lock) from draining the RX ring, causing RX overflow and data loss.
+
++ **`AutoLinkConfig::txBufferSize`** — new config field (default 0 = auto-sized). AutoLink auto-sizes it to `2 × ((maxMsg + MSG_HDR) × 5/4 + 64)` bytes, enough to hold two max-size COBS-encoded messages without any blocking. EspHal now uses `cfg.txBufferSize` separately from `cfg.rxBufferSize` in `uart_driver_install`.
++ **`ILink::tx()` returns `int`** — bytes actually accepted by the UART driver. MockHal returns n (always accepts), AutoLinkTest mock updated.
++ **TX truncation detection in `write()`, `writeLocked()`, `sendFrame()`, `sendFrame_unlocked()`, keepalive** — all now check the `hw.tx()` return value. A short return logs `Log.error()` with the frame size, bytes accepted, and a hint about txBufferSize, then calls `err_unlocked()` so repeated truncations trip errThreshold and drop the link cleanly.
++ **`UtilPong::MAX_TX_PER_LOOP = 2`** — mirrors Ping's pacing. Pong now echoes at most 2 messages per `loop()` call, allowing the TX ring to drain between iterations and releasing the ALink lock so the UART event task can process RX.
++ **Error log audit** — `FIFO cleared (dropped>0)` promoted from debug to `Log.error()` (data was dropped). `link lost` promoted from debug to `Log.info()`. `drain: partial msg at link-up` promoted to `Log.error()`.
+
+---
+
+## v3.2.6
+
+Fixes a persistent recv-desync storm that survived the v3.2.5 `flushRx()` fix.
+
+**Root cause:** `flushRx()` only reset the FreeRTOS stream buffer. The UART driver has a separate ring buffer (`rxBufferSize` bytes). The UART event task immediately pumped the ring buffer back into the stream buffer after every `clearAppBuf()` call. The next `recvMsg` read freshly-arrived stale bytes and rejected, causing an infinite reject loop. Evidence: every reject after `resetFifo_` showed `head=0 tail=2` — the new 2-message sends had barely been queued, yet stale bytes were already back in the stream.
+
+No amount of stream-buffer flushing can win this race against live wire traffic from Pong. The only reliable fix is to stop Pong's TX via a BREAK.
+
++ **`ILink::flushRxHw()`** — new virtual method (no-op default for MockHal). Flushes the hardware receive buffer (UART ring on ESP32).
++ **`EspHal::flushRxHw()`** — calls `uart_flush_input(uart_num)`.
++ **`ALink::flushRx()`** — now calls both `clearAppBuf()` and `hw.flushRxHw()`. Logs bytes discarded for diagnostics.
++ **`UtilPing::resetFifo_(reason, dropLink)`** — desync paths (recv reject, CRC/length mismatch, stall) now call `comm_.dropLink()` which sends a BREAK to Pong, stopping its echo stream. The "link drop" path still calls `flushRx()` only (link is already going down). Each dropLink path logs `"BREAK sent (desync recovery: <reason>)"` so the cause is visible in the web monitor.
++ **`UtilPong::loop()`** — link-up drain loop now calls `comm_.flushRx()` after exiting (drain loop exits on `recv=-1` from partial stale messages, previously leaving residual bytes; this caused the 13-reject burst at link-up seen in the v3.2.5 soak). `recv=-1` during normal operation now also calls `comm_.flushRx()`.
+
+---
+
 ## v3.2.5
 
 Fixes a persistent recv-desync that locked Ping in OK with `rx=0` forever while Pong echoed cleanly (`disc=0 errs=0` on both sides, no link drop, no re-sweep).
@@ -235,8 +297,8 @@ Major release: project restructured into a standard Arduino library layout and s
 + **WIRING CHECK error message corrected.** GPIO16/17 *are* on the FireBeetle header (GPIO17=D10, GPIO16=D11); the message now gives the correct crossover wiring.
 + **EspHal UART init now logs success and checks all three init calls.** `uart_param_config` and `uart_set_pin` were previously silent on failure. Both now check the return value and log a specific error including the UART and pin numbers. On success: `[I][EspHal] UART2 ready: tx=GPIO17 rx=GPIO16`.
 
----
 
+---
 
 ## v2.12.0
 
@@ -347,7 +409,7 @@ Major release: project restructured into a standard Arduino library layout and s
 + **Reliable RX parser hardening:** bad CRC, malformed COBS, and buffer overflow no longer `break` out of the event. They now call `err_unlocked()` and keep scanning, so back-to-back frames in one event are all processed.
 + **COBS / CRC speed:** inner loops replaced with `memcpy` and a 256-entry constexpr LUT respectively, ~5–10× faster on ESP32 at high baud.
 + **Write/sendMsg locking:** a single mutex acquisition per frame in `write()`; `sendMsg()` holds the lock across header + payload so the link can't drop between them.
-+ **UART event task:** `std::vector<uint8_t>` replaced with an `alloca`-backed scratch buffer to avoid per-iteration heap churn.
++ **UART event task:** `std::vector<uint8_t>` replaced with an `alloca`-backed scratch buffer to avoid per-event heap churn.
 + **`blink()` renamed `blinkWait()`** to make the blocking behavior obvious at the call site. No behavior change.
 
 ---
@@ -394,50 +456,3 @@ Major release: project restructured into a standard Arduino library layout and s
 
 + Initial master/slave auto-baud negotiation.
 + Basic FreeRTOS stream buffer and hardware interrupt integration.
-
----
-
-## v3.2.6
-
-Fixes a persistent recv-desync storm that survived the v3.2.5 `flushRx()` fix.
-
-**Root cause:** `flushRx()` only reset the FreeRTOS stream buffer. The UART driver has a separate ring buffer (`rxBufferSize` bytes). The UART event task immediately pumped the ring buffer back into the stream buffer after every `clearAppBuf()` call. The next `recvMsg` read freshly-arrived stale bytes and rejected, causing an infinite reject loop. Evidence: every reject after `resetFifo_` showed `head=0 tail=2` — the new 2-message sends had barely been queued, yet stale bytes were already back in the stream.
-
-No amount of stream-buffer flushing can win this race against live wire traffic from Pong. The only reliable fix is to stop Pong's TX via a BREAK.
-
-+ **`ILink::flushRxHw()`** — new virtual method (no-op default for MockHal). Flushes the hardware receive buffer (UART ring on ESP32).
-+ **`EspHal::flushRxHw()`** — calls `uart_flush_input(uart_num)`.
-+ **`ALink::flushRx()`** — now calls both `clearAppBuf()` and `hw.flushRxHw()`. Logs bytes discarded for diagnostics.
-+ **`UtilPing::resetFifo_(reason, dropLink)`** — desync paths (recv reject, CRC/length mismatch, stall) now call `comm_.dropLink()` which sends a BREAK to Pong, stopping its echo stream. The "link drop" path still calls `flushRx()` only (link is already going down). Each dropLink path logs `"BREAK sent (desync recovery: <reason>)"` so the cause is visible in the web monitor.
-+ **`UtilPong::loop()`** — link-up drain loop now calls `comm_.flushRx()` after exiting (drain loop exits on `recv=-1` from partial stale messages, previously leaving residual bytes; this caused the 13-reject burst at link-up seen in the v3.2.5 soak). `recv=-1` during normal operation now also calls `comm_.flushRx()`.
-
----
-
-## v3.2.7
-
-Fixes TX ring overflow causing silent frame truncation, and adds Pong pacing to prevent TX/RX lock contention.
-
-**Root cause:** `uart_write_bytes` return value was silently ignored throughout. A maxMsg=1024 payload produces ~1270 COBS bytes on the wire. With txBufferSize=1024 (previously shared with rxBufferSize), the TX ring overflowed on the 5th frame of a max-size message. uart_write_bytes accepted fewer bytes than requested, the frame was truncated, and the receiver got a CRC8 mismatch — logged as a frame error with no indication that TX was the source. Separately, when Pong echoed multiple large messages per loop() in a tight while loop, uart_write_bytes blocked (portMAX_DELAY) while holding the ALink protocol lock, preventing the UART event task (which also needs the lock) from draining the RX ring, causing RX overflow and data loss.
-
-+ **`AutoLinkConfig::txBufferSize`** — new config field (default 0 = auto-sized). AutoLink auto-sizes it to `2 × ((maxMsg + MSG_HDR) × 5/4 + 64)` bytes, enough to hold two max-size COBS-encoded messages without any blocking. EspHal now uses `cfg.txBufferSize` separately from `cfg.rxBufferSize` in `uart_driver_install`.
-+ **`ILink::tx()` returns `int`** — bytes actually accepted by the UART driver. MockHal returns n (always accepts), AutoLinkTest mock updated.
-+ **TX truncation detection in `write()`, `writeLocked()`, `sendFrame()`, `sendFrame_unlocked()`, keepalive** — all now check the `hw.tx()` return value. A short return logs `Log.error()` with the frame size, bytes accepted, and a hint about txBufferSize, then calls `err_unlocked()` so repeated truncations trip errThreshold and drop the link cleanly.
-+ **`UtilPong::MAX_TX_PER_LOOP = 2`** — mirrors Ping's pacing. Pong now echoes at most 2 messages per `loop()` call, allowing the TX ring to drain between iterations and releasing the ALink lock so the UART event task can process RX.
-+ **Error log audit** — `FIFO cleared (dropped>0)` promoted from debug to `Log.error()` (data was dropped). `link lost` promoted from debug to `Log.info()`. `drain: partial msg at link-up` promoted to `Log.error()`.
-
----
-
-## v3.2.9
-
-Fixes auto-baud negotiation locking at the wrong (slower) baud when both Ping and Pong enter the sweep state simultaneously, and fixes a stale-echo contamination window in Ping's post-reconnect settle period.
-
-**Root cause 1 — `pickBest()` iterated slowest-first:** The loop in `UtilBaudSweep::pickBest()` searched from the highest baud index (9600, slowest) to the lowest (115200, fastest), returning the first baud that met the reliability threshold. When late SWP entry caused Ping to miss the first one or two 115200-baud PINGs (score 2/4, threshold 3), 115200 fell below the threshold while 19200 accumulated a full score (3/4) later in the sweep. `pickBest()` returned 19200 and both sides locked there, producing a 2-minute re-negotiation storm as Ping continued sweeping at 115200 while Pong was locked at 19200.
-
-**Root cause 2 — fast-ack and `bestSpd_unlocked()` did not prefer faster bauds with partial scores:** Even after fixing the loop direction, a slower baud that happens to be the only one meeting the strict threshold was still selected. A faster baud (e.g. 115200) that scored 2/4 is physically reachable — it missed the threshold due to timing jitter, not a link failure — and should always be preferred over a slower baud.
-
-**Root cause 3 — post-settle stale-echo window in UtilPing:** The pre-settle drain in `UtilPing` ran immediately on link-up, before Pong's TX ring had finished draining residual echoes from the previous session. Those bytes arrived at Ping's UART during the 300 ms settle and were not cleared, causing the first one or two echoes of the new session to be mismatched against the wrong message.
-
-+ **`UtilBaudSweep::pickBest()`** — loop direction reversed to fastest-first (j = 0 → size-1). Now returns the fastest baud meeting the threshold rather than the slowest. Fallback (no baud meets the strict threshold) also searches fastest-first, returning the fastest baud with any score instead of the slowest.
-+ **Fast-ack baud preference in `ALink.cpp` (Pong SWP path):** After `pickBest()` selects a baud, a secondary scan checks whether any faster baud (lower index) also received PINGs. If so, that faster baud is used regardless of whether it met the strict threshold. Locking at the fastest physically-reachable baud is always correct; downgrading to a slower baud because timing jitter reduced its score is not.
-+ **`ALink::bestSpd_unlocked()` (LCK path):** Same fastest-with-any-score preference applied to the non-fast-ack negotiation path.
-+ **`UtilPing` post-settle re-drain:** A second drain pass now runs after the 300 ms settle timer expires, immediately before the first new send. This catches stale echoes that arrived at Ping's UART during the settle window. A `comm_.flushRx()` follows to clear any residual partial frame. The drain guard (`postSettleDrained_`) resets on each link-loss so it re-arms for every reconnect.
