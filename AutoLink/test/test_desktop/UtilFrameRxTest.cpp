@@ -125,14 +125,81 @@ void test_oversize_frame() {
     std::cout << "PASS" << std::endl;
 }
 
-// Lone zeros between frames are the link keepalive: skipped, no error.
-void test_keepalive_zeros_skipped() {
-    std::cout << "\n=== Test: Stray Zeros (Keepalive) Skipped ===" << std::endl;
+// Keepalive atom: 0x00 0x00 at a clean boundary is consumed as a
+// no-op heartbeat -- no callback, no error. Lone stray 0x00s are still
+// skipped for back-compat. (v3.2.1: was a single 0x00.)
+void test_keepalive_atom_skipped() {
+    std::cout << "\n=== Test: 0x00 0x00 Keepalive Atom Skipped ===" << std::endl;
     MockListener lis;
     UtilFrameRx rx(lis);
-    uint8_t zeros[] = {0x00, 0x00, 0x00, 0x00};
-    rx.feed(zeros, sizeof(zeros));
+    uint8_t atom[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00};  // three back-to-back atoms
+    rx.feed(atom, sizeof(atom));
     assert(lis.payloads.empty() && lis.errors == 0);
+    std::cout << "PASS" << std::endl;
+}
+
+// Keepalive straddling a feed() boundary: first byte in one call, second
+// in the next. The pair must still be recognised and skipped.
+void test_keepalive_atom_split_across_feeds() {
+    std::cout << "\n=== Test: 0x00 0x00 Split Across Feeds ===" << std::endl;
+    MockListener lis;
+    UtilFrameRx rx(lis);
+    uint8_t a = 0x00, b = 0x00;
+    rx.feed(&a, 1);
+    assert(lis.payloads.empty() && lis.errors == 0);
+    rx.feed(&b, 1);
+    assert(lis.payloads.empty() && lis.errors == 0);
+    std::cout << "PASS" << std::endl;
+}
+
+// Keepalive arriving mid-COBS (after a corrupt frame start). The first
+// 0x00 closes the partial (one onFrameError), the second 0x00 is the
+// keepalive start at the new clean boundary. Total: one error, no payload.
+void test_keepalive_after_partial_frame() {
+    std::cout << "\n=== Test: 0x00 0x00 After Partial Frame ===" << std::endl;
+    MockListener lis;
+    UtilFrameRx rx(lis);
+    uint8_t partial_then_atom[] = {0x05, 0x11, 0x22, 0x00, 0x00};
+    rx.feed(partial_then_atom, sizeof(partial_then_atom));
+    assert(lis.payloads.empty() && lis.errors == 1);
+    std::cout << "PASS" << std::endl;
+}
+
+// A good frame bookended by keepalive atoms: real traffic must not be
+// disturbed by the heartbeat.
+void test_frames_around_keepalive() {
+    std::cout << "\n=== Test: Frames Around Keepalive Atoms ===" << std::endl;
+    MockListener lis;
+    UtilFrameRx rx(lis);
+    std::vector<uint8_t> p = {0xAB, 0xCD, 0xEF};
+    auto w = wireFrame(p);
+    std::vector<uint8_t> ev = {0x00, 0x00};   // leading atom
+    ev.insert(ev.end(), w.begin(), w.end());
+    ev.insert(ev.end(), {0x00, 0x00});        // trailing atom
+    rx.feed(ev.data(), (int)ev.size());
+    assert(lis.payloads.size() == 1);
+    assert(lis.payloads[0] == p);
+    assert(lis.errors == 0);
+    std::cout << "PASS" << std::endl;
+}
+
+// Stray single 0x00 (no companion) must still be skipped for back-compat
+// with pre-v3.2.1 senders / corrupted wire data. Use only non-zero
+// padding bytes between the lone zeros so the COBS parser doesn't trip
+// on a code-byte-without-data scenario.
+void test_lone_zero_still_skipped() {
+    std::cout << "\n=== Test: Lone Stray 0x00 Still Skipped ===" << std::endl;
+    MockListener lis;
+    UtilFrameRx rx(lis);
+    // Lone zero, then a real frame so idx != 0 doesn't apply, then lone zero.
+    std::vector<uint8_t> p = {0x42, 0x43};
+    auto w = wireFrame(p);
+    std::vector<uint8_t> ev = {0x00};
+    ev.insert(ev.end(), w.begin(), w.end());
+    ev.push_back(0x00);
+    rx.feed(ev.data(), (int)ev.size());
+    assert(lis.payloads.size() == 1 && lis.payloads[0] == p);
+    assert(lis.errors == 0);
     std::cout << "PASS" << std::endl;
 }
 
@@ -174,7 +241,11 @@ int main() {
     test_bad_crc_is_error();
     test_malformed_and_crc_only_are_errors();
     test_oversize_frame();
-    test_keepalive_zeros_skipped();
+    test_keepalive_atom_skipped();
+    test_keepalive_atom_split_across_feeds();
+    test_keepalive_after_partial_frame();
+    test_frames_around_keepalive();
+    test_lone_zero_still_skipped();
     test_drop_stops_feed_early();
     test_reset_discards_partial();
     std::cout << "\n=== UtilFrameRx Tests Completed Successfully ===" << std::endl;
