@@ -269,6 +269,21 @@ void ALink::dropLink() {
 
 void ALink::flush() { hw.flushTx(); }
 
+void ALink::flushRx() {
+    // Clears the receive app buffer and resets the message reassembly state
+    // so the next recvMsg call starts cleanly at a header boundary. Does not
+    // drop the link. Intended for use after an application-layer FIFO reset:
+    // when Ping clears its pending-echo FIFO (due to desync or stall), the
+    // ALink app buffer still holds the stale echoes that were queued before
+    // the reset. Without this call, the next recvMsg reads those stale bytes
+    // as a new message header, produces a CRC mismatch, and permanently
+    // desyncs — each echo just re-enqueues another failed read.
+    hw.lock();
+    hw.clearAppBuf();
+    rxMsgLen = -1;
+    hw.unlock();
+}
+
 bool ALink::sendMsg(const uint8_t* b, int len) {
     if (len <= 0 || (size_t)len > cfg.maxMsg) return false;
 
@@ -449,9 +464,13 @@ void ALink::onRx(const uint8_t* data, int len) {
                             Log::getLog().info(ALINK_TAG, "Locked at %lu baud (fast-ack)",
                                                (unsigned long)cfg.allowedBauds[payload]);
                             changeState_unlocked(State::OK);
+                            // Re-arm the same timer as the OK watchdog/keepalive
+                            // clock. Do NOT stopTimer() here: that was killing the
+                            // idle watchdog, so a Ping that fast-ack locked could
+                            // sit in OK forever after the peer rebooted into SWP
+                            // (rx=0, never re-sweeping). The watchdog firing on no
+                            // RX is exactly what drops the stale link and re-PINGs.
                             if (cfg.idleTimeoutMs > 0) hw.startTimer(okTickMs());
-                            // Stop the sweep clock; we're done.
-                            hw.stopTimer();
                         } else if (payload == PING_CMD && spdI < (int)cfg.allowedBauds.size()) {
                             baudSweep.score(spdI);
                             // Fast-ack path: if we've scored enough PINGs
