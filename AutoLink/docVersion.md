@@ -4,10 +4,17 @@ All releases, most recent first.
 
 ---
 
+## v3.2.2
+
++ **`docTests.md`.** New document covering how to build, run, and extend the host test suite: the 13 binaries (one per class / functionality area), the AddressSanitizer + UBSan integration mode (`make test_asan`, the valgrind equivalent in gcc-native form), the gcov line + branch coverage mode (`make coverage`, output in `coverage/coverage.txt`), CI recipes, the embedded self-loopback test, and a step-by-step "adding a test" guide. Linked from the README document index. The doc is the single source of truth for "how do I run the tests" — answers that previously lived only in scattered Makefile comments.
+
+---
+
 ## v3.2.1
 
 + **Keepalive is now a proper empty frame (`0x00 0x00`).** v3.2.0 emitted a lone `0x00` as a keepalive. After any drop / resync the sender and receiver disagree on frame boundaries for at least one heartbeat, so the lone zero would flush a partial COBS group and trip `onFrameError()` on every tick — exactly the noise the keepalive was supposed to prevent. Replaced with the two-byte sequence `0x00 0x00`, which is unambiguously an empty frame on the wire (COBS bytes are `0x01..0xFF`, so a real frame never produces two zeros back-to-back). `UtilFrameRx::feed()` recognises the pair as a self-resyncing no-op: at a clean boundary both zeros are skipped with no callback; mid-COBS the first zero closes the partial (one `onFrameError()`) and the second is the keepalive start. Backwards compatible: single stray `0x00`s still skip silently.
-+ **`AutoLink` facade host tests.** Added `AutoLinkTest` (host) covering the public API surface that doesn't need WiFi / ESP-IDF: `send/recv/ready`, `dropLink`, the `Stream` byte interface, `getStats/resetStats/resetErrors`, `err/clearErr/getErrCount`, `getState/getCurrentBaud/getLifetimeErrors`, `sendMsg/recvMsg`, `isHealthy`, and blink-LED-passthrough through the underlying `UtilBlink`. `AutoLinkWeb` and `EspHal` remain Arduino-only (WiFi, esp_http_server) but every other class is now host-tested.
++ **Host tests split one-per-class, with integration build modes.** The 26 tests in `test_desktop/test.cpp` moved to dedicated files: `MockHalTest.cpp` (9 tests for the host ILink mock), and the ALink tests split by functionality into `ALinkIOTest` (4), `ALinkMessageTest` (4), `ALinkNegotiationTest` (3), `ALinkErrorTest` (7), `ALinkWatchdogTest` (6). Shared helpers — `MockHal` class, `pipe_data`, `negotiate_to_ok` — moved to `MockHal.h`. The Makefile gained two integration build modes: `make test_asan` (AddressSanitizer + UBSan, the valgrind-equivalent in gcc-native form) and `make coverage` (gcov line + branch coverage, written to `coverage/coverage.txt`). The coverage tool uses per-source canonical `.gcno`/`.gcda` pairs (one binary chosen per source for the most-comprehensive view) because `gcov-tool merge` is fragile and often produces empty outputs.
++ **`AutoLink` facade host tests.** New `AutoLinkTest` covers the public API surface that doesn't need WiFi / ESP-IDF: `send/recv/ready`, `dropLink`, the `Stream` byte interface, `getStats/resetStats/resetErrors`, `err/clearErr/getErrCount`, `getState/getCurrentBaud/getLifetimeErrors`, `sendMsg/recvMsg`, `isHealthy`, and `blinkWait` paths. `AutoLinkWeb` and `EspHal` remain Arduino-only (WiFi, esp_http_server) but every other class is now host-tested.
 + **Comment audit.** All new and modified comments kept terse; verbose design notes trimmed to the minimum needed to explain non-obvious decisions.
 
 ---
