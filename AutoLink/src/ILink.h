@@ -26,7 +26,11 @@ public:
     virtual void begin() = 0;
     virtual void setSpd(uint32_t s) = 0;
     virtual void sendBreak() = 0;
-    virtual void tx(const uint8_t* b, int n) = 0;
+    // Write bytes to the UART TX ring. Returns the number of bytes actually
+    // accepted by the driver. A short return means the TX ring was full and
+    // bytes were dropped — the caller MUST treat this as a link error because
+    // the partial frame cannot be recovered by the receiver.
+    virtual int tx(const uint8_t* b, int n) = 0;
     virtual void flushTx() = 0;
     virtual void startTimer(int ms) = 0;
     virtual void stopTimer() = 0;
@@ -43,6 +47,12 @@ public:
     virtual int peekAppBuf() = 0;
     virtual int appBufAvailable() const = 0;
     virtual void clearAppBuf() = 0;
+    // Flush the hardware receive buffer (UART driver ring, DMA buffer, etc.)
+    // so bytes already received but not yet pushed to the app buffer are
+    // discarded. No-op on host (MockHal). Called from ALink::flushRx() after
+    // clearAppBuf() to prevent the UART event task from immediately refilling
+    // the stream buffer with stale bytes from the driver ring.
+    virtual void flushRxHw() {}
 };
 
 } // namespace autolink
