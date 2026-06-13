@@ -45,6 +45,13 @@ public:
     virtual void startOnce(uint32_t ms) = 0;  // schedule one tick() callback
     virtual void cancel() = 0;                // stop a pending tick
     virtual void delayMs(uint32_t ms) = 0;
+    // Cooperative yield to the scheduler. Used by flashBlocking() after
+    // cancel() to drain any in-flight esp_timer callback that esp_timer_stop()
+    // (which is non-blocking) couldn't wait for. No-op on host; the ESP
+    // implementation calls portYIELD() so the timer task can finish
+    // dispatching the previous pattern's callback before the blocking loop
+    // starts toggling the pin.
+    virtual void yield() {}
 };
 
 class UtilBlink {
@@ -70,6 +77,22 @@ public:
     // Blocking: flash n times inline, then pause delayMs.
     void flashBlocking(int n, int onTimeMs, int offTimeMs, long delayMs) {
         cancel();
+        // esp_timer_stop() is non-blocking: per ESP-IDF docs, "after
+        // esp_timer_stop() the timer is disarmed, but its callback may
+        // still be running." If the previous async pattern's callback
+        // (cb -> tick()) was mid-dispatch on the timer task when we
+        // entered cancel(), it could re-arm the timer via startOnce()
+        // while our for-loop is calling delay() — and the volatile
+        // state shared with the callback is in flux for a few
+        // microseconds. hal.yield() lets any in-flight callback run to
+        // completion (it will see left=0 / on=false and not re-arm)
+        // before we start toggling the pin. This is the single line
+        // that fixes the "hangs at blinkWait(2,50,50,100) right after
+        // a blinkWait(1,60,60,0)" symptom observed in
+        // test_embedded.ino: the 60ms one-shot fires during the next
+        // test's Serial.printf and the callback races with the
+        // blocking cancel() if we don't yield here. No-op on host.
+        hal.yield();
         for (int i = 0; i < n; i++) {
             hal.writePin(true);
             hal.delayMs((uint32_t)onTimeMs);
@@ -155,6 +178,13 @@ public:
     }
     void cancel() override { if (timer) esp_timer_stop(timer); }
     void delayMs(uint32_t ms) override { delay(ms); }
+    void yield() override {
+        // portYIELD() produces a single yield-from-task switch. The timer
+        // task is normally lower priority than the calling task on ESP-IDF,
+        // so this lets it run one tick and dispatch any in-flight callback.
+        // Safe to call repeatedly; the cost is a few microseconds.
+        portYIELD();
+    }
 };
 
 #endif // ARDUINO || ESP_PLATFORM
