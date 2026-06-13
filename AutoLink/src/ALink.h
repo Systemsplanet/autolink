@@ -45,7 +45,13 @@ struct AutoLinkConfig {
     // wiring and good signal integrity; if needed, prepend them explicitly:
     //   cfg.allowedBauds = {921600, 460800, 230400, 115200, 57600, 38400, 19200, 9600};
     std::vector<uint32_t> allowedBauds = {115200, 57600, 38400, 19200, 9600};
-    int errThreshold = 5;
+    // Consecutive frame errors before the link is dropped. A burst that
+    // overruns the peer (or mutual-sweep garbage at boot) can produce a short
+    // run of COBS desyncs with no good frame between to reset the counter; a
+    // low threshold turns that transient into a drop->BREAK storm. 20 absorbs
+    // the transient while still catching a genuinely broken line (which never
+    // produces a good frame to reset the count).
+    int errThreshold = 20;
     int delayMs = 50;
     bool reliableMode = true;          // framed bytes + message API on by default
     size_t rxBufferSize = 1024;
@@ -58,7 +64,7 @@ struct AutoLinkConfig {
     // ms the link is dropped and re-swept. 0 disables. While in OK each side
     // also sends a 1-byte keepalive (reliable mode only) when its TX has been
     // quiet for idleTimeoutMs/3, so a healthy-but-silent link never bounces.
-    int idleTimeoutMs = 3000;
+    int idleTimeoutMs = 5000;
     // Auto-baud reliability sweep. The Ping sends `pingSamplesPerBaud`
     // PINGs at each candidate baud; the Pong scores the success rate and
     // picks the highest baud whose rate is >= minAcceptRate. A 1-PING sweep
@@ -70,7 +76,7 @@ struct AutoLinkConfig {
     // considered reliable. 0.5 = at least half; 0.8 = strict; 0 = any
     // success counts. The Pong falls back to lower bauds if the top one
     // doesn't meet the threshold.
-    float minAcceptRate = 0.5f;
+    float minAcceptRate = 0.75f;
     // Enable the "fast ack" path: the Pong sends BEST_CMD (with its
     // current best baud index) as soon as it has enough PINGs to trust
     // the current baud, instead of waiting for the Ping to sweep every
@@ -172,6 +178,11 @@ public:
     int  write(const uint8_t* b, int len);   // returns bytes accepted while OK
     int  writeLocked(const uint8_t* b, int len); // caller holds hw.lock()
     void flush();
+    // Discard all bytes in the receive app buffer and reset the message
+    // reassembly state. Call after a FIFO reset on the application side to
+    // prevent stale echoes from desyncing the message parser on the next recv.
+    // Does NOT drop the link or restart the sweep.
+    void flushRx();
 
     // Message API (length + CRC16 framed; preserves boundaries). Requires
     // reliableMode for integrity. sendMsg returns true if fully queued.
