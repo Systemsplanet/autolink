@@ -219,13 +219,22 @@ public:
     void flushTx() override { uart_wait_tx_done(uart_num, pdMS_TO_TICKS(100)); }
     
     void startTimer(int ms) override {
-        if(timer_handle) {
-            xTimerChangePeriod(timer_handle, pdMS_TO_TICKS(ms), 0);
-            xTimerStart(timer_handle, 0);
-        }
+        if(!timer_handle) return;
+        // xTimerChangePeriod/xTimerStart post to the timer-service command
+        // queue. Under a rapid drop->sweep->drop storm that queue can fill;
+        // with a 0 block time the command is silently dropped and the sweep
+        // timer never restarts, wedging the node in SWP with no PINGs going
+        // out (the peer then reads 0 raw bytes and prints a false WIRING
+        // CHECK). Block briefly so the command actually lands, and retry
+        // once if the queue was momentarily full.
+        const TickType_t block = pdMS_TO_TICKS(20);
+        if (xTimerChangePeriod(timer_handle, pdMS_TO_TICKS(ms), block) != pdPASS)
+            xTimerChangePeriod(timer_handle, pdMS_TO_TICKS(ms), block);
+        if (xTimerStart(timer_handle, block) != pdPASS)
+            xTimerStart(timer_handle, block);
     }
-    void stopTimer() override { 
-        if(timer_handle) xTimerStop(timer_handle, 0); 
+    void stopTimer() override {
+        if(timer_handle) xTimerStop(timer_handle, pdMS_TO_TICKS(20));
     }
     
     void delayMs(int ms) override {
