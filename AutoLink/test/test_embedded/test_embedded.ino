@@ -16,6 +16,12 @@
 // EspHal (which depends on FreeRTOS stream buffers, esp_timer, etc.). The
 // host test suite covers every other class; this file is the AutoLink
 // facade's coverage path.
+//
+// runFacadeChecks() is invoked from loop() (not setup()) so the Arduino-ESP32
+// core's deferred-init "After Setup End" task fires first and prints its
+// board info without interleaving into the test output. The test then runs
+// once, prints [ALL_TESTS_DONE], and loop() settles into a 2-second periodic
+// state log so you can see the link state evolve after the suite completes.
 
 #include <AutoLink.h>
 using namespace autolink;
@@ -24,7 +30,8 @@ using namespace autolink;
 static AutoLink alink(UART_NUM_2, 16, 17, /*Ping node=*/true);
 
 static uint32_t tBoot   = 0;
-static bool     facCheckDone = false;
+static bool     facCheckStarted = false;
+static bool     facCheckDone    = false;
 
 void test_facade_construction() {
     // Construction completed (we got here). begin() is called in setup().
@@ -85,13 +92,11 @@ void test_facade_blink() {
 
 void test_facade_blink_blocking() {
     // Blocking blink: 2 flashes, 50/50, then 100 ms pause.
-    // Should hold the CPU for 2*100 + 100 = 300 ms.
-    Serial.printf("[t8]a\n");
+    // Should hold the CPU for 2*50 + 50 + 100 = 250 ms.
     uint32_t t0 = millis();
     alink.blinkWait(2, 50, 50, 100);
-    Serial.printf("[t8]b\n");
     uint32_t dt = millis() - t0;
-    Serial.printf("[t8] blocking blinkWait(2, 50, 50, 100) took %lu ms (expect ~300)\n",
+    Serial.printf("[t8] blocking blinkWait(2, 50, 50, 100) returned in %lu ms (expect ~250)\n",
         (unsigned long)dt);
 }
 
@@ -129,6 +134,7 @@ void runFacadeChecks() {
     test_facade_err_clearing();
     facCheckDone = true;
     Serial.println("[test_embedded] facade checks complete");
+    Serial.println("[ALL_TESTS_DONE]");
 }
 
 void setup() {
@@ -138,10 +144,15 @@ void setup() {
     Serial.println("[test_embedded] Jumper GPIO17 (TX) -> GPIO16 (RX) on this board.");
     alink.begin();
     tBoot = millis();
-    runFacadeChecks();
+    // runFacadeChecks() runs from loop() — see comment at the top of file.
 }
 
 void loop() {
+    if (!facCheckStarted) {
+        facCheckStarted = true;
+        runFacadeChecks();
+        return;
+    }
     if (!facCheckDone) return;
     static uint32_t t = 0;
     if (millis() - t > 2000) {
