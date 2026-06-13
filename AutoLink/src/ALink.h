@@ -55,6 +55,13 @@ struct AutoLinkConfig {
     int delayMs = 50;
     bool reliableMode = true;          // framed bytes + message API on by default
     size_t rxBufferSize = 1024;
+    // TX ring buffer size in the UART driver. Must be large enough to hold a
+    // complete COBS-encoded message without blocking uart_write_bytes while
+    // the ALink protocol lock is held — if uart_write_bytes blocks (TX ring
+    // full), the UART event task cannot drain the RX ring (it needs the lock
+    // too), causing RX overflow and silent data loss. AutoLink auto-sizes
+    // this from maxMsg; only override if you know what you're doing.
+    size_t txBufferSize = 0;  // 0 = auto-size from maxMsg in AutoLink facade
     size_t streamBufferSize = 2048;
     // Largest message send()/recv() will accept. The AutoLink facade auto-grows
     // streamBufferSize to fit this, so you normally set only this (or nothing).
