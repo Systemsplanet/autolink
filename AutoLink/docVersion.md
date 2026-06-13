@@ -424,3 +424,20 @@ Fixes TX ring overflow causing silent frame truncation, and adds Pong pacing to 
 + **TX truncation detection in `write()`, `writeLocked()`, `sendFrame()`, `sendFrame_unlocked()`, keepalive** — all now check the `hw.tx()` return value. A short return logs `Log.error()` with the frame size, bytes accepted, and a hint about txBufferSize, then calls `err_unlocked()` so repeated truncations trip errThreshold and drop the link cleanly.
 + **`UtilPong::MAX_TX_PER_LOOP = 2`** — mirrors Ping's pacing. Pong now echoes at most 2 messages per `loop()` call, allowing the TX ring to drain between iterations and releasing the ALink lock so the UART event task can process RX.
 + **Error log audit** — `FIFO cleared (dropped>0)` promoted from debug to `Log.error()` (data was dropped). `link lost` promoted from debug to `Log.info()`. `drain: partial msg at link-up` promoted to `Log.error()`.
+
+---
+
+## v3.2.9
+
+Fixes auto-baud negotiation locking at the wrong (slower) baud when both Ping and Pong enter the sweep state simultaneously, and fixes a stale-echo contamination window in Ping's post-reconnect settle period.
+
+**Root cause 1 — `pickBest()` iterated slowest-first:** The loop in `UtilBaudSweep::pickBest()` searched from the highest baud index (9600, slowest) to the lowest (115200, fastest), returning the first baud that met the reliability threshold. When late SWP entry caused Ping to miss the first one or two 115200-baud PINGs (score 2/4, threshold 3), 115200 fell below the threshold while 19200 accumulated a full score (3/4) later in the sweep. `pickBest()` returned 19200 and both sides locked there, producing a 2-minute re-negotiation storm as Ping continued sweeping at 115200 while Pong was locked at 19200.
+
+**Root cause 2 — fast-ack and `bestSpd_unlocked()` did not prefer faster bauds with partial scores:** Even after fixing the loop direction, a slower baud that happens to be the only one meeting the strict threshold was still selected. A faster baud (e.g. 115200) that scored 2/4 is physically reachable — it missed the threshold due to timing jitter, not a link failure — and should always be preferred over a slower baud.
+
+**Root cause 3 — post-settle stale-echo window in UtilPing:** The pre-settle drain in `UtilPing` ran immediately on link-up, before Pong's TX ring had finished draining residual echoes from the previous session. Those bytes arrived at Ping's UART during the 300 ms settle and were not cleared, causing the first one or two echoes of the new session to be mismatched against the wrong message.
+
++ **`UtilBaudSweep::pickBest()`** — loop direction reversed to fastest-first (j = 0 → size-1). Now returns the fastest baud meeting the threshold rather than the slowest. Fallback (no baud meets the strict threshold) also searches fastest-first, returning the fastest baud with any score instead of the slowest.
++ **Fast-ack baud preference in `ALink.cpp` (Pong SWP path):** After `pickBest()` selects a baud, a secondary scan checks whether any faster baud (lower index) also received PINGs. If so, that faster baud is used regardless of whether it met the strict threshold. Locking at the fastest physically-reachable baud is always correct; downgrading to a slower baud because timing jitter reduced its score is not.
++ **`ALink::bestSpd_unlocked()` (LCK path):** Same fastest-with-any-score preference applied to the non-fast-ack negotiation path.
++ **`UtilPing` post-settle re-drain:** A second drain pass now runs after the 300 ms settle timer expires, immediately before the first new send. This catches stale echoes that arrived at Ping's UART during the settle window. A `comm_.flushRx()` follows to clear any residual partial frame. The drain guard (`postSettleDrained_`) resets on each link-loss so it re-arms for every reconnect.
