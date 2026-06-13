@@ -65,7 +65,7 @@ public:
         if (!comm_.ready()) {
             uint32_t now = millis();
             if (wasReady_) {
-                log_.debug("Ping", "link lost  pendCount was %d  seq=%lu",
+                log_.info("Ping", "link lost  pendCount was %d  seq=%lu",
                     pendCount_, (unsigned long)msgSeq_);
                 wasReady_ = false;
                 resetFifo_("link drop");
@@ -123,7 +123,7 @@ public:
                     "Clearing FIFO. seq=%lu  head=%d tail=%d",
                     WINDOW, (unsigned long)(now - tStall_),
                     (unsigned long)msgSeq_, pendHead_, pendTail_);
-                resetFifo_("stall");
+                resetFifo_("stall", /*dropLink=*/true);
             }
         } else {
             tStall_ = 0;
@@ -171,14 +171,14 @@ public:
                     "MISMATCH seq=%lu  sent=%d bytes  echoed=%d bytes  "
                     "pendCount=%d — clearing FIFO (desync)",
                     (unsigned long)p.seq, p.len, got, pendCount_);
-                resetFifo_("length mismatch");
+                resetFifo_("length mismatch", /*dropLink=*/true);
                 break;   // don't process further echoes against a cleared FIFO
             } else if (UtilCrc::crc16(recvBuf_, got) != p.crc) {
                 log_.error("Ping",
                     "MISMATCH seq=%lu  %d bytes  CRC differs  pendCount=%d "
                     "— clearing FIFO (desync)",
                     (unsigned long)p.seq, got, pendCount_);
-                resetFifo_("CRC mismatch");
+                resetFifo_("CRC mismatch", /*dropLink=*/true);
                 break;
             } else {
                 log_.debug("Ping", "echo ok seq=%lu  %d bytes",
@@ -194,7 +194,7 @@ public:
                 "recv rejected (CRC/desync)  pendCount=%d head=%d tail=%d "
                 "— clearing FIFO",
                 pendCount_, pendHead_, pendTail_);
-            resetFifo_("recv reject");
+            resetFifo_("recv reject", /*dropLink=*/true);
         }
 
         logStats("Ping");
@@ -208,20 +208,34 @@ private:
     // Clear the in-flight FIFO. Called on any desync event so that the next
     // batch of sends starts with a clean slate. Does NOT reset msgSeq_ — the
     // sequence counter is monotonic for diagnostic purposes.
-    void resetFifo_(const char* reason) {
+    // reason: human label for the log.
+    // dropLink: true for any desync event (recv reject, CRC/length mismatch,
+    //   stall). Sends a BREAK so Pong stops echoing immediately — flushRx()
+    //   alone is insufficient because the UART event task refills the stream
+    //   buffer from the driver ring faster than recvMsg can drain it, keeping
+    //   the desync alive indefinitely. false for "link drop" (link is already
+    //   going down, the protocol layer is handling the BREAK/re-sweep).
+    void resetFifo_(const char* reason, bool dropLink = false) {
         if (pendCount_ > 0) {
-            log_.debug("Ping", "FIFO cleared (%s)  dropped=%d  seq was=%lu",
+            log_.error("Ping", "FIFO cleared (%s)  dropped=%d  seq was=%lu",
                 reason, pendCount_, (unsigned long)msgSeq_);
         }
         pendHead_ = pendTail_ = pendCount_ = 0;
         tStall_ = 0;
-        // Discard stale echoes from the ALink receive buffer. Without this,
-        // the old echoes (no longer matched by the FIFO we just reset) remain
-        // in the stream and desync recvMsg for every subsequent recv:
-        // recvMsg reads a stale header, CRC mismatches the new in-flight seq,
-        // and repeats forever -- onPayload() resets the consecutive error
-        // counter on each valid COBS frame so errThreshold is never reached.
-        comm_.flushRx();
+        if (dropLink) {
+            // Drop the link: sends BREAK to Pong, stopping its echo stream.
+            // This is the only reliable way to end a recv-desync storm: even
+            // after flushing both the stream buffer and the UART driver ring,
+            // bytes already on the wire continue to arrive and refill the
+            // buffer. A BREAK signals Pong to stop TX immediately.
+            log_.error("Ping",
+                "BREAK sent (desync recovery: %s) — forcing re-sweep", reason);
+            comm_.dropLink();
+        } else {
+            // Link already down (protocol layer is handling re-sweep).
+            // Just flush the stream buffer so the next session starts clean.
+            comm_.flushRx();
+        }
     }
 
     // ── pipeline state ────────────────────────────────────────────────────
