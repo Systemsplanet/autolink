@@ -32,7 +32,7 @@ public:
     void begin() override {}
     void setSpd(uint32_t) override {}
     void sendBreak() override {}
-    void tx(const uint8_t*, int) override {}
+    int tx(const uint8_t*, int n) override { return n; }
     void flushTx() override {}
     void startTimer(int) override {}
     void stopTimer() override {}
