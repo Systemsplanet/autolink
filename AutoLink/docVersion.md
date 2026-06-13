@@ -394,3 +394,33 @@ Major release: project restructured into a standard Arduino library layout and s
 
 + Initial master/slave auto-baud negotiation.
 + Basic FreeRTOS stream buffer and hardware interrupt integration.
+
+---
+
+## v3.2.6
+
+Fixes a persistent recv-desync storm that survived the v3.2.5 `flushRx()` fix.
+
+**Root cause:** `flushRx()` only reset the FreeRTOS stream buffer. The UART driver has a separate ring buffer (`rxBufferSize` bytes). The UART event task immediately pumped the ring buffer back into the stream buffer after every `clearAppBuf()` call. The next `recvMsg` read freshly-arrived stale bytes and rejected, causing an infinite reject loop. Evidence: every reject after `resetFifo_` showed `head=0 tail=2` — the new 2-message sends had barely been queued, yet stale bytes were already back in the stream.
+
+No amount of stream-buffer flushing can win this race against live wire traffic from Pong. The only reliable fix is to stop Pong's TX via a BREAK.
+
++ **`ILink::flushRxHw()`** — new virtual method (no-op default for MockHal). Flushes the hardware receive buffer (UART ring on ESP32).
++ **`EspHal::flushRxHw()`** — calls `uart_flush_input(uart_num)`.
++ **`ALink::flushRx()`** — now calls both `clearAppBuf()` and `hw.flushRxHw()`. Logs bytes discarded for diagnostics.
++ **`UtilPing::resetFifo_(reason, dropLink)`** — desync paths (recv reject, CRC/length mismatch, stall) now call `comm_.dropLink()` which sends a BREAK to Pong, stopping its echo stream. The "link drop" path still calls `flushRx()` only (link is already going down). Each dropLink path logs `"BREAK sent (desync recovery: <reason>)"` so the cause is visible in the web monitor.
++ **`UtilPong::loop()`** — link-up drain loop now calls `comm_.flushRx()` after exiting (drain loop exits on `recv=-1` from partial stale messages, previously leaving residual bytes; this caused the 13-reject burst at link-up seen in the v3.2.5 soak). `recv=-1` during normal operation now also calls `comm_.flushRx()`.
+
+---
+
+## v3.2.7
+
+Fixes TX ring overflow causing silent frame truncation, and adds Pong pacing to prevent TX/RX lock contention.
+
+**Root cause:** `uart_write_bytes` return value was silently ignored throughout. A maxMsg=1024 payload produces ~1270 COBS bytes on the wire. With txBufferSize=1024 (previously shared with rxBufferSize), the TX ring overflowed on the 5th frame of a max-size message. uart_write_bytes accepted fewer bytes than requested, the frame was truncated, and the receiver got a CRC8 mismatch — logged as a frame error with no indication that TX was the source. Separately, when Pong echoed multiple large messages per loop() in a tight while loop, uart_write_bytes blocked (portMAX_DELAY) while holding the ALink protocol lock, preventing the UART event task (which also needs the lock) from draining the RX ring, causing RX overflow and data loss.
+
++ **`AutoLinkConfig::txBufferSize`** — new config field (default 0 = auto-sized). AutoLink auto-sizes it to `2 × ((maxMsg + MSG_HDR) × 5/4 + 64)` bytes, enough to hold two max-size COBS-encoded messages without any blocking. EspHal now uses `cfg.txBufferSize` separately from `cfg.rxBufferSize` in `uart_driver_install`.
++ **`ILink::tx()` returns `int`** — bytes actually accepted by the UART driver. MockHal returns n (always accepts), AutoLinkTest mock updated.
++ **TX truncation detection in `write()`, `writeLocked()`, `sendFrame()`, `sendFrame_unlocked()`, keepalive** — all now check the `hw.tx()` return value. A short return logs `Log.error()` with the frame size, bytes accepted, and a hint about txBufferSize, then calls `err_unlocked()` so repeated truncations trip errThreshold and drop the link cleanly.
++ **`UtilPong::MAX_TX_PER_LOOP = 2`** — mirrors Ping's pacing. Pong now echoes at most 2 messages per `loop()` call, allowing the TX ring to drain between iterations and releasing the ALink lock so the UART event task can process RX.
++ **Error log audit** — `FIFO cleared (dropped>0)` promoted from debug to `Log.error()` (data was dropped). `link lost` promoted from debug to `Log.info()`. `drain: partial msg at link-up` promoted to `Log.error()`.
