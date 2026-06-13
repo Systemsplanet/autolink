@@ -109,7 +109,14 @@ void ALink::changeState_unlocked(State newState) {
 // produced no data at all (a fresh negotiation that never saw a PING).
 int ALink::bestSpd_unlocked() const {
     int best = baudSweep.pickBest();
-    return best < 0 ? 0 : best;
+    if (best < 0) return 0;
+    // If a faster baud also received PINGs, prefer it even if it didn't reach
+    // the strict threshold. Late SWP entry causes early PINGs at 115200 to be
+    // missed; the fastest physically-reachable baud is always the right choice.
+    for (int j = 0; j < best; j++) {
+        if (baudSweep.scoreAt(j) > 0) return j;
+    }
+    return best;
 }
 
 void ALink::sendFrame(uint8_t payload) {
@@ -514,6 +521,16 @@ void ALink::onRx(const uint8_t* data, int len) {
                             if (cfg.fastBaudLock && baudSweep.scoreAt(spdI) >= baudSweep.minHitsForReliable()) {
                                 int best = baudSweep.pickBest();
                                 if (best < 0) best = spdI;
+                                // Even if pickBest() returned a slower baud (it hit the
+                                // threshold while faster bauds only scored partially),
+                                // prefer the fastest baud that received ANY PINGs.
+                                // Timing jitter causes late SWP entry to miss early PINGs
+                                // at 115200, but the physical link is still fast — locking
+                                // at a slower baud just because 19200 hit the threshold
+                                // first is always the wrong outcome.
+                                for (int j = 0; j < best; j++) {
+                                    if (baudSweep.scoreAt(j) > 0) { best = j; break; }
+                                }
                                 sendFrame_unlocked((uint8_t)best);
                                 hw.setSpd(cfg.allowedBauds[best]);
                                 spdI = best;   // track the actual locked baud index
