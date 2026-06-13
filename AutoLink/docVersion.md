@@ -4,6 +4,38 @@ All releases, most recent first.
 
 ---
 
+## v3.2.5
+
+Fixes a persistent recv-desync that locked Ping in OK with `rx=0` forever while Pong echoed cleanly (`disc=0 errs=0` on both sides, no link drop, no re-sweep).
+
+**Root cause:** When `UtilPing::resetFifo_()` was called (recv reject, CRC mismatch, or stall timeout), it cleared the in-flight FIFO but left stale echo bytes in the ALink app buffer. The next `recvMsg` call started fresh at `rxMsgLen=-1` (correct) but read a 6-byte header from the old echo stream, CRC16 failed against the new in-flight sequence, and this repeated indefinitely. Recovery was impossible because `onPayload()` resets the consecutive-error counter on every valid COBS frame (the wire layer was fine), so `errThreshold` was never reached. The idle watchdog also didn't fire because `lastRxMs` stayed current.
+
++ **`ALink::flushRx()` / `AutoLink::flushRx()`** — new public method that clears the receive app buffer and resets `rxMsgLen=-1` without dropping the link or restarting the sweep.
++ **`UtilPing::resetFifo_()`** — now calls `comm_.flushRx()` on every path (recv reject, CRC mismatch, length mismatch, stall, link drop) so the next send/recv batch starts against a clean buffer.
++ **New host test** `test_flushRx_after_desync` in `ALinkMessageTest`: verifies that a clean round-trip succeeds immediately after a corrupt-frame reject + `flushRx()` call.
+
+---
+
+## v3.2.4
+
+Fixes a recovery deadlock exposed once the v3.2.3 drop->BREAK storm was gone: with staggered reboots (Pong restarting after Ping had already locked), the Ping would sit in OK forever at 115200 sending data with `rx=0`, never re-sweeping, while the Pong stayed in SWP receiving those data bytes but scoring `0/3` PINGs (a node in OK streams application frames, not the PING command frames the Pong locks onto).
+
++ **Removed a stray `hw.stopTimer()` in the master fast-ack lock path.** It ran immediately after `hw.startTimer(okTickMs())`, killing the OK idle-watchdog and keepalive timer. With the watchdog dead, a Ping that fast-ack locked never noticed a peer that rebooted into SWP. With the timer left running, the no-RX idle watchdog fires (default 5 s), drops the stale link, sends a BREAK, and both ends re-sweep with PINGs so the Pong can re-lock. This is the recovery path the watchdog was designed to provide; it was simply never armed on a fast-ack lock.
+
+---
+
+## v3.2.3
+
+Stability pass — fixes a self-reinforcing drop->BREAK storm and a terminal sweep deadlock observed in the ping-pong soak test (both nodes bouncing on `Error threshold exceeded (6 > 5)` and `BREAK received`, ending with one node wedged in SWP while the peer reports a false `WIRING CHECK` / 0 raw bytes).
+
++ **`errThreshold` default 5 -> 20.** A burst that overruns the peer, or mutual-sweep garbage at boot, produces a short run of COBS desyncs with no good frame between to reset the consecutive-error counter. At 5 that transient tripped the threshold, dropped the link, and fired a BREAK that re-swept the peer — a loop. 20 absorbs the transient; a genuinely broken line still trips it (it never yields a good frame to reset the count).
++ **`UtilPing` paced sends (`MAX_TX_PER_LOOP = 2`).** Filling the full `WINDOW` (8) in one `loop()` dumped up to eight KB-sized frames back-to-back, overrunning Pong's RX (partial writes + COBS desync, the root of the error bursts above). Sends now fill the pipeline over several ticks.
++ **`EspHal::startTimer/stopTimer` now block briefly and retry.** The FreeRTOS timer-service command queue can fill under a rapid drop->sweep->drop storm; with a 0 block time the change-period/start command was silently dropped, leaving the sweep timer stopped — the node sat in SWP emitting no PINGs, so the peer read 0 raw bytes and printed the misleading wiring warning. Commands now use a 20 ms block time with one retry.
++ **`idleTimeoutMs` default 3000 -> 5000.** A full five-baud sweep plus re-lock can exceed 3000 ms once a side is in SWP, so the idle watchdog was dropping links mid-recovery (`Idle for 3950 ms`). 5000 clears the worst-case recovery window.
++ **`minAcceptRate` default 0.5 -> 0.75.** Fast-ack could lock on ~2 decoded PINGs and then collapse under the first burst. Requiring 3 of 4 samples favors a stable lock.
+
+---
+
 ## v3.2.2
 
 + **`docTests.md`.** New document covering how to build, run, and extend the host test suite: the 13 binaries (one per class / functionality area), the AddressSanitizer + UBSan integration mode (`make test_asan`, the valgrind equivalent in gcc-native form), the gcov line + branch coverage mode (`make coverage`, output in `coverage/coverage.txt`), CI recipes, the embedded self-loopback test, and a step-by-step "adding a test" guide. Linked from the README document index. The doc is the single source of truth for "how do I run the tests" — answers that previously lived only in scattered Makefile comments.
