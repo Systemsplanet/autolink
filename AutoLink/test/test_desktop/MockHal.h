@@ -44,8 +44,9 @@ public:
         if (peer && peer->link) peer->link->onBreak();
     }
     void deliver_break_to_self() { if (link) link->onBreak(); }
-    void tx(const uint8_t* b, int n) override {
+    int tx(const uint8_t* b, int n) override {
         txBuf.insert(txBuf.end(), b, b+n);
+        return n;  // mock always accepts all bytes
     }
     void flushTx() override {}
     void startTimer(int ms) override { timerStartCalls++; timerActive = true; lastTimerMs = ms; }
