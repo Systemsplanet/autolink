@@ -15,23 +15,23 @@ void UtilBaudSweep::resetAll() {
 }
 
 int UtilBaudSweep::pickBest() const {
-    // The reliability sweep is "send N PINGs at each baud, pick the highest
-    // baud whose decode rate meets the threshold." Without this, a single
-    // missed PING would drop the Pong to a slower baud permanently.
-    //
-    // The pick is conservative: a baud is only "reliable" if at least
-    // minAcceptRate * expectedSamples PINGs decoded. If the top baud
-    // doesn't meet the bar, we fall back to lower bauds -- preferring a
-    // working slow link over a flaky fast one.
+    // The reliability sweep finds the FASTEST baud whose decode rate meets
+    // the threshold. Iterate from lowest index (fastest baud) to highest
+    // (slowest), returning the first one that qualifies. The previous code
+    // searched in reverse (slowest-first), so when 19200 happened to hit the
+    // threshold while 115200 only scored 2/4 (timing jitter, not a physical
+    // failure), it incorrectly locked at 19200.
     int minHits = (int)(cfg_.minAcceptRate * (float)cfg_.expectedSamples);
-    if (minHits < 1) minHits = 1;   // at least one decode required
-    for (int j = (int)scores_.size() - 1; j >= 0; j--) {
+    if (minHits < 1) minHits = 1;
+    for (int j = 0; j < (int)scores_.size(); j++) {
         if (scores_[j] >= minHits) return j;
     }
-    // Nothing met the threshold: fall back to whatever scored anything at
-    // all. Returning -1 would force the caller to use baud[0] blindly,
-    // which is worse than picking a low-but-real decode rate.
-    for (int j = (int)scores_.size() - 1; j >= 0; j--) {
+    // Nothing met the strict threshold; fall back to the FASTEST baud that
+    // received any PINGs at all. Prefer a fast baud with a few hits over a
+    // slow baud with more hits: timing jitter can prevent the fastest baud
+    // from reaching the threshold even when it's physically reachable, and
+    // locking at a lower baud because of that is always the wrong call.
+    for (int j = 0; j < (int)scores_.size(); j++) {
         if (scores_[j] > 0) return j;
     }
     return -1;
