@@ -1209,8 +1209,9 @@ void run_test_idle_watchdog() {
     std::cout << "PASS" << std::endl;
 }
 
-// Keepalive: a quiet-but-healthy link must NOT bounce. Each OK tick with a
-// stale TX emits a lone 0x00 the peer ignores as data but counts as RX.
+// Keepalive: a quiet-but-healthy link must NOT bounce. Each OK tick with
+// a stale TX emits a 0x00 0x00 atom the peer skips as a no-op heartbeat
+// (v3.2.1: was a lone 0x00, which could desync a mid-COBS receiver).
 void run_test_keepalive() {
     std::cout << "\n=== Test: Keepalive Stops a Quiet Link From Bouncing ===" << std::endl;
     AutoLinkConfig cfg;
@@ -1225,10 +1226,11 @@ void run_test_keepalive() {
     negotiate_to_ok(ping, pong, mHal, sHal);
     mHal.clearTx(); sHal.clearTx();
 
-    // App is silent. Tick the ping at t=1000: keepalive byte goes out.
+    // App is silent. Tick the ping at t=1000: keepalive atom goes out.
     mHal.now = 1000;
     ping.onTimer();
-    assert(mHal.txBuf.size() == 1 && mHal.txBuf[0] == 0x00);
+    assert(mHal.txBuf.size() == 2);
+    assert(mHal.txBuf[0] == 0x00 && mHal.txBuf[1] == 0x00);
 
     // Deliver it: the pong must stay OK, see no app data, count no errors.
     sHal.now = 1000;
@@ -1244,6 +1246,54 @@ void run_test_keepalive() {
     pipe_data(sHal, mHal);
     ping.onTimer();
     assert(ping.getState() == State::OK);
+    std::cout << "PASS" << std::endl;
+}
+
+// Keepalive is suppressed in raw mode -- a 0x00 in raw mode is data that
+// the app would see. Verify the OK tick emits nothing when reliableMode=false.
+void run_test_keepalive_disabled_in_raw_mode() {
+    std::cout << "\n=== Test: Keepalive Suppressed in Raw Mode ===" << std::endl;
+    AutoLinkConfig cfg;
+    cfg.allowedBauds = {9600, 115200}; cfg.pingSamplesPerBaud = 1;
+    cfg.reliableMode = false;
+    cfg.idleTimeoutMs = 3000;
+    MockHal mHal, sHal;
+    mHal.peer = &sHal; sHal.peer = &mHal;
+    ALink ping(mHal, true, cfg);
+    ALink pong(sHal, false, cfg);
+    negotiate_to_ok(ping, pong, mHal, sHal);
+    mHal.clearTx(); sHal.clearTx();
+
+    mHal.now = 1000;
+    ping.onTimer();
+    assert(mHal.txBuf.empty());   // raw mode: no keepalive emitted
+    std::cout << "PASS" << std::endl;
+}
+
+// Keepalive fires only when TX has been quiet for at least okTickMs().
+// Drive a normal write() right before the tick and verify nothing extra
+// goes out (lastTxMs was just bumped by the write).
+void run_test_keepalive_quiet_after_recent_tx() {
+    std::cout << "\n=== Test: Keepalive Skipped After Recent TX ===" << std::endl;
+    AutoLinkConfig cfg;
+    cfg.allowedBauds = {9600, 115200}; cfg.pingSamplesPerBaud = 1;
+    cfg.fastBaudLock = false;
+    cfg.reliableMode = true;
+    cfg.idleTimeoutMs = 3000;
+    MockHal mHal, sHal;
+    mHal.peer = &sHal; sHal.peer = &mHal;
+    ALink ping(mHal, true, cfg);
+    ALink pong(sHal, false, cfg);
+    negotiate_to_ok(ping, pong, mHal, sHal);
+
+    mHal.now = 1000;
+    uint8_t b = 0xAB;
+    ping.write(&b, 1);    // bumps lastTxMs to 1000
+    mHal.clearTx();       // ignore the actual frame bytes
+
+    // Tick at the same instant -- (now - lastTxMs) == 0, so no keepalive.
+    ping.onTimer();
+    assert(mHal.txBuf.empty());
     std::cout << "PASS" << std::endl;
 }
 
@@ -1394,6 +1444,8 @@ int main() {
     run_test_asymmetric_peer_death_recovery();
     run_test_idle_watchdog();
     run_test_keepalive();
+    run_test_keepalive_disabled_in_raw_mode();
+    run_test_keepalive_quiet_after_recent_tx();
     run_test_lck_timeout();
     run_test_app_buffer_overflow_errs();
     run_test_scattered_errors_dont_drop();
