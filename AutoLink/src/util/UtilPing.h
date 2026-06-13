@@ -129,9 +129,12 @@ public:
             tStall_ = 0;
         }
 
-        // Fill the send window.
+        // Fill the send window, but pace it: emitting the whole window in one
+        // loop() dumps up to WINDOW KB-sized frames back-to-back, overrunning
+        // Pong's RX (partial writes + COBS desync). Cap per-loop sends so the
+        // pipeline fills over a few ticks instead of one burst.
         int sentThisLoop = 0;
-        while (pendCount_ < WINDOW) {
+        while (pendCount_ < WINDOW && sentThisLoop < MAX_TX_PER_LOOP) {
             int n = random(1, 1024);
             fill_(sendBuf_, n);
             if (!comm_.send(sendBuf_, n)) {
@@ -212,12 +215,20 @@ private:
         }
         pendHead_ = pendTail_ = pendCount_ = 0;
         tStall_ = 0;
+        // Discard stale echoes from the ALink receive buffer. Without this,
+        // the old echoes (no longer matched by the FIFO we just reset) remain
+        // in the stream and desync recvMsg for every subsequent recv:
+        // recvMsg reads a stale header, CRC mismatches the new in-flight seq,
+        // and repeats forever -- onPayload() resets the consecutive error
+        // counter on each valid COBS frame so errThreshold is never reached.
+        comm_.flushRx();
     }
 
     // ── pipeline state ────────────────────────────────────────────────────
     static constexpr int      WINDOW    = 8;     // messages in flight at once
+    static constexpr int      MAX_TX_PER_LOOP = 2;  // frames emitted per loop() (paced, no bursts)
     static constexpr uint32_t STALL_MS      = 3000;  // ms full window with no drain
-    static constexpr uint32_t SWEEP_STALL_MS = 5000;  // ms stuck in SWP before forcing BREAK
+    static constexpr uint32_t SWEEP_STALL_MS = 2000;  // ms stuck in SWP before forcing BREAK
     static constexpr uint32_t SETTLE_MS = 300;   // ms after link-up before sending
 
     struct Pending { int len; uint16_t crc; uint32_t seq; };
