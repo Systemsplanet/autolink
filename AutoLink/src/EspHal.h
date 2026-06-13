@@ -288,8 +288,8 @@ public:
         if (peek_buf != -1) n++;
         return n;
     }
-    void clearAppBuf() override { 
-        if(stream_buf) xStreamBufferReset(stream_buf); 
+    void clearAppBuf() override {
+        if(stream_buf) xStreamBufferReset(stream_buf);
         peek_buf = -1;
     }
 };
