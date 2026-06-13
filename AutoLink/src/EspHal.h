@@ -139,7 +139,7 @@ public:
             if(stream_buf) { vStreamBufferDelete(stream_buf); stream_buf = nullptr; }
         };
 
-        if (uart_driver_install(uart_num, cfg.rxBufferSize, cfg.rxBufferSize, 10, &uart_queue, 0) != ESP_OK) {
+        if (uart_driver_install(uart_num, cfg.rxBufferSize, cfg.txBufferSize, 10, &uart_queue, 0) != ESP_OK) {
             Log::getLog().error(HAL_TAG, "Failed to install UART driver");
             cleanup_resources();
             return;
@@ -215,7 +215,7 @@ public:
         uart_set_baudrate(uart_num, spd);
     }
     void sendBreak() override { uart_write_bytes_with_break(uart_num, " ", 1, 15); }
-    void tx(const uint8_t* b, int n) override { uart_write_bytes(uart_num, (const char*)b, n); }
+    int tx(const uint8_t* b, int n) override { return uart_write_bytes(uart_num, (const char*)b, n); }
     void flushTx() override { uart_wait_tx_done(uart_num, pdMS_TO_TICKS(100)); }
     
     void startTimer(int ms) override {
@@ -300,6 +300,12 @@ public:
     void clearAppBuf() override {
         if(stream_buf) xStreamBufferReset(stream_buf);
         peek_buf = -1;
+    }
+    // Flush the UART driver ring buffer so bytes already received by the
+    // hardware but not yet pumped into the stream buffer are discarded.
+    // Called alongside clearAppBuf() from ALink::flushRx().
+    void flushRxHw() override {
+        uart_flush_input(uart_num);
     }
 };
 
