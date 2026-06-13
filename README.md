@@ -96,6 +96,7 @@ Both sketches log throughput, baud, disconnects, and lifetime error counts to se
 | [README.md](README.md) | Overview, quick start (Ping/Pong), feature summary |
 | [AutoLink/docWebMonitor.md](AutoLink/docWebMonitor.md) | Web Monitor setup, dashboard, controls, endpoints, errors vs. disconnects |
 | [AutoLink/docAPI.md](AutoLink/docAPI.md) | Message API reference, advanced usage (raw streaming, manual error control), developer notes |
+| [AutoLink/docTests.md](AutoLink/docTests.md) | How to build, run, and extend the host test suite; ASan + coverage modes; CI recipes |
 | [AutoLink/docVersion.md](AutoLink/docVersion.md) | Full version history for all releases |
 
 Source layout: library code is in `AutoLink/src/` (core) and `AutoLink/src/util/` (utilities); runnable sketches are in `AutoLink/examples/PingPong/`; tests are in `AutoLink/test/test_desktop/` (host) and `AutoLink/test/test_embedded/` (on-hardware).
