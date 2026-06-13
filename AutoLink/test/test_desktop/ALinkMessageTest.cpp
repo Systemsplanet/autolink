@@ -196,6 +196,51 @@ void test_message_size_sweep() {
     std::cout << "PASS" << std::endl;
 }
 
+void test_flushRx_after_desync() {
+    // Regression: when Ping resets its FIFO (e.g. after a recv reject) the
+    // ALink app buffer still holds stale echo bytes. Without flushRx(), the
+    // next recvMsg reads those stale bytes as a header, fails CRC16, and
+    // repeats forever — onPayload() resets the consecutive-error counter on
+    // each valid COBS frame so errThreshold never trips.
+    // With flushRx() the stale bytes are discarded and the next send/recv
+    // round-trip succeeds cleanly.
+    std::cout << "\n=== Test: flushRx() clears stale bytes after desync ===" << std::endl;
+
+    MockHal mHal, sHal;
+    AutoLinkConfig cfg;
+    cfg.reliableMode = true;
+    cfg.streamBufferSize = 8192;
+    ALink a(mHal, true,  cfg);   // Ping side
+    ALink b(sHal, false, cfg);   // Pong side
+
+    // --- Phase 1: send a message whose wire frame is corrupted so recvMsg -1 ---
+    uint8_t msg1[] = {0xAA, 0xBB, 0xCC, 0xDD};
+    assert(a.sendMsg(msg1, sizeof msg1));
+    mHal.txBuf[mHal.txBuf.size() / 2] ^= 0xFF;  // corrupt mid-frame
+    pipe_data(mHal, sHal);
+
+    uint8_t rx[64];
+    int r1 = b.recvMsg(rx, sizeof rx);
+    assert(r1 <= 0);   // rejected: CRC8 drop (0) or CRC16 fail (-1)
+
+    // At this point sHal's app buffer may have residual bytes from partial
+    // decode. We simulate what the application does: call flushRx() to
+    // discard them, then verify a clean round-trip is possible.
+    b.flushRx();
+
+    // --- Phase 2: send a clean message; must receive it correctly ---
+    mHal.txBuf.clear();
+    uint8_t msg2[] = {0x01, 0x02, 0x03, 0x04, 0x05};
+    assert(a.sendMsg(msg2, sizeof msg2));
+    pipe_data(mHal, sHal);
+
+    int r2 = b.recvMsg(rx, sizeof rx);
+    assert(r2 == (int)sizeof(msg2));
+    for (int i = 0; i < r2; i++) assert(rx[i] == msg2[i]);
+
+    std::cout << "PASS" << std::endl;
+}
+
 void test_message_crc_reject() {
     std::cout << "\n=== Test: Corrupt Message Rejected (CRC16) ===" << std::endl;
     MockHal mHal, sHal;
@@ -223,6 +268,7 @@ int main() {
     test_message_boundaries_back_to_back();
     test_message_size_sweep();
     test_message_crc_reject();
+    test_flushRx_after_desync();
     std::cout << "\n=== ALinkMessage Tests Completed Successfully ===" << std::endl;
     return 0;
 }
