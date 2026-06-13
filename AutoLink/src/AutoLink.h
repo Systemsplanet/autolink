@@ -12,11 +12,19 @@
 //   void setup() { comm.begin(); }
 //   void loop()  { comm.send(buf, n);  comm.recv(buf, sizeof buf); }
 #pragma once
-#include "EspHal.h"
 #include "ALink.h"
 #include "Log.h"
 #include "util/UtilBlink.h"
 #include <memory>
+
+#ifdef AUTOLINK_HOST_TEST
+// Host test build: substitute host stubs for the ESP-only types so
+// AutoLink is constructible without FreeRTOS. Define the stubs in the
+// test file *before* including AutoLink.h; see AutoLinkTest.cpp.
+typedef int uart_port_t;
+#else
+#include "EspHal.h"
+#endif
 
 #ifdef ARDUINO
 #include <Stream.h>
@@ -36,7 +44,7 @@ namespace autolink {
 
 // Library version — keep in sync with library.properties. Logged at INFO
 // level by begin() so the running firmware version is always visible.
-#define AUTOLINK_VERSION "3.2.0"
+#define AUTOLINK_VERSION "3.2.1"
 
 // ----------------------------------------------------------------------------
 // AutoLink — the one-object public facade: construct as a global, begin(),
