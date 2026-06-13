@@ -44,7 +44,7 @@ namespace autolink {
 
 // Library version — keep in sync with library.properties. Logged at INFO
 // level by begin() so the running firmware version is always visible.
-#define AUTOLINK_VERSION "3.2.5"
+#define AUTOLINK_VERSION "3.2.7"
 
 // ----------------------------------------------------------------------------
 // AutoLink — the one-object public facade: construct as a global, begin(),
@@ -76,6 +76,15 @@ public:
         // about the maxMsg/streamBufferSize relationship.
         size_t need = 2 * (cfg.maxMsg + MSG_HDR);
         if (cfg.streamBufferSize < need) cfg.streamBufferSize = need;
+        // TX ring must hold at least one full COBS-encoded message without
+        // blocking. A maxMsg-byte payload splits into ceil(maxMsg/250) COBS
+        // frames, each at most 256 bytes. Scale by 5/4 for COBS overhead plus
+        // the 6-byte MSG_HDR, then double for two back-to-back sends (Pong
+        // MAX_TX_PER_LOOP=2). Without this, uart_write_bytes blocks while
+        // holding the ALink lock, starving the UART event task and overflowing
+        // the RX ring with no error visible to the application.
+        size_t need_tx = 2 * ((cfg.maxMsg + MSG_HDR) * 5 / 4 + 64);
+        if (cfg.txBufferSize < need_tx) cfg.txBufferSize = need_tx;
 
         hal = std::make_unique<EspHal>(u_num, rx_pin, tx_pin, cfg);
         link = std::make_unique<ALink>(*hal, isMasterNode, cfg);
