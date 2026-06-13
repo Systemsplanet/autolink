@@ -116,7 +116,8 @@ void ALink::sendFrame(uint8_t payload) {
     uint8_t frame[4] = {0xAA, 0x55, payload, 0};
     frame[3] = UtilCrc::crc8(frame, 3);
     hw.lock();
-    hw.tx(frame, 4);
+    if (hw.tx(frame, 4) != 4)
+        Log::getLog().error(ALINK_TAG, "sendFrame TX truncated (payload=0x%02X)", payload);
     hw.flushTx();
     hw.unlock();
 }
@@ -125,7 +126,8 @@ void ALink::sendFrame(uint8_t payload) {
 void ALink::sendFrame_unlocked(uint8_t payload) {
     uint8_t frame[4] = {0xAA, 0x55, payload, 0};
     frame[3] = UtilCrc::crc8(frame, 3);
-    hw.tx(frame, 4);
+    if (hw.tx(frame, 4) != 4)
+        Log::getLog().error(ALINK_TAG, "sendFrame_unlocked TX truncated (payload=0x%02X)", payload);
     hw.flushTx();
 }
 
@@ -188,7 +190,17 @@ int ALink::write(const uint8_t* b, int len) {
     if (!cfg.reliableMode) {
         hw.lock();
         bool ok = (state == State::OK);
-        if (ok) { hw.tx(b, len); txBytes += len; lastTxMs = hw.nowMs(); }
+        if (ok) {
+            int sent = hw.tx(b, len);
+            if (sent != len) {
+                Log::getLog().error(ALINK_TAG,
+                    "TX truncated (raw mode): wanted %d bytes, UART accepted %d — dropping link",
+                    len, sent);
+                err_unlocked();
+            } else {
+                txBytes += len; lastTxMs = hw.nowMs();
+            }
+        }
         hw.unlock();
         return ok ? len : 0;
     }
@@ -197,30 +209,33 @@ int ALink::write(const uint8_t* b, int len) {
     uint8_t unenc[MAX_CHUNK + 1];
     uint8_t frame[MAX_CHUNK + 5];
     while(offset < len) {
-        // Build the whole frame outside the lock; only the actual tx and the
-        // state read need it. Encoding is pure pointer math, so it's fine to
-        // run unlocked.
         int chunk = std::min(len - offset, MAX_CHUNK);
         memcpy(unenc, b + offset, chunk);
         unenc[chunk] = UtilCrc::crc8(unenc, chunk);
-
         frame[0] = 0x00;
         size_t encLen = UtilCobs::encode(unenc, chunk + 1, frame + 1);
         frame[1 + encLen] = 0x00;
 
         hw.lock();
         if (state != State::OK) { hw.unlock(); break; }
-        // Hold the lock across the whole frame and the stats bump so a
-        // concurrent reader (onRx) sees a consistent state, and so two
-        // writers can't tear the per-frame byte sequence. Each frame is
-        // <= 255 B, well under the TX FIFO. Note: uart_write_bytes copies
-        // into the driver ring and returns quickly; flushTx() (called by
-        // the app) is what blocks until the physical TX drains.
-        hw.tx(frame, encLen + 2);
+        int frameLen = (int)(encLen + 2);
+        int sent = hw.tx(frame, frameLen);
+        if (sent != frameLen) {
+            // TX ring was full: COBS frame truncated. The receiver gets a bad
+            // CRC8, counts a frame error, and eventually drops. Log and count
+            // so repeated truncations trip errThreshold cleanly. Root cause is
+            // txBufferSize too small for maxMsg — see AutoLinkConfig.
+            Log::getLog().error(ALINK_TAG,
+                "TX truncated: frame wanted %d bytes, UART accepted %d "
+                "(txBufferSize too small for maxMsg=%zu?)",
+                frameLen, sent, cfg.maxMsg);
+            err_unlocked();
+            hw.unlock();
+            break;
+        }
         txBytes += chunk;
         lastTxMs = hw.nowMs();
         hw.unlock();
-
         offset += chunk;
     }
     return offset;
@@ -234,9 +249,14 @@ int ALink::writeLocked(const uint8_t* b, int len) {
     if (state != State::OK) return 0;
 
     if (!cfg.reliableMode) {
-        hw.tx(b, len);
-        txBytes += len;
-        lastTxMs = hw.nowMs();
+        int sent = hw.tx(b, len);
+        if (sent != len) {
+            Log::getLog().error(ALINK_TAG,
+                "TX truncated (raw locked): wanted %d, UART accepted %d", len, sent);
+            err_unlocked();
+            return sent;
+        }
+        txBytes += len; lastTxMs = hw.nowMs();
         return len;
     }
 
@@ -251,9 +271,15 @@ int ALink::writeLocked(const uint8_t* b, int len) {
         frame[0] = 0x00;
         size_t encLen = UtilCobs::encode(unenc, chunk + 1, frame + 1);
         frame[1 + encLen] = 0x00;
-        hw.tx(frame, encLen + 2);
-        txBytes += chunk;
-        lastTxMs = hw.nowMs();
+        int frameLen = (int)(encLen + 2);
+        int sent = hw.tx(frame, frameLen);
+        if (sent != frameLen) {
+            Log::getLog().error(ALINK_TAG,
+                "TX truncated (locked): frame wanted %d, UART accepted %d", frameLen, sent);
+            err_unlocked();
+            break;
+        }
+        txBytes += chunk; lastTxMs = hw.nowMs();
         offset += chunk;
     }
     return offset;
@@ -270,18 +296,22 @@ void ALink::dropLink() {
 void ALink::flush() { hw.flushTx(); }
 
 void ALink::flushRx() {
-    // Clears the receive app buffer and resets the message reassembly state
-    // so the next recvMsg call starts cleanly at a header boundary. Does not
-    // drop the link. Intended for use after an application-layer FIFO reset:
-    // when Ping clears its pending-echo FIFO (due to desync or stall), the
-    // ALink app buffer still holds the stale echoes that were queued before
-    // the reset. Without this call, the next recvMsg reads those stale bytes
-    // as a new message header, produces a CRC mismatch, and permanently
-    // desyncs — each echo just re-enqueues another failed read.
+    // Two-stage flush: stream buffer (ALink app layer) then UART driver ring
+    // (hardware layer). Doing only the stream buffer is insufficient: the
+    // UART event task immediately refills the stream buffer from the driver
+    // ring, so the very next recvMsg call reads the same stale bytes that
+    // caused the reject in the first place. Both layers must be cleared.
     hw.lock();
+    int app_bytes = hw.appBufAvailable();
     hw.clearAppBuf();
     rxMsgLen = -1;
     hw.unlock();
+    // Flush the UART ring outside the lock; uart_flush_input has its own
+    // driver-level locking and does not need the ALink protocol lock.
+    hw.flushRxHw();
+    Log::getLog().debug(ALINK_TAG,
+        "flushRx: cleared %d stream bytes + hw ring (rxMsgLen reset)",
+        app_bytes);
 }
 
 bool ALink::sendMsg(const uint8_t* b, int len) {
@@ -673,8 +703,10 @@ void ALink::onTimer() {
             // a one-error partial-flush mid-COBS. Reliable mode only.
             if (cfg.reliableMode && (uint32_t)(now - lastTxMs) >= (uint32_t)okTickMs()) {
                 uint8_t ka[2] = { 0x00, 0x00 };
-                hw.tx(ka, 2);
-                lastTxMs = now;
+                if (hw.tx(ka, 2) != 2)
+                    Log::getLog().error(ALINK_TAG, "keepalive TX truncated");
+                else
+                    lastTxMs = now;
             }
             hw.unlock();
             hw.startTimer(okTickMs());
