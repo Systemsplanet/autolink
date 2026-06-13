@@ -68,6 +68,7 @@ public:
                 log_.info("Ping", "link lost  pendCount was %d  seq=%lu",
                     pendCount_, (unsigned long)msgSeq_);
                 wasReady_ = false;
+                postSettleDrained_ = false;
                 resetFifo_("link drop");
                 tSweepStall_ = now;   // start sweep watchdog
             } else {
@@ -95,11 +96,10 @@ public:
             log_.debug("Ping", "link up  baud=%lu  seq=%lu  settling %lu ms",
                 (unsigned long)comm_.getCurrentBaud(), (unsigned long)msgSeq_,
                 (unsigned long)SETTLE_MS);
-            // Drain ALL stale echoes before sending anything new.
-            // Echoes from the previous session would desync the fresh FIFO.
+            // Drain immediately — catches any stale echoes already in the buffer.
             int drained = 0;
             while (comm_.recv(recvBuf_, sizeof recvBuf_) > 0) drained++;
-            if (drained) log_.debug("Ping", "drained %d stale echo(s)", drained);
+            if (drained) log_.debug("Ping", "drained %d stale echo(s) pre-settle", drained);
             comm_.blinkWait(4);
             tReady_ = millis();
             wasReady_ = true;
@@ -110,6 +110,18 @@ public:
             log_.debug("Ping", "settling  %lu ms remaining",
                 (unsigned long)(SETTLE_MS - (millis() - tReady_)));
             return;
+        }
+
+        // Post-settle re-drain: Pong's TX ring may still have been draining
+        // old echoes when the pre-settle drain ran. Those bytes arrive at
+        // Ping's UART during the 300ms settle window and need to be cleared
+        // before any new sends, or they desync the FIFO.
+        if (!postSettleDrained_) {
+            postSettleDrained_ = true;
+            int drained2 = 0;
+            while (comm_.recv(recvBuf_, sizeof recvBuf_) > 0) drained2++;
+            comm_.flushRx();   // purge any residual partial frame
+            if (drained2) log_.debug("Ping", "drained %d stale echo(s) post-settle", drained2);
         }
 
         // Pipeline stall detection — if the window is full and nothing drains
@@ -256,6 +268,7 @@ private:
     uint32_t tReady_      = 0;
     uint32_t tSweepStall_ = 0;   // millis() when SWP watchdog started
     uint32_t tNotReady_   = 0;   // millis() of last not-ready/settling log (rate limiter)
+    bool     postSettleDrained_ = false;  // true once post-settle re-drain has run
 
     // Separate TX/RX buffers so recv() can never overwrite a payload whose
     // CRC is still pending comparison.
