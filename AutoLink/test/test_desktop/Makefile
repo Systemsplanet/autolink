@@ -11,11 +11,12 @@
 # the include path so headers resolve by the same names the firmware uses.
 
 CXX      = g++
-CXXFLAGS = -std=c++14 -Wall -Wextra -I../../src -I../../src/util
+CXXFLAGS = -std=c++14 -Wall -Wextra -DAUTOLINK_HOST_TEST -I../../src -I../../src/util
 SRC      = ../../src
 UTIL     = ../../src/util
+LINK_SRC = $(SRC)/ALink.cpp $(SRC)/Log.cpp $(UTIL)/UtilCrc.cpp $(UTIL)/UtilCobs.cpp $(UTIL)/UtilFrameRx.cpp $(UTIL)/UtilBaudSweep.cpp
 
-all: test_crc test_cobs test_blink test_framerx test_baudsweep test_core
+all: test_crc test_cobs test_blink test_framerx test_baudsweep test_log test_core test_autolink
 
 test_crc: $(UTIL)/UtilCrc.cpp UtilCrcTest.cpp
 	$(CXX) $(CXXFLAGS) $(UTIL)/UtilCrc.cpp UtilCrcTest.cpp -o run_test_crc
@@ -37,11 +38,19 @@ test_baudsweep: $(UTIL)/UtilBaudSweep.cpp UtilBaudSweepTest.cpp
 	$(CXX) $(CXXFLAGS) $(UTIL)/UtilBaudSweep.cpp UtilBaudSweepTest.cpp -o run_test_baudsweep
 	./run_test_baudsweep
 
-test_core: $(SRC)/ALink.cpp $(SRC)/Log.cpp test.cpp
-	$(CXX) $(CXXFLAGS) $(SRC)/ALink.cpp $(SRC)/Log.cpp $(UTIL)/UtilCrc.cpp $(UTIL)/UtilCobs.cpp $(UTIL)/UtilFrameRx.cpp $(UTIL)/UtilBaudSweep.cpp test.cpp -o run_test
+test_log: $(SRC)/Log.cpp LogTest.cpp
+	$(CXX) $(CXXFLAGS) $(SRC)/Log.cpp LogTest.cpp -o run_test_log
+	./run_test_log
+
+test_core: $(LINK_SRC) test.cpp
+	$(CXX) $(CXXFLAGS) $(LINK_SRC) test.cpp -o run_test
 	./run_test
 
-clean:
-	rm -f run_test run_test_crc run_test_cobs run_test_blink run_test_framerx run_test_baudsweep
+test_autolink: $(LINK_SRC) AutoLinkTest.cpp
+	$(CXX) $(CXXFLAGS) $(LINK_SRC) AutoLinkTest.cpp -o run_test_autolink
+	./run_test_autolink
 
-.PHONY: all test_crc test_cobs test_blink test_framerx test_baudsweep test_core clean
+clean:
+	rm -f run_test run_test_crc run_test_cobs run_test_blink run_test_framerx run_test_baudsweep run_test_log run_test_autolink
+
+.PHONY: all test_crc test_cobs test_blink test_framerx test_baudsweep test_log test_core test_autolink clean
