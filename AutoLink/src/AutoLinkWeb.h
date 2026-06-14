@@ -79,6 +79,7 @@ private:
         uint32_t errCount;       // cumulative frame errors (lifetime)
         uint32_t txBps, rxBps;   // bytes/s since last sample
         uint64_t txTotal, rxTotal, errTotal; // cumulative
+        uint64_t lostMsgs;       // cumulative messages lost on the wire
         int32_t  rssi;           // WiFi RSSI dBm
         uint32_t freeHeap;       // ESP heap bytes free
         uint32_t uptimeS;        // millis()/1000
@@ -117,6 +118,7 @@ private:
     static esp_err_t handleStats(httpd_req_t* req);
     static esp_err_t handleLogs (httpd_req_t* req);
     static esp_err_t handleReset(httpd_req_t* req); // POST /reset — calls resetStats()+resetErrors()
+    static esp_err_t handleLevel(httpd_req_t* req); // POST /level?lv=N — set log level (0=Error,1=Info,2=Debug)
     static esp_err_t handleReboot(httpd_req_t* req); // POST /reboot — esp_restart()
 };
 
