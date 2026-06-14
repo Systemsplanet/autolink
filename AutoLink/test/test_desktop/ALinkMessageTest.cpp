@@ -182,15 +182,15 @@ void test_message_size_sweep() {
 
     expectedTx += (uint64_t)(3 + 10000 + 7) + (uint64_t)MSG_HDR * 3;
     expectedRx += (uint64_t)(3 + 10000 + 7) + (uint64_t)MSG_HDR * 3;
-    uint64_t atx, arx, btx, brx, aerr, berr;
-    a.getStats(atx, arx, aerr);
-    b.getStats(btx, brx, berr);
-    assert(atx == expectedTx);
-    assert(brx == expectedRx);
-    assert(atx == brx);
-    assert(aerr == 0);
-    assert(berr == 0);
-    std::cout << "  [stats] sender tx=" << atx << " receiver rx=" << brx
+    Stats as, bs;
+    a.getStats(as);
+    b.getStats(bs);
+    assert(as.tx == expectedTx);
+    assert(bs.rx == expectedRx);
+    assert(as.tx == bs.rx);
+    assert(as.discCount == 0);
+    assert(bs.discCount == 0);
+    std::cout << "  [stats] sender tx=" << as.tx << " receiver rx=" << bs.rx
               << " (expected " << expectedTx << ")" << std::endl;
 
     std::cout << "PASS" << std::endl;
