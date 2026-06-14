@@ -45,7 +45,13 @@ class EspHal : public ILink {
     SemaphoreHandle_t task_exit_sem = nullptr;
     volatile bool running = false;
     bool healthy = false;
-    int peek_buf = -1;
+    // One-byte look-ahead cache for peekAppBuf(). mutable so appBufAvailable()
+    // can stay const-honest: the cache is logically an internal detail of
+    // the pop/peek path, and all callers must already hold the protocol
+    // lock before touching the app buffer. Marking it mutable documents
+    // that contract and lets the compiler enforce const correctness at
+    // every other call site.
+    mutable int peek_buf = -1;
     
     uart_config_t uart_config;
 
@@ -156,8 +162,8 @@ public:
                          UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE) != ESP_OK) {
             Log::getLog().error(HAL_TAG,
                 "uart_set_pin failed for UART%d tx=%d rx=%d — "
-                "check these GPIO numbers exist on your board. "
-                "FireBeetle ESP32: GPIO17=D10(TX), GPIO16=D11(RX) on the header.",
+                "check these GPIO numbers exist on your board "
+                "(see your board's pinout for valid GPIO assignments).",
                 (int)uart_num, tx_pin, rx_pin);
             uart_driver_delete(uart_num);
             cleanup_resources();
@@ -185,8 +191,17 @@ public:
         }
         timer_handle = xTimerCreate("alink_tmr", pdMS_TO_TICKS(50), pdFALSE, this, timer_callback);
         if (timer_handle == NULL) {
+            // xTimerCreate failed. The UART event task is already running
+            // and the UART driver is installed, so we have to unwind the
+            // exact same teardown every other failure path runs. The
+            // v4.0.0..v4.0.2 code only flipped `running = false` here,
+            // which leaked both the UART driver and the event task:
+            // every later failure path calls cleanup_resources() (which
+            // deletes mutex / task_exit_sem / stream_buf) and
+            // uart_driver_delete() first.
             Log::getLog().error(HAL_TAG, "Failed to create FreeRTOS timer");
-            running = false;
+            uart_driver_delete(uart_num);
+            cleanup_resources();
             return;
         }
         healthy = true;
@@ -220,18 +235,27 @@ public:
     
     void startTimer(int ms) override {
         if(!timer_handle) return;
-        // xTimerChangePeriod/xTimerStart post to the timer-service command
+        // xTimerChangePeriod + xTimerStart post to the timer-service command
         // queue. Under a rapid drop->sweep->drop storm that queue can fill;
-        // with a 0 block time the command is silently dropped and the sweep
-        // timer never restarts, wedging the node in SWP with no PINGs going
-        // out (the peer then reads 0 raw bytes and prints a false WIRING
-        // CHECK). Block briefly so the command actually lands, and retry
-        // once if the queue was momentarily full.
+        // with a 0 block time either command is silently dropped and the
+        // sweep timer never restarts, wedging the node in SWP with no PINGs
+        // going out (the peer then reads 0 raw bytes and prints a false
+        // WIRING CHECK). Block briefly so commands actually land, and treat
+        // ChangePeriod + Start as a single transaction: if ChangePeriod
+        // fails, do not Start (the timer would be left at the old period,
+        // and a successful Start after a failed ChangePeriod is worse than
+        // no Start at all — the caller would observe a different cadence
+        // than what it asked for). Retry the whole pair a couple of times
+        // so a momentarily-full command queue still resolves cleanly.
         const TickType_t block = pdMS_TO_TICKS(20);
-        if (xTimerChangePeriod(timer_handle, pdMS_TO_TICKS(ms), block) != pdPASS)
-            xTimerChangePeriod(timer_handle, pdMS_TO_TICKS(ms), block);
-        if (xTimerStart(timer_handle, block) != pdPASS)
-            xTimerStart(timer_handle, block);
+        const TickType_t period = pdMS_TO_TICKS(ms);
+        for (int i = 0; i < 3; i++) {
+            if (xTimerChangePeriod(timer_handle, period, block) == pdPASS &&
+                xTimerStart(timer_handle, block) == pdPASS) return;
+        }
+        Log::getLog().error(HAL_TAG,
+            "startTimer(%d ms) gave up: timer-service command queue full",
+            ms);
     }
     void stopTimer() override {
         if(timer_handle) xTimerStop(timer_handle, pdMS_TO_TICKS(20));
@@ -256,21 +280,13 @@ public:
         if(mutex) xSemaphoreGive(mutex); 
     }
     
-    void pushAppBuf(uint8_t b) override { 
-        if(stream_buf) xStreamBufferSend(stream_buf, &b, 1, 0); 
-    }
     int pushAppBuf(const uint8_t* b, int n) override {
         if (!stream_buf || n <= 0) return 0;
         // Returns bytes accepted; a shortfall means the app buffer is full
         // and the caller counts the loss as a link error.
         return (int)xStreamBufferSend(stream_buf, b, n, 0);
     }
-    
-    int popAppBuf() override {
-        uint8_t b;
-        if (popAppBuf(&b, 1) == 1) return b;
-        return -1;
-    }
+
     int popAppBuf(uint8_t* b, int max_len) override {
         int total = 0;
         if (peek_buf != -1 && max_len > 0) {
@@ -285,7 +301,7 @@ public:
         return total;
     }
     
-    int peekAppBuf() override {
+    int peekAppBuf() const override {
         if (peek_buf == -1) {
             uint8_t b;
             if (stream_buf && xStreamBufferReceive(stream_buf, &b, 1, 0) == 1) peek_buf = b;
