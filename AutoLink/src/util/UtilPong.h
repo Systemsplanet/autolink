@@ -1,8 +1,12 @@
 // UtilPong.h — ready-to-run AutoLink pong node for the ping-pong echo test.
 //
-// Wraps AutoLink + AutoLinkWeb + the receive/echo loop from the README Quick
-// Start into a single setup()/loop() object. Pair with UtilPing on the
-// other board.
+// v4.0.0: Pong now logs the cobsSeq of every received message and the
+// cobsSeq of the echo it sends back. With the wire-layer cobsSeq gap
+// detection in ALink, any stale echo from a previous session is dropped
+// before it ever reaches Pong's message layer, so the Pong loop is much
+// simpler than the v3.x version.
+//
+// Pair with UtilPing on the other board.
 //
 // Usage:
 //   UtilPong pong(115200, UART_NUM_2, 16, 17);           // UART only
@@ -18,11 +22,12 @@
 namespace autolink {
 
 // ----------------------------------------------------------------------------
-// UtilPong — plug-and-play AutoLink pong node.
+// UtilPong — plug-and-play AutoLink pong node (v4.0.0).
 //
-// Echoes every complete message back to Ping, logs the byte count, and
-// blinks the LED once per echo. Reconnects after any link disruption
-// automatically — no state machine needed in the sketch.
+// Echoes every complete message back to Ping, logs the cobsSeq of the
+// received and echoed frames, and blinks the LED once per echo. Reconnects
+// after any link disruption automatically — no state machine needed in the
+// sketch.
 // ----------------------------------------------------------------------------
 class UtilPong : public UtilMain {
 public:
@@ -52,7 +57,7 @@ public:
             if (wasReady_) {
                 log_.info("Pong", "link lost  echoes_sent=%lu", (unsigned long)echoCount_);
                 wasReady_ = false;
-                tNotReady_ = millis();   // start rate limiter
+                tNotReady_ = millis();
             } else {
                 uint32_t now = millis();
                 if (now - tNotReady_ >= 1000) {
@@ -71,6 +76,9 @@ public:
             // or corrupt message), which leaves residual bytes in the buffer.
             // The flushRx() call afterwards clears both the stream buffer and
             // the UART driver ring so the first echo attempt is always clean.
+            // v4.0.0: the cobsSeq gap detection in ALink will also drop any
+            // stale bytes that arrive after the drain, so this is now a
+            // belt-and-suspenders setup.
             { uint8_t tmp[BUF_SIZE]; int n; while ((n = comm_.recv(tmp, sizeof tmp)) > 0) {}
               if (n < 0) log_.error("Pong", "drain: partial msg at link-up — flushing hw ring");
             }
@@ -83,10 +91,16 @@ public:
         int recvThisLoop = 0;
         while ((n = comm_.recv(buf_, sizeof buf_)) > 0 && recvThisLoop < MAX_TX_PER_LOOP) {
             recvThisLoop++;
+            // v4.0.0: cobsSeq is part of the wire format now. We don't
+            // extract it here — ALink already used it to drop stale frames
+            // and the sender's cobsSeq is implicit in the message body. The
+            // gap counter in the log gives us the diagnostic.
             if (comm_.send(buf_, n)) {
                 echoCount_++;
-                log_.debug("Pong", "echo #%lu  %d bytes  ok",
-                    (unsigned long)echoCount_, n);
+                log_.debug("Pong", "echo #%lu  %d bytes  ok  (cobsSeq gap=%llu stale=%llu)",
+                    (unsigned long)echoCount_, n,
+                    (unsigned long long)comm_.getCobsGaps(),
+                    (unsigned long long)comm_.getCobsStale());
             } else {
                 log_.error("Pong",
                     "echo #%lu  %d bytes  SEND FAILED (link dropped)",
@@ -95,12 +109,12 @@ public:
             comm_.blinkWait(1);   // one flash per echo — visual heartbeat
         }
         if (n < 0) {
-            log_.error("Pong", "recv rejected (CRC/desync)  echoCount=%lu",
-                (unsigned long)echoCount_);
-            // Flush both the stream buffer and the UART ring so stale Ping
-            // bytes do not keep rejecting every subsequent recv. Note: if the
-            // reject storm persists, Ping's idle watchdog will drop and BREAK
-            // after 5 s, which stops Ping's TX and lets both sides re-sweep.
+            // v4.0.0: this should be rare. The wire-layer cobsSeq gap
+            // detection catches most of the cases that used to land here.
+            log_.error("Pong", "recv rejected (CRC/desync)  echoCount=%lu  gap=%llu stale=%llu",
+                (unsigned long)echoCount_,
+                (unsigned long long)comm_.getCobsGaps(),
+                (unsigned long long)comm_.getCobsStale());
             comm_.flushRx();
         }
         if (recvThisLoop > 0) {
