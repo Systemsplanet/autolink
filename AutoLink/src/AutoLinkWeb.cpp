@@ -34,7 +34,7 @@ static const char HTML_PAGE[] = R"HTML(<!DOCTYPE html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f2f5;color:#111827;min-height:100vh}
-header{background:#ffffff;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;border-bottom:2px solid #d1d5db;position:sticky;top:0;z-index:10;box-shadow:0 2px 8px rgba(0,0,0,.08)}
+header{background:#ffffff;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;border-bottom:2px solid #d1d5db;position:sticky;top:0;z-index:10;box-shadow:0 2px 8px rgba(0,0,0,.08);gap:10px;flex-wrap:wrap}
 h1{font-size:18px;font-weight:700;letter-spacing:.2px}
 .sub{font-size:13px;color:#6b7280;margin-top:3px}
 .pill{padding:6px 16px;border-radius:20px;font-size:13px;font-weight:700;letter-spacing:.5px;transition:background .3s,color .3s}
@@ -49,25 +49,51 @@ main{padding:14px;max-width:540px;margin:0 auto}
 .val{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.1}
 .g{color:#059669}.b{color:#2563eb}.r{color:#dc2626}.a{color:#d97706}
 .hint{font-size:12px;color:#6b7280;margin-top:5px}
-.row{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.row{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;gap:8px;flex-wrap:wrap}
 .section-lbl{font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:.9px;font-weight:600}
-.btns{display:flex;gap:7px}
+.btns{display:flex;gap:7px;flex-wrap:wrap}
 .btn{background:#e5e7eb;color:#374151;border:1px solid #d1d5db;padding:8px 16px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;-webkit-tap-highlight-color:transparent}
 .btn:active{opacity:.7}
 .btn.on{background:#dbeafe;color:#1d4ed8;border-color:#93c5fd}
 .btn.rst{background:#fee2e2;color:#dc2626;border-color:#fca5a5}
 .btn.rbt{background:#fef3c7;color:#b45309;border-color:#fcd34d}
-.log-wrap{position:relative}.log{background:#ffffff;border:1px solid #d1d5db;border-radius:12px 12px 0 0;padding:12px;height:240px;overflow-y:auto;font-family:ui-monospace,'Cascadia Code','Courier New',monospace;font-size:12px;line-height:1.65;-webkit-overflow-scrolling:touch}.log-fill-bar{height:5px;border-radius:0 0 8px 8px;background:linear-gradient(to right,#22c55e var(--pct,0%),#e5e7eb var(--pct,0%));border:1px solid #d1d5db;border-top:none;transition:background 0.3s}.log-overlay{display:none;position:fixed;inset:0;z-index:9999;background:#fff;flex-direction:column}.log-overlay.open{display:flex}.log-overlay .log{flex:1;height:auto;border-radius:0;border:none;border-bottom:1px solid #d1d5db}.log-overlay .log-fill-bar{border-radius:0;border:none;border-top:1px solid #e5e7eb}.log-overlay-hdr{display:flex;align-items:center;justify-content:space-between;padding:8px 14px;border-bottom:1px solid #d1d5db;background:#f9fafb}.log-overlay-hdr>span{font-weight:600;font-size:14px}
-.E{color:#dc2626}.I{color:#374151}.D{color:#9ca3af}
+.btn.pause{background:#fde68a;color:#92400e;border-color:#fcd34d}
+.btn.pause.on{background:#bbf7d0;color:#065f46;border-color:#86efac}
+.log-wrap{position:relative}
+/* Log panel — v4.0.6: reverted to plain black-on-white. The v4.0.4
+   dark-slate background made the .E/.I/.D severity colors hard to
+   read on a phone in daylight; the .I (info) color of #e5e7eb in
+   particular was almost the same as the background, and the white
+   card behind the log block made the contrast jump uncomfortable
+   when the operator scrolled past the log. Plain black on white
+   matches the rest of the page; the .E red and .D grey still
+   colorize severity. */
+.log{background:#ffffff;color:#111827;border:1px solid #d1d5db;border-radius:12px 12px 0 0;padding:12px;height:240px;overflow-y:auto;font-family:ui-monospace,'Cascadia Code','Courier New',monospace;font-size:12px;line-height:1.65;-webkit-overflow-scrolling:touch}
+.log-fill-bar{height:5px;border-radius:0 0 8px 8px;background:linear-gradient(to right,#22c55e var(--pct,0%),#e5e7eb var(--pct,0%));border:1px solid #d1d5db;border-top:none;transition:background 0.3s}.log-overlay{display:none;position:fixed;inset:0;z-index:9999;background:#fff;flex-direction:column}.log-overlay.open{display:flex}.log-overlay .log{flex:1;height:auto;border-radius:0;border:none;border-bottom:1px solid #d1d5db}.log-overlay .log-fill-bar{border-radius:0;border:none;border-top:1px solid #e5e7eb}.log-overlay-hdr{display:flex;align-items:center;justify-content:space-between;padding:8px 14px;border-bottom:1px solid #d1d5db;background:#f9fafb}.log-overlay-hdr>span{font-weight:600;font-size:14px}
+/* Severity colors against the (v4.0.6: white) log background. */
+.E{color:#dc2626;font-weight:600}.I{color:#111827}.D{color:#9ca3af}
+/* Log-level radio group. Compact, single row, lives in the header so the
+   chosen level is always reachable without scrolling. */
+.lvl-group{display:inline-flex;border:1px solid #d1d5db;border-radius:8px;overflow:hidden;background:#f9fafb}
+.lvl-group label{display:flex;align-items:center;gap:4px;padding:6px 10px;font-size:12px;font-weight:600;color:#374151;cursor:pointer;-webkit-tap-highlight-color:transparent;border-right:1px solid #d1d5db;user-select:none}
+.lvl-group label:last-child{border-right:none}
+.lvl-group input[type=radio]{margin:0;accent-color:#2563eb}
+.lvl-group label.on{background:#dbeafe;color:#1d4ed8}
 .footer{text-align:center;padding:16px;font-size:12px;color:#9ca3af}
 </style>
 </head>
 <body>
 <header>
-  <div>
+  <div style="flex:1;min-width:160px">
     <h1>AutoLink Monitor</h1>
     <div class="sub" id="uptime">connecting&#x2026;</div>
   </div>
+  <div class="lvl-group" id="lvlGroup" role="radiogroup" aria-label="Log level">
+    <label><input type="radio" name="lvl" value="0"><span>Error</span></label>
+    <label><input type="radio" name="lvl" value="1"><span>Info</span></label>
+    <label><input type="radio" name="lvl" value="2"><span>Debug</span></label>
+  </div>
+  <button class="btn pause" id="topPbtn" onclick="toggleMsgPause()">&#9654; Resume</button>
   <span class="pill swp" id="pill">SWP</span>
 </header>
 <main>
@@ -86,6 +112,7 @@ main{padding:14px;max-width:540px;margin:0 auto}
     <div class="card">
       <div class="lbl">Errors (lifetime)</div>
       <div class="val r" id="errcnt">&#x2014;</div>
+      <div class="hint" id="lostmsgs">0 lost msgs</div>
       <div class="hint" id="discon">0 disconnects</div>
     </div>
     <div class="card">
@@ -131,8 +158,43 @@ main{padding:14px;max-width:540px;margin:0 auto}
 </main>
 <div class="footer"><span id="ver"></span> AutoLink Web Monitor &#x2014; <span id="host"></span></div>
 <script>
-var logPaused=false,logFullOpen=false,lastSeq=0,fails=0,busy=false;
+var logPaused=false,msgPaused=false,logFullOpen=false,lastSeq=0,fails=0,busy=false,currentLvl=null;
 document.getElementById('host').textContent=location.host;
+
+// Bind the log-level radio group: clicking a radio sends a POST to /level
+// with the chosen numeric level (0=Error, 1=Info, 2=Debug) and updates the
+// page's selected highlight. The default level is whatever the device was
+// already at; the first /stats response reconciles the UI to it.
+document.querySelectorAll('input[name=lvl]').forEach(function(r){
+  r.addEventListener('change',async function(){
+    if(!this.checked)return;
+    var lv=this.value;
+    try{
+      var r2=await tfetch('/level?lv='+encodeURIComponent(lv),{method:'POST'},2000);
+      if(r2.ok){currentLvl=lv;highlightLvl();}
+    }catch(e){}
+  });
+});
+function highlightLvl(){
+  document.querySelectorAll('#lvlGroup label').forEach(function(l){
+    var inp=l.querySelector('input');
+    l.classList.toggle('on',inp&&inp.value===currentLvl);
+  });
+}
+
+// Top-of-page pause/resume for the ping/pong message stream. Distinct from
+// the per-log Pause button which freezes the scrolling log lines — this
+// one freezes the *messages* (rx rate, rx count, the rx log) at their
+// last value. The two are independent so a user can stop the log from
+// scrolling while still watching live traffic, or vice versa.
+function toggleMsgPause(){
+  msgPaused=!msgPaused;
+  var b=document.getElementById('topPbtn');
+  if(b){
+    if(msgPaused){b.innerHTML='&#9654; Resume';b.className='btn pause on';}
+    else         {b.innerHTML='&#9208; Pause';b.className='btn pause';}
+  }
+}
 
 // Fetch with an AbortController timeout (ms). Prevents stalled requests from
 // holding open connections when the ESP is busy or WiFi is reconnecting.
@@ -245,26 +307,40 @@ async function poll(){
     var r=await tfetch('/stats',null,2500);
     if(!r.ok)throw 0;
     var d=await r.json();
-    set('txbps',bps(d.txBps));
-    set('txtot','total '+bytes(d.txTotal));
-    set('rxbps',bps(d.rxBps));
-    set('rxtot','total '+bytes(d.rxTotal));
-    set('errcnt',d.errCount);
-    set('discon', d.errTotal + (d.errTotal===1?' disconnect':' disconnects'));
-    set('rssi',d.rssi+' dBm');
-    set('heap','heap '+bytes(d.freeHeap));
-    if(d.state==='OK'){
-      set('baud', d.baudRate ? d.baudRate.toLocaleString()+' baud' : '?');
-    } else if(d.state==='SWP'){
-      set('baud', (d.baudRate ? d.baudRate.toLocaleString() : '?')+' \u21c4 sweeping');
-    } else if(d.state==='LCK'){
-      set('baud', (d.baudRate ? d.baudRate.toLocaleString() : '?')+' \u21c4 locking');
-    } else {
-      set('baud', d.baudRate ? d.baudRate.toLocaleString()+' baud' : '\u2014');
+    if(!msgPaused){
+      set('txbps',bps(d.txBps));
+      set('txtot','total '+bytes(d.txTotal));
+      set('rxbps',bps(d.rxBps));
+      set('rxtot','total '+bytes(d.rxTotal));
+      set('errcnt',d.errCount);
+      var lm=d.lostMsgs||0;
+      set('lostmsgs', lm + (lm===1?' lost msg':' lost msgs'));
+      set('discon', d.errTotal + (d.errTotal===1?' disconnect':' disconnects'));
+      set('rssi',d.rssi+' dBm');
+      set('heap','heap '+bytes(d.freeHeap));
+      if(d.state==='OK'){
+        set('baud', d.baudRate ? d.baudRate.toLocaleString()+' baud' : '?');
+      } else if(d.state==='SWP'){
+        set('baud', (d.baudRate ? d.baudRate.toLocaleString() : '?')+' \u21c4 sweeping');
+      } else if(d.state==='LCK'){
+        set('baud', (d.baudRate ? d.baudRate.toLocaleString() : '?')+' \u21c4 locking');
+      } else {
+        set('baud', d.baudRate ? d.baudRate.toLocaleString()+' baud' : '\u2014');
+      }
+      set('uptime','up '+hms(d.uptimeS));
     }
-    set('uptime','up '+hms(d.uptimeS));
     setPill(d.state);
     if(d.version)document.getElementById('ver').textContent='v'+d.version;
+    // Reconcile the level radio to whatever the device is currently at.
+    // Catches a boot-time default that doesn't match the user's last choice
+    // (e.g. fresh device comes up at INFO, user picks DEBUG on the page,
+    // then someone reboots — the next page load sees INFO and updates the
+    // radio so the UI doesn't lie).
+    if(d.lvl!==undefined&&d.lvl!==null&&String(d.lvl)!==currentLvl){
+      currentLvl=String(d.lvl);
+      var r2=document.querySelector('input[name=lvl][value="'+currentLvl+'"]');
+      if(r2){r2.checked=true;highlightLvl();}
+    }
     fails=0;hide('alert');
   }catch(e){if(++fails>=3)show('alert');}
   try{
@@ -408,11 +484,13 @@ bool AutoLinkWeb::begin(const char* ssid, const char* pass, uint16_t port) {
         const httpd_uri_t r2 = { "/logs",  HTTP_GET,  handleLogs,  this };
         const httpd_uri_t r3 = { "/reset",  HTTP_POST, handleReset,  this };
         const httpd_uri_t r4 = { "/reboot", HTTP_POST, handleReboot, this };
+        const httpd_uri_t r5 = { "/level",  HTTP_POST, handleLevel,  this };
         httpd_register_uri_handler(server_, &r0);
         httpd_register_uri_handler(server_, &r1);
         httpd_register_uri_handler(server_, &r2);
         httpd_register_uri_handler(server_, &r3);
         httpd_register_uri_handler(server_, &r4);
+        httpd_register_uri_handler(server_, &r5);
     }
 
     enabled_ = true;
@@ -439,17 +517,20 @@ String AutoLinkWeb::ip() const {
 void AutoLinkWeb::statTimerCb(void* arg) {
     AutoLinkWeb* self = (AutoLinkWeb*)arg;
 
-    uint64_t tx, rx, errs;
-    self->link_.getStats(tx, rx, errs);
+    Stats s;
+    self->link_.getStats(s);
+    Diag d;
+    self->link_.getDiag(d);
 
     xSemaphoreTake(self->snapMtx_, portMAX_DELAY);
     // Guard against the app calling resetStats() between samples — clamp to 0.
-    self->snap_.txBps    = (tx >= self->prevTx_) ? (uint32_t)(tx - self->prevTx_) : 0;
-    self->snap_.rxBps    = (rx >= self->prevRx_) ? (uint32_t)(rx - self->prevRx_) : 0;
-    self->snap_.txTotal  = tx;
-    self->snap_.rxTotal  = rx;
-    self->snap_.errTotal = errs;
-    self->snap_.errCount = (uint32_t)self->link_.getLifetimeErrors();
+    self->snap_.txBps    = (s.tx >= self->prevTx_) ? (uint32_t)(s.tx - self->prevTx_) : 0;
+    self->snap_.rxBps    = (s.rx >= self->prevRx_) ? (uint32_t)(s.rx - self->prevRx_) : 0;
+    self->snap_.txTotal  = s.tx;
+    self->snap_.rxTotal  = s.rx;
+    self->snap_.errTotal = s.discCount;
+    self->snap_.errCount = (uint32_t)s.frameErrs;
+    self->snap_.lostMsgs = d.lostMsgs;
     strncpy(self->snap_.state, StateToStr(self->link_.getState()), 3);
     self->snap_.state[3] = '\0';
     self->snap_.rssi     = (int32_t)WiFi.RSSI();
@@ -458,8 +539,8 @@ void AutoLinkWeb::statTimerCb(void* arg) {
     self->snap_.baudRate = self->link_.getCurrentBaud();
     xSemaphoreGive(self->snapMtx_);
 
-    self->prevTx_ = tx;
-    self->prevRx_ = rx;
+    self->prevTx_ = s.tx;
+    self->prevRx_ = s.rx;
 }
 
 // ---------------------------------------------------------------------------
@@ -539,16 +620,19 @@ esp_err_t AutoLinkWeb::handleStats(httpd_req_t* req) {
     s = self->snap_;
     xSemaphoreGive(self->snapMtx_);
 
-    char buf[300];
+    char buf[360];
     int  len = snprintf(buf, sizeof(buf),
         "{\"state\":\"%s\",\"errCount\":%lu,\"errTotal\":%llu,"
+        "\"lostMsgs\":%llu,"
         "\"txBps\":%lu,\"rxBps\":%lu,"
         "\"txTotal\":%llu,\"rxTotal\":%llu,"
         "\"rssi\":%d,\"freeHeap\":%lu,\"uptimeS\":%lu,"
-        "\"baudRate\":%lu,\"version\":\"" AUTOLINK_VERSION "\"}",
+        "\"baudRate\":%lu,\"lvl\":%d,"
+        "\"version\":\"" AUTOLINK_VERSION "\"}",
         s.state,
         (unsigned long)s.errCount,
         (unsigned long long)s.errTotal,
+        (unsigned long long)s.lostMsgs,
         (unsigned long)s.txBps,
         (unsigned long)s.rxBps,
         (unsigned long long)s.txTotal,
@@ -556,7 +640,8 @@ esp_err_t AutoLinkWeb::handleStats(httpd_req_t* req) {
         (int)s.rssi,
         (unsigned long)s.freeHeap,
         (unsigned long)s.uptimeS,
-        (unsigned long)s.baudRate);
+        (unsigned long)s.baudRate,
+        (int)Log::getLog().getLevel());
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
@@ -649,6 +734,38 @@ esp_err_t AutoLinkWeb::handleReset(httpd_req_t* req) {
         self->prevRx_ = 0;
         xSemaphoreGive(self->snapMtx_);
     }
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_set_hdr(req, "Connection", "close");
+    httpd_resp_send(req, "ok", 2);
+    return ESP_OK;
+}
+
+// HTTP handler: POST /level?lv=N
+// Sets the singleton Log level to N (0=Error, 1=Info, 2=Debug). The
+// dashboard's log-level radio group POSTs here whenever the user picks
+// a different level. Invalid or missing values are rejected with 400.
+// The change is in-memory only — it does not persist across reboot, since
+// the device boots at Log::ERROR by default. (Future: persist to NVS if
+// the operator wants the new level to survive a power cycle.)
+esp_err_t AutoLinkWeb::handleLevel(httpd_req_t* req) {
+    char     query[48] = {};
+    char     val[8]    = {};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK
+        || httpd_query_key_value(query, "lv", val, sizeof(val)) != ESP_OK) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "missing ?lv=", 13);
+        return ESP_OK;
+    }
+    int lv = atoi(val);
+    if (lv < 0 || lv > (int)Log::DEBUG) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "lv must be 0..2", 15);
+        return ESP_OK;
+    }
+    Log::getLog().setLevel((Log::Level)lv);
+    Log::getLog().info(TAG, "Log level set to %d via web", lv);
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_set_hdr(req, "Connection", "close");
     httpd_resp_send(req, "ok", 2);
