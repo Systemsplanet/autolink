@@ -22,6 +22,11 @@
 // board info without interleaving into the test output. The test then runs
 // once, prints [ALL_TESTS_DONE], and loop() settles into a 2-second periodic
 // state log so you can see the link state evolve after the suite completes.
+//
+// v4.0.0: the periodic state log includes cobsSeq diagnostics
+// (cobsSeq sender, lastRX, gap count, stale count). These are the
+// numbers to watch when diagnosing desync issues -- the cobsSeq layer
+// is the v4.0.0 fix for the v3.0.0..v3.2.10 wire-byte-shift bug.
 
 #include <AutoLink.h>
 using namespace autolink;
@@ -156,11 +161,17 @@ void loop() {
     if (!facCheckDone) return;
     static uint32_t t = 0;
     if (millis() - t > 2000) {
-        Serial.printf("[test_embedded] state=%s baud=%lu heap=%lu uptime=%lus\n",
+        Serial.printf("[test_embedded] state=%s baud=%lu heap=%lu uptime=%lus"
+                      "  cobsSeq(TX)=%u lastRX=%s%u gap=%llu stale=%llu\n",
             alink.ready() ? "OK" : "negotiating",
             (unsigned long)alink.getCurrentBaud(),
             (unsigned long)ESP.getFreeHeap(),
-            (unsigned long)((millis() - tBoot) / 1000));
+            (unsigned long)((millis() - tBoot) / 1000),
+            (unsigned)alink.getCobsSeq(),
+            alink.getLastRxCobsSeqSet() ? "" : "(unset)",
+            alink.getLastRxCobsSeqSet() ? (unsigned)alink.getLastRxCobsSeq() : 0,
+            (unsigned long long)alink.getCobsGaps(),
+            (unsigned long long)alink.getCobsStale());
         t = millis();
     }
 }
