@@ -65,7 +65,6 @@ public:
     void lock() const override { mtx.lock(); }
     void unlock() const override { mtx.unlock(); }
 
-    void pushAppBuf(uint8_t b) override { appBuf.push(b); }
     int pushAppBuf(const uint8_t* b, int n) override {
         int acc = 0;
         for (int i = 0; i < n; i++) {
@@ -75,11 +74,6 @@ public:
         }
         return acc;
     }
-    int popAppBuf() override {
-        if (appBuf.empty()) return -1;
-        uint8_t b = appBuf.front(); appBuf.pop();
-        return b;
-    }
     int popAppBuf(uint8_t* b, int max_len) override {
         int n = 0;
         while(n < max_len && !appBuf.empty()) {
@@ -88,7 +82,7 @@ public:
         }
         return n;
     }
-    int peekAppBuf() override {
+    int peekAppBuf() const override {
         if (appBuf.empty()) return -1;
         return appBuf.front();
     }
