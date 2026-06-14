@@ -43,8 +43,12 @@ public:
 namespace autolink {
 
 // Library version — keep in sync with library.properties. Logged at INFO
-// level by begin() so the running firmware version is always visible.
-#define AUTOLINK_VERSION "4.0.1"
+// level by UtilMain::setupCommon() (which is always called from the
+// Ping/Pong examples); AutoLink::begin() does NOT log it again to keep
+// the version line single-sourced. The single source of truth is
+// library.properties; this macro exists so firmware code can compile-
+// time test against the running version if needed.
+#define AUTOLINK_VERSION "4.0.8"
 
 // ----------------------------------------------------------------------------
 // AutoLink — the one-object public facade: construct as a global, begin(),
@@ -98,7 +102,9 @@ public:
     }
 
     void begin() {
-        Log::getLog().info("AutoLink", "v" AUTOLINK_VERSION);
+        // The version is logged by UtilMain::setupCommon() (the standard
+        // examples call that before comm_.begin()), so this entry point
+        // stays single-sourced — no version line in the boot log.
         hal->begin();
     }
     // Flash the status LED n times.
@@ -125,29 +131,20 @@ public:
     // side to prevent stale echoes from permanently desyncing recvMsg.
     void flushRx() { link->flushRx(); }
 
-    // Optional: app-stream throughput + lifetime disconnect count.
-    //
-    // The 2-arg form is unchanged; the 3-arg form adds the lifetime
-    // disconnect count -- one per OK->SWP transition. Spurious onBreak()
-    // calls and threshold trips while already in SWP/LCK are part of
-    // the same recovery and do not inflate the count. Survives
-    // resetStats() and link drops; only zeroed by resetErrors(). This
-    // is what you want for longevity testing ("how many bounces did
-    // this link survive?"); per-byte error noise is intentionally not
-    // counted.
-    void getStats(uint64_t& tx, uint64_t& rx) const {
-        uint64_t errs;
-        link->getStats(tx, rx, errs);
-    }
-    void getStats(uint64_t& tx, uint64_t& rx, uint64_t& errors) const {
-        link->getStats(tx, rx, errors);
-    }
+    // Optional: app-stream throughput + lifetime disconnect/frame-error
+    // counts. Replaces the old 2-arg/3-arg getStats overloads and the
+    // standalone getLifetimeErrors() — one struct return, four fields,
+    // impossible to call the wrong one. discCount counts one per
+    // OK->SWP transition (lifetime, monotonic, only zeroed by
+    // resetErrors). frameErrs is the cumulative frame-error tally
+    // (bad CRC, malformed COBS, oversize).
+    void getStats(Stats& s) const { link->getStats(s); }
     // Zero the tx/rx throughput counters. Does NOT zero the disconnect
     // counter -- use resetErrors() for that, or per-second B/s sampling
     // would wipe the very history that lets you see "errors went up
     // since last sample".
     void resetStats() { link->resetStats(); }
-    // Zero the lifetime disconnect counter (e.g. on operator ack).
+    // Zero the lifetime counters (disconnects + frame errors).
     void resetErrors() { link->resetErrors(); }
 
     // ======================= Advanced =======================
@@ -172,13 +169,9 @@ public:
     int  getErrCount() const { return link->getErrCount(); }
     State getState() const { return link->getState(); }
     uint32_t getCurrentBaud() const { return link->getCurrentBaud(); }
-    uint64_t getLifetimeErrors() const { return link->getLifetimeErrors(); }
-    // v4.0.0 cobsSeq diagnostics.
-    uint8_t  getCobsSeq()         const { return link->getCobsSeq(); }
-    bool     getLastRxCobsSeqSet() const { return link->getLastRxCobsSeqSet(); }
-    uint8_t  getLastRxCobsSeq()   const { return link->getLastRxCobsSeq(); }
-    uint64_t getCobsGaps()        const { return link->getCobsGaps(); }
-    uint64_t getCobsStale()       const { return link->getCobsStale(); }
+    // v4.0.0 cobsSeq diagnostics, one struct return (replaces the five
+    // getCobs* getters that v4.0.0..v4.0.2 carried).
+    void getDiag(Diag& d) const { link->getDiag(d); }
 
     // v4.0.1: the actual app buffer size after auto-size. Lets the
     // dashboard display it and lets tests verify the auto-size formula.
