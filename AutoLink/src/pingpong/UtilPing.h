@@ -19,7 +19,7 @@
 #ifdef ARDUINO
 
 #include "UtilMain.h"
-#include "UtilCrc.h"
+#include "../util/UtilCrc.h"
 #include <string.h>
 
 namespace autolink {
