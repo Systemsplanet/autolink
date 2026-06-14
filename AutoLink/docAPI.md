@@ -11,10 +11,10 @@ This is the complete public surface for normal use:
 | `int send(const uint8_t* b, int len)` | `len` if queued, `0` if the link is down/busy | `len` must be `1..maxMsg` (default 1024). Safe to call every loop. |
 | `int recv(uint8_t* b, int max)` | `>0` message length, `0` nothing ready, `-1` rejected/dropped | `max` should be `>= maxMsg`. On `-1` the bad message is drained and an error is counted. |
 | `bool ready()` | `true` once negotiated | Optional — `send`/`recv` already gate themselves, so you rarely need this. |
-| `void getStats(uint64_t& tx, uint64_t& rx)` | — | App-stream bytes since the last `resetStats()`. |
-| `void getStats(uint64_t& tx, uint64_t& rx, uint64_t& errs)` | — | Adds the lifetime disconnect count (one per OK→SWP transition). Monotonic across samples and link drops; only zeroed by `resetErrors()`. |
-| `void resetStats()` | — | Zero the tx/rx throughput counters. Does **not** touch the disconnect counter. |
-| `void resetErrors()` | — | Zero the lifetime disconnect counter (e.g. on operator ack). |
+| `void getStats(Stats& s)` | — | One struct return, four fields: `tx`, `rx` (since `resetStats()`), `discCount` (OK→SWP transitions since `resetErrors()`), `frameErrs` (cumulative frame errors since `resetErrors()`). Replaces the old 2-arg / 3-arg overloads and the standalone `getLifetimeErrors()`. |
+| `void resetStats()` | — | Zero the `tx` / `rx` throughput counters. Does **not** touch `discCount` or `frameErrs`. |
+| `void resetErrors()` | — | Zero `discCount` and `frameErrs` (e.g. on operator ack). |
+| `void getDiag(Diag& d)` | — | One struct return for cobsSeq diagnostics: `txSeq`, `rxSeqSet`, `rxSeq`, `gaps`, `stale`. Replaces the five `getCobs*` getters from v4.0.0..v4.0.2. |
 
 Each message goes out as a 6-byte header (`len` + `crc16`) followed by the payload, chunked into ≤250-byte COBS frames, each guarded by a per-frame CRC-8. The receiver only hands you a message once the **whole** payload arrives and its CRC-16 verifies — so you never see a half-message or a corrupted one.
 
