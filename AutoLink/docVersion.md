@@ -4,6 +4,249 @@ All releases, most recent first.
 
 ---
 
+## v4.0.8
+
+**Move `UtilMain.h` into `src/pingpong/`.** Completes the v4.0.7 packaging pass: `UtilMain.h` is the shared base for `UtilPing` and `UtilPong`, both of which now live in `src/pingpong/`, so `UtilMain.h` belongs with them. The remaining files in `src/util/` (`UtilBaudSweep`, `UtilCobs`, `UtilCrc`, `UtilFrameRx`, `UtilBlink`) are general-purpose protocol utilities used by `ALink` itself, not by the PingPong example, and stay where they are. No code changes, no behavior change, no protocol or wire-format change. Wire-compatible with v4.0.0..v4.0.7.
+
+### File move
+
+* `src/util/UtilMain.h` → `src/pingpong/UtilMain.h`
+
+The file itself is unchanged. The bare-name `#include "UtilMain.h"` lines in `UtilPing.h` and `UtilPong.h` already resolved correctly from the new directory under the Arduino library layout (both `src/util/` and `src/pingpong/` are on the include search path; the bare-name lookup hits whichever directory the file happens to live in).
+
+### Layout after this move
+
+```
+src/
+├── ALink.cpp / .h
+├── AutoLink.h
+├── AutoLinkWeb.cpp / .h
+├── EspHal.h
+├── ILink.h
+├── Log.cpp / .h
+├── pingpong/                    # the echo-test example
+│   ├── PingPong.h               # v4.0.7 unified entry point
+│   ├── UtilMain.h               # v4.0.8: moved here from util/
+│   ├── UtilPing.h
+│   └── UtilPong.h
+└── util/                        # protocol-layer utilities
+    ├── UtilBaudSweep.cpp / .h
+    ├── UtilBlink.h
+    ├── UtilCobs.cpp / .h
+    ├── UtilCrc.cpp / .h
+    └── UtilFrameRx.cpp / .h
+```
+
+`src/util/` now contains only the reusable protocol utilities. `src/pingpong/` contains everything specific to the ping-pong example. The split mirrors the conceptual one: "things any AutoLink user might want" vs "things only the echo-test example wants."
+
+---
+
+## v4.0.7
+
+**Unified `PingPong` entry point.** The v4.0.0..v4.0.6 API forced the user to pick one of two separate headers (`util/UtilPing.h` or `util/UtilPong.h`) and instantiate `UtilPing` or `UtilPong`, so the `examples/PingPong/Ping.ino` and `examples/PingPong/Pong.ino` sketches looked very different from each other — different class name, different constructor layout. v4.0.7 collapses both into a single class `PingPong` with a `Role` enum (`PING` or `PONG`); the two example sketches are now byte-identical apart from the enum value. No protocol, wire-format, or behavior change; this is purely a packaging / API-surface change. Wire-compatible with v4.0.0..v4.0.6.
+
+### New: `src/pingpong/PingPong.h`
+
+A thin facade that holds both a `UtilPing` and a `UtilPong` internally and forwards `setup()` / `loop()` to whichever one matches the role passed to the constructor. The unused member's `setup()` / `loop()` is never called, so its LED timer / web monitor / AutoLink state is never initialized — the cost of the unused member is a few hundred bytes of static state (an empty `Pending[8]` on the PING side, an `echoCount_` / `tNotReady_` on the PONG side) and the rest is paid in code size only on the role that's actually used.
+
+```cpp
+#include <pingpong/PingPong.h>
+using namespace autolink;
+
+PingPong upp(
+    PingPong::PING,           // or PingPong::PONG
+    115200,                   // Serial baud
+    UART_NUM_2,               // UART port
+    16,                       // RX pin
+    17,                       // TX pin
+    "<changeme>",             // WiFi SSID, or nullptr
+    "<changeme>",             // WiFi password
+    80                        // web server port
+);
+
+void setup() { upp.setup(); }
+void loop()  { upp.loop();  }
+```
+
+### File moves
+
+* `src/util/UtilPing.h` → `src/pingpong/UtilPing.h`
+* `src/util/UtilPong.h` → `src/pingpong/UtilPong.h`
+
+The files themselves are unchanged. The bare-name `#include "UtilMain.h"` and `#include "UtilCrc.h"` lines inside them resolve whether the consumer is in `util/` or `pingpong/` — both directories are on the include search path under the Arduino library layout.
+
+### Sketch rewrite
+
+`examples/PingPong/Ping.ino` and `examples/PingPong/Pong.ino` are now byte-identical apart from the `PingPong::PING` / `PingPong::PONG` enum value. The diff between the two files is 1 byte (the `G` vs `I` in the enum). Switching a board from Ping to Pong is a one-character edit + re-flash.
+
+### Notes
+
+* The v4.0.0..v4.0.6 `util/UtilPing.h` / `util/UtilPong.h` are **not** in `src/pingpong/`. Old sketches that included them by their old path will need to either update to `pingpong/PingPong.h` or update their include path. The two files are still in the library, just under the new directory.
+* Host tests do not exercise `PingPong.h` (it is `#ifdef ARDUINO`-guarded), so the test suite is unchanged. All 14 host test suites continue to pass under `-Wall -Wextra` + AddressSanitizer + UBSan.
+
+---
+
+## v4.0.6
+
+**Quiet down the live log + revert the dashboard's log panel to black-on-white.** Three high-frequency INFO log lines in the negotiation state machine demoted to DEBUG, and the dashboard's "Live Log" panel reverted from the v4.0.4 dark-slate background back to the original plain black-on-white. No protocol, wire-format, or behavior change; the new log level is the only runtime-visible difference and only at INFO (set `Log::setLevel(DEBUG)` to see the demoted lines). Wire-compatible with v4.0.0..v4.0.5.
+
+### Log level: demote three high-frequency INFO lines to DEBUG
+
+The 4-second boot-time negotiation in v4.0.0..v4.0.5 emits roughly 80+ log lines at INFO, the bulk of them from the negotiation state machine. v4.0.6 demotes the three lines that fire on every baud-sweep tick and every state transition, leaving the user-meaningful events (link up/down, threshold trips, RX errors, peer re-sweep) at INFO:
+
+* **`SWP Ping baud[N]=<rate>`** — demoted from INFO to DEBUG. Fires once per baud index transition during the sweep; on a 5-baud sweep at 50 ms cadence that's ~10 lines per negotiation, plus one per re-sweep. The Pong's matching `SWP Pong: full sweep done` line stays at INFO (one line per full sweep, much rarer); the per-baud `Ping is now testing baud[N]` is DEBUG territory.
+* **`State Transition: SWP -> LCK`** and **`State Transition: LCK -> SWP`** (and the rest of the `changeState_unlocked` log line) — demoted from INFO to DEBUG. State transitions fire on every baud-sweep tick and on every link drop / re-lock. At INFO this was drowning the live log on the dashboard. DEBUG is the right home: a user investigating a stuck link re-enables it with `Log::setLevel(DEBUG)` and gets the full SWP/LCK chatter. INFO keeps only the user-meaningful events.
+* **`LCK timeout: no peer reply after N REQs -> re-sweep`** — demoted from INFO to DEBUG. Fires whenever the master gives up on a sweep and forces a re-sweep. From the operator's perspective, the visible signal that a re-sweep happened is the `Locked at N baud` line that immediately precedes this one, which is already at INFO. The detailed "how many REQs did we try before giving up" is DEBUG.
+
+### Dashboard: revert Live Log to black-on-white
+
+The v4.0.4 dashboard switch to a dark-slate background (`#1f2937`) with light-grey text and colorized severity labels was the right idea in the abstract but read poorly in practice: the `.I` (info) color of `#e5e7eb` was almost the same as the new background, and the white card behind the log block made the contrast jump uncomfortable when the operator scrolled past the log on a phone in daylight. v4.0.6 reverts to plain black-on-white: `background:#ffffff; color:#111827;` for the log block, with `.E` (error) as `#dc2626` red and `.D` (debug) as `#9ca3af` light grey. The severity color rules still colorize; the rest of the page was already white so there's no contrast jump.
+
+---
+
+## v4.0.5
+
+**Throughput fixes for the Ping/Pong echo test.** Four small, low-risk changes that compound into a much faster wire. No protocol or wire-format change; the new constants are a compile-time tunable and the runtime behavior is otherwise identical to v4.0.0..v4.0.4. Wire-compatible with v4.0.0, v4.0.1, v4.0.2, v4.0.3, and v4.0.4.
+
+### Change 1: `MAX_TX_PER_LOOP` 2 → 4 (UtilPing + UtilPong)
+
+The pacing cap on how many frames `loop()` can emit (Ping) or echo (Pong) per tick. v4.0.0 set this to 2 to protect against bursting all 8 WINDOW frames at once and overrunning Pong's RX ring; that was a valid fix for v4.0.0 where `txBufferSize` was undersized. v4.0.1+ auto-sizes `txBufferSize = 2 * ((maxMsg + MSG_HDR) * 5/4 + 64)`, which is large enough to absorb multiple frames without blocking. v4.0.0's pacing guard is now overly conservative: with `loop()` running at 3–5 ms intervals, `WINDOW=8 / MAX_TX_PER_LOOP=2` means the pipeline takes 4 ticks to fill, and Pong's symmetric 2-per-loop drain means both sides are permanently under-driven. v4.0.5 raises it to 4 (half of WINDOW) on both sides so the window fills in 2 ticks, drains in 2 ticks, and the wire stays saturated. The DEBUG log at `setup()` time now shows `MAX_TX_PER_LOOP=4` so a log reader can confirm the new value is in effect.
+
+### Change 2: removed `hw.flushTx()` from `sendFrame_unlocked()`
+
+v4.0.0..v4.0.4 called `uart_wait_tx_done(uart_num, pdMS_TO_TICKS(100))` at the end of every control frame, which blocks the calling task until the UART TX FIFO drains to empty. Control frames are 5 bytes — at 115200 baud that's ~0.4 ms of wire time — but the FreeRTOS tick granularity means the task yields and may not be rescheduled for a full 1 ms tick. The data path (`sendCobsFrame_unlocked`) does **not** call `flushTx()` and was unaffected, but the protocol-overhead path (PING/REQ/fast-ack/keepalive) was unnecessarily serialized. v4.0.5 removes the call: the auto-sized TX ring accepts 5 bytes instantly and non-blocking, and `hw.tx()` returning `== CTRL_FRAME_SIZE` is the success signal. The public `ALink::flush()` / `AutoLink::flush()` entry point is preserved for users who need an explicit drain. A new DEBUG log line at the end of `sendFrame_unlocked` makes the "no flush" decision visible (gated at DEBUG so the steady-state INFO log stays readable).
+
+### Change 3: `SETTLE_MS` 300 → 100 (UtilPing)
+
+The settle guard on Ping side after every link-up. v4.0.0 set it to 300 ms to give Pong's sweep time to complete its own lock; with cobsSeq gap detection now in place, any stale frame from a previous session is rejected at the wire layer and the 300 ms is belt-and-suspenders. v4.0.5 reduces it to 100 ms, which is enough for Pong's blink to start without adding 200 ms of dead time to every session start. The Ping `link up` DEBUG log now reads `settling 100 ms (v4.0.5: was 300 ms in v4.0.4)`.
+
+### Change 4: Pong's blocking link-up blink → async
+
+Pong's `loop()` used to call `comm_.blinkWait(4, 100, 100, 2000)` on every link-up. The `delayMs > 0` path of `blinkWait` is `flashBlocking` — **fully blocking** — and `4 * (100+100) + 2000 = 2800 ms` is long enough to trigger Ping's 3-second `STALL_MS` watchdog. Result: Ping drops the link, re-sweeps, locks again, Pong blocks another 2.8 s on the new link-up, repeat. v4.0.5 changes it to `comm_.blinkWait(4)` (async, same as Ping's link-up blink). The async path returns immediately; the LED pattern runs on an esp_timer and doesn't block the echo loop. Stale-byte risk is already handled by the drain + `flushRx()` immediately above the call. The DEBUG log at Pong's `link up` now reads `blink=async` so a log reader can see the change in effect.
+
+### Combined effect
+
+The four changes are independently small but compound:
+
+* Settle saves 200 ms per link-up.
+* Pong async-blink saves up to 2800 ms per link-up (Pong stops blocking).
+* `MAX_TX_PER_LOOP` 2 → 4 doubles the per-tick send / echo rate, so the WINDOW=8 pipeline fills in 2 ticks instead of 4 and drains in 2 instead of 4 — the wire is at full utilization instead of permanently 50%-utilized.
+* `flushTx` removal saves ~1 ms of blocking yield per PING / REQ / fast-ack / keepalive in the sweep and OK states.
+
+The two biggest wins are #4 (Pong no longer triggers Ping's STALL watchdog) and #1 (the pipeline actually fills). v4.0.5 is wire-compatible with v4.0.0..v4.0.4; all changes are either a tunable constant or a removed redundant `flushTx()` call.
+
+---
+
+## v4.0.4
+
+**Dashboard + diagnostics enhancements.** No protocol or wire-format change; the new `lostMsgs` counter is derived from data we were already collecting in the gap-detection path. Wire-compatible with v4.0.0, v4.0.1, v4.0.2, and v4.0.3.
+
+### New: `lostMsgs` counter
+
+The protocol now tracks two separate tallies on top of the existing `gaps` (gap events) and `stale` (out-of-window) counters:
+
+* **`gaps`** — one per out-of-order arrival (the existing counter).
+* **`lostMsgs`** — total messages lost on the wire = sum of `(cobsSeq - rxSeq - 1)` across gap events. Equals `gaps` when a single seq is missing per event, larger when a burst went missing.
+
+`gaps` tells you "how many times did we observe an out-of-order seq"; `lostMsgs` tells you "how many messages were physically lost." A single 4-seq burst loss is one `gaps` event and three `lostMsgs`. They're surfaced together on the dashboard: the "Errors (lifetime)" card shows `frameErrs` and now has a new hint line `lostMsgs` underneath, separate from the existing `disconnects` line.
+
+Exposed via `Diag::lostMsgs` (which `getDiag(Diag&)` populates) and via the `/stats` JSON as `lostMsgs`. The counter is monotonic across link drops; it's reset only by the (not-yet-exposed) lifetime-counter reset path, or by full NVS erase.
+
+### New: dashboard features
+
+* **Log-level radio group in the header.** Three buttons (Error / Info / Debug) sit at the top of the page. Picking one POSTs to `/level?lv=N` (a new endpoint) and the device's `Log::setLevel` updates immediately. The radio is reconciled to the device's current level on every `/stats` poll, so a reboot that comes up at the default level is reflected on the page without a manual refresh.
+* **Pause/Resume button at the top of the page.** Distinct from the per-log Pause button. This one freezes the ping/pong message stream (TX/RX rate, RX count, RSSI, baud, lost-msgs hint) at its last value, while the log keeps scrolling. The two pause buttons are independent: you can freeze the live counters while the log keeps going, or vice versa.
+* **"lost msgs" hint under "Errors (lifetime)".** The card now shows three lines: `errcnt` (frame errors), `lost msgs` (wire loss), and `disconnects` (link drops). Distinct from the existing `disconnects` line so a single burst loss is visible alongside the cumulative frame-error count.
+* **Darker log panel.** The `Live Log` block is now `#1f2937` (slate-800) with light-grey text and colorized `.E`/`.I`/`.D` severity labels tuned for the dark background. The previous white-on-white made the 12px monospaced lines hard to scan against the white card behind them.
+* **`lostMsgs` in `/stats` JSON.** New `lostMsgs` field, plus a new `lvl` field reporting the current `Log::getLevel()` so the page can reconcile the radio to the device's level on the first poll.
+
+### New: `/level` endpoint
+
+`POST /level?lv=N` sets the device's `Log::setLevel`. Validates `0 <= lv <= 2` and returns 400 on bad input. The change is in-memory only (does not persist across reboot, since the device boots at `Log::ERROR` by default; a future version can persist to NVS if the operator wants the new level to survive a power cycle).
+
+---
+
+## v4.0.3
+
+**Refactor + one real bug fix.** Pure code-quality and API consolidation on top of v4.0.2; no wire-format or protocol change. Wire-compatible with v4.0.0, v4.0.1, and v4.0.2. One genuine resource-leak fix: `EspHal::begin()` leaked the UART driver and the event task when `xTimerCreate` failed.
+
+### Bug fix: `EspHal::begin()` leaked on xTimerCreate failure
+
+If `xTimerCreate` returned `NULL`, the v4.0.0..v4.0.2 code only flipped `running = false` and returned, skipping the `uart_driver_delete(uart_num)` and `cleanup_resources()` that every other failure path runs. The UART event task was still running, the UART driver was still installed, and the mutex / task_exit_sem / stream_buf were leaked. Every other failure path correctly tore those down — only this one didn't. v4.0.3 calls the same teardown the other paths use.
+
+### Refactor: collapses
+
+* `ALink::dropLink_unlocked()` + `reset_unlocked()` → `reset_unlocked(bool count)`. The `count` flag picks between the disconnect path (counts toward `discCount`) and the fresh-start path used by `begin()`. v4.0.2's `reset_unlocked` was missing the `pingSample = 0` line that `dropLink_unlocked` had — a latent inconsistency that disappears on merge.
+* `ALink::sendFrame()` + `sendFrame_unlocked()` → `sendFrame_unlocked()` does the work, `sendFrame()` just locks + calls + unlocks.
+* `ALink::write()` + `writeLocked()` → `write(b, n)` takes the lock itself. Internal callers (the message API) used to call `writeLocked` to avoid re-locking; that pattern is gone, so the two-method split is no longer needed.
+* `ALink::onTimer`'s hand-rolled keepalive (8 lines of `unenc[]` + `COBS encode` + bracket-by-hand) → `sendCobsFrame_unlocked(nullptr, 0)`. The 0-payload form of the data-frame TX emits the exact same 5 wire bytes the hand-rolled block did, but through the real COBS encoder — the keepalive wire format can no longer drift from the data path.
+
+### Refactor: per-state handler split
+
+`onRx` (~120 lines) and `onTimer` (~120 lines) each nested master/Pong × SWP/LCK. Split into:
+* `ctrlFrameReady_unlocked` (dispatcher) and `handleSwp_unlocked` / `handleLck_unlocked` (per-state body) on the RX side.
+* `onTimerOk_unlocked` / `onTimerSwp_unlocked` / `onTimerLck_unlocked` on the timer side.
+
+The SWP-master branch in v4.0.2 churned `lock()` / `unlock()` four times within a single `onTimer` call. That made it easy to introduce a state-read race against a concurrent `onRx`. v4.0.3's `onTimerSwp_unlocked` takes the lock once and holds it for the whole branch.
+
+### Refactor: "enter OK at baud N" extraction
+
+Five copies of the 6-line block `{ setSpd; spdI=idx; errs=0; lastRx=lastTx=now; changeState(OK); startTimer(okTick) }` lived in `onRx` (SWP-REQ, fast-ack, SWP-fast-ack, LCK-REQ, master LCK reply). All five callsites now funnel through `lockOk_unlocked(int idx, const char* tag)` — the only variation was the log label, which is now the `tag` argument. The 30 lines of duplicated state-transition work became 5 lines of "lockOk_unlocked(best, \"REQ\")" calls.
+
+### Refactor: API consolidation
+
+* The 2-arg and 3-arg `getStats` overloads and the standalone `getLifetimeErrors()` collapsed to one `getStats(Stats&)`. Stats has four fields: `tx`, `rx`, `discCount`, `frameErrs`. Impossible to call the wrong overload.
+* The five `getCobs*` getters on the facade (`getCobsSeq`, `getLastRxCobsSeqSet`, `getLastRxCobsSeq`, `getCobsGaps`, `getCobsStale`) collapsed to one `getDiag(Diag&)`. Diag has five fields, the struct is the source of truth for the names.
+* `totalErrs` (the OK→SWP counter, actually a disconnect count) renamed to `discCount`. `lifetimeErrs` (the cumulative frame-error count) renamed to `frameErrs`. The old names were actively misleading: `totalErrs` was a tiny number, `lifetimeErrs` was the big one.
+
+### Refactor: other small wins
+
+* `ALink::reset_unlocked(bool)` is the only reset/drop entry point. `err_unlocked`, `dropLink`, `onBreak` all funnel through it.
+* `bestSpd_unlocked()` is the only "pick the best baud" entry point. The inline "prefer fastest reliable baud" loop that used to live in the SWP fast-ack handler moved into `bestSpd_unlocked()` (it was the same intent, written slightly differently).
+* Private-member naming normalized: dropped the trailing underscore on `cobsSeq_`, `swpRxBytes_`, `emptySweeps_`, `cobsGaps_`, `cobsStale_`, `lastRxCobsSeq_`, `lastRxCobsSeqSet_`. They are now `txSeq`, `swpRxBytes`, `emptySweeps`, `gaps`, `stale`, `rxSeq`, `rxSeqSet`. All members now follow the same bare-name convention.
+* Magic numbers named: `MAX_GAP_RESYNC` (gap window), `COBS_SEQ_WRAP` (cobsSeq modulus). Both were inlined as `3` and `256` in the gap-detection arithmetic and the wraparound test comments.
+* `CTRL_FRAME_SEQ_IDX` / `CTRL_FRAME_PAYLOAD_IDX` / `CTRL_FRAME_CRC_IDX` comments all said "Length of the ... field at index N" — they're indices, not lengths. Fixed.
+* `logCobsSeq_unlocked()` (declared + defined, never called) deleted.
+* `ILink::pushAppBuf(uint8_t)` and `ILink::popAppBuf()` (no-arg form) deleted from the interface; ALink only used the array forms. Every mock implementation got a few lines smaller.
+* The version line is now logged exactly once on the standard Ping/Pong boot path: `UtilMain::setupCommon()` (which `Ping.ino` / `Pong.ino` always call before `comm_.begin()`) logs `AutoLink vX.Y.Z` at INFO. `AutoLink::begin()` used to log it again — that line is removed. `library.properties` remains the source of truth; `AUTOLINK_VERSION` in `AutoLink.h` is a compile-time copy.
+* `sendCobsFrame_unlocked` is the documented single keepalive/data path; it clamps `n` to `[0, MAX_CHUNK]` and the `[0, MAX_CHUNK]` overflow no longer produces a frameLen-overflow read on adversarial input.
+
+v4.0.3 is wire-compatible with v4.0.0, v4.0.1, and v4.0.2. No change to the protocol, wire format, cobsSeq semantics, framing, or message API. All v4.0.3 changes are either the EspHal resource-leak fix or pure refactor (API consolidation, deduplication, naming, dead-code removal).
+
+---
+
+## v4.0.2
+
+**Five internal-quality fixes from a senior review pass: timer-service transactionality, listener drop semantics, const-correctness on the app-buffer API, and portability of diagnostic log lines.** No protocol, wire-format, or cobsSeq changes; v4.0.2 is wire-compatible with v4.0.0 and v4.0.1.
+
+### Change 1: `EspHal::startTimer` is a single transaction
+
+v4.0.0/v4.0.1 issued `xTimerChangePeriod` and `xTimerStart` as two independent commands and ran a one-shot retry on each. Under a rapid drop→sweep→drop storm the timer-service command queue can fill; if `ChangePeriod` succeeded but `Start` failed (or vice versa), the timer ended up with a different period than what the caller asked for, and the `||` retry pattern only retried one of the two. v4.0.2 retries the whole pair as a transaction (3 attempts, all-or-nothing), so the timer is either at the requested period and running, or the call surfaces an error. The dead-branch from "one retry on the first op, then the second op runs unconditionally" is gone.
+
+### Change 2: `ALink::onPayload` honors the `Listener::onPayload` drop contract
+
+`UtilFrameRx::Listener::onPayload`'s contract says "return true if the link was dropped, feed() should stop." v4.0.0/v4.0.1 returned `false` in every branch, making the `if (dropped) return i + 1;` in `UtilFrameRx::feed` dead code. v4.0.2 returns `true` on the two branches that should stop the parser: (a) the frame arrived while `state != OK` (a stale-session frame; the rest of the event belongs to a different session) and (b) the app buffer is full and the frame was dropped (the consumer is wedged; draining the rest of the event would just queue more bytes the consumer can't read). Gap and stale `cobsSeq` frames keep returning `false` — the link is OK, only this frame is bad.
+
+### Change 3: `peekAppBuf()` and `appBufAvailable()` are const-honest
+
+`peekAppBuf()` mutates the one-byte look-ahead cache; in v4.0.0/v4.0.1 it was non-const while `appBufAvailable()` was const and read the same cache (compiling only because the cache field could be reached through a `const` method). v4.0.2 marks the cache `mutable` and makes both methods `const` in the `ILink` interface, the `EspHal` implementation, and the `MockHal` test mock. The cache is now a clearly-documented internal detail of the pop/peek path, and the compiler enforces const correctness at every call site.
+
+### Change 4: keepalive wire-layout comment is accurate
+
+The keepalive in `ALink::onTimer` is a 2-byte unencoded payload (`{cobsSeq, CRC8(cobsSeq)}`) that COBS-encodes to exactly 3 bytes regardless of `cobsSeq` (COBS overhead is 1 byte for any input < 254), then brackets with two `0x00` delimiters for 5 wire bytes. v4.0.0/v4.0.1's inline example `[0x00, 0x01, 0x02, CRC8(cobsSeq), 0x00]` was only correct for `cobsSeq == 0`; for any other `cobsSeq` the encoded layout is `{<run-to-next-zero>, cobsSeq, CRC8}`. v4.0.2's comment is accurate for both cases and notes the `ka[5]` buffer is exactly sized because the encoded length is invariant.
+
+### Change 5: `WIRING CHECK` and `uart_set_pin` failure logs are board-agnostic
+
+v4.0.0/v4.0.1's `WIRING CHECK` (fired by the Pong when 0 raw bytes arrive at any baud) and `uart_set_pin` failure (fired by `EspHal::begin`) both hard-coded FireBeetle ESP32 pin assignments (D10=GPIO17, D11=GPIO16). Anyone running on a different board saw a misleading hint. v4.0.2 replaces those GPIO numbers with a generic "check the rxPin/txPin you passed to the AutoLink constructor match your board's pinout."
+
+### Diagnostic in the v4.0.1 → v4.0.2 change
+
+All five fixes were identified by code review of v4.0.1. None required fresh hardware data; the `WIRING CHECK` and `keepalive` findings came from reading the code path against the v4.0.0 hardware log, the `startTimer` finding from reading the `||` retry pattern and the FreeRTOS timer-service command-queue semantics, the `onPayload` finding from reading the `Listener::onPayload` contract against the implementation, and the `peekAppBuf` finding from running the `const` propagator by hand. The protocol layer was unchanged on the wire.
+
+v4.0.2 is wire-compatible with v4.0.0 and v4.0.1. No change to the protocol, wire format, cobsSeq semantics, framing, or message API. The only changes are: the `startTimer` transactionality, the `onPayload` return values, the `peekAppBuf` const-ness, the keepalive comment text, and two diagnostic log strings.
+
+---
+
 ## v4.0.1
 
 **Decouples app-buffer-full from the wire error threshold, and enlarges the default app buffer to fit a full Ping pipeline.** Two related changes, both motivated by the v4.0.0 hardware log analysis.
