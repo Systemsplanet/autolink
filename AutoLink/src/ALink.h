@@ -259,6 +259,10 @@ public:
     void resetStats();     // zeros tx/rx only; leaves errors alone
     void resetErrors();    // zeros the lifetime error counter
 
+    // The active config (with any auto-size applied). Useful for tests
+    // and for the dashboard to show the actual buffer sizes.
+    const AutoLinkConfig& getConfig() const { return cfg; }
+
     State getState() const;
     int getErrCount() const;
     uint64_t getLifetimeErrors() const; // cumulative frame errors since last resetErrors()
