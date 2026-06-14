@@ -1,26 +1,27 @@
-// Pong — AutoLink pong node for the ping-pong throughput/echo test.
+// Pong.ino — AutoLink pong node (v4.0.7).
 //
-// Flash this onto one ESP32 and Ping.ino onto another. Wire them:
-//   Pong TX(GPIO17) ──► Ping RX(GPIO16)
-//   Pong RX(GPIO16) ◄── Ping TX(GPIO17)
-//   shared GND
+// Echoes every complete message back to Ping. Reconnects after any
+// link disruption automatically — no state machine needed in the
+// sketch.
 //
-// Pong echoes back every complete message it receives and logs throughput +
-// error counts every 5 seconds. Pass WiFi credentials (last three args) to
-// enable the live web dashboard, or omit them for a UART-only link.
+// v4.0.7: unified entry point. Both Ping.ino and Pong.ino are byte-
+// identical apart from the PingPong::PING / PingPong::PONG enum
+// value. To switch a board from Pong to Ping, change the enum and
+// re-flash; no other source change needed.
 
-#include <util/UtilPong.h>
+#include <pingpong/PingPong.h>
 using namespace autolink;
 
-UtilPong pong(
-    115200,       // Serial debug baud
-    UART_NUM_2,   // UART port for the AutoLink wire
-    16,           // RX pin
-    17,           // TX pin
-    "YourSSID",   // WiFi SSID   — omit (or pass nullptr) to disable web monitor
-    "password",   // WiFi password
-    80            // web server port
+PingPong upp(
+    PingPong::PONG,
+    115200,                // Serial baud
+    UART_NUM_2,            // UART port
+    16,                    // RX pin
+    17,                    // TX pin
+    "<changeme>",          // WiFi SSID, or nullptr to disable web monitor
+    "<changeme>",          // WiFi password
+    80                     // web server port
 );
 
-void setup() { pong.setup(); }
-void loop()  { pong.loop();  }
+void setup() { upp.setup(); }
+void loop()  { upp.loop();  }
