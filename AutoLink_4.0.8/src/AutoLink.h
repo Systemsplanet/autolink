@@ -1,0 +1,181 @@
+// AutoLink.h — public facade for the AutoLink ESP32 UART library.
+//
+// This is the only header most sketches need. It wires the protocol core
+// (ALink) to the ESP32 hardware (EspHal), auto-sizes stream buffers from
+// cfg.maxMsg, exposes the simple send()/recv()/ready() API, the Arduino
+// Stream byte interface, and drives the status LED through UtilBlink.
+//
+// Usage:
+//   #include "AutoLink.h"
+//   using namespace autolink;
+//   AutoLink comm(UART_NUM_2, 16, 17, /*Ping node=*/true);
+//   void setup() { comm.begin(); }
+//   void loop()  { comm.send(buf, n);  comm.recv(buf, sizeof buf); }
+#pragma once
+#include "ALink.h"
+#include "Log.h"
+#include "util/UtilBlink.h"
+#include <memory>
+
+#ifdef AUTOLINK_HOST_TEST
+// Host test build: substitute host stubs for the ESP-only types so
+// AutoLink is constructible without FreeRTOS. Define the stubs in the
+// test file *before* including AutoLink.h; see AutoLinkTest.cpp.
+typedef int uart_port_t;
+#else
+#include "EspHal.h"
+#endif
+
+#ifdef ARDUINO
+#include <Stream.h>
+#else
+class Stream {
+public:
+    virtual int available() = 0;
+    virtual int read() = 0;
+    virtual int peek() = 0;
+    virtual size_t write(uint8_t) = 0;
+    virtual size_t write(const uint8_t *buffer, size_t size) = 0;
+    virtual void flush() = 0;
+};
+#endif
+
+namespace autolink {
+
+// Library version — keep in sync with library.properties. Logged at INFO
+// level by UtilMain::setupCommon() (which is always called from the
+// Ping/Pong examples); AutoLink::begin() does NOT log it again to keep
+// the version line single-sourced. The single source of truth is
+// library.properties; this macro exists so firmware code can compile-
+// time test against the running version if needed.
+#define AUTOLINK_VERSION "4.0.8"
+
+// ----------------------------------------------------------------------------
+// AutoLink — the one-object public facade: construct as a global, begin(),
+// then send()/recv(). Wires the protocol core (ALink) to the ESP32 hardware
+// (EspHal), auto-sizes buffers from maxMsg, exposes the Arduino Stream byte
+// API, and drives a status LED through UtilBlink.
+// ----------------------------------------------------------------------------
+class AutoLink : public Stream {
+private:
+    EspBlinkHal blinkHal;
+    UtilBlink   blinker;
+    std::unique_ptr<EspHal> hal;
+    std::unique_ptr<ALink> link;
+
+public:
+    // The blink timer callback captures `this`; copies/moves would dangle.
+    AutoLink(const AutoLink&) = delete;
+    AutoLink& operator=(const AutoLink&) = delete;
+
+    // Construct on the stack as a global — no new/pointer needed. Everything past
+    // the role flag is optional; sane defaults cover the common case.
+    AutoLink(uart_port_t u_num, int rx_pin, int tx_pin, bool isMasterNode, AutoLinkConfig cfg = AutoLinkConfig())
+        : blinkHal(cfg.ledPin), blinker(blinkHal)
+    {
+        blinkHal.bind(&blinker);
+
+        // Auto-size the reassembly buffer to one full UtilPing WINDOW of
+        // messages plus one full Pong echo of headroom. This is the right
+        // size: Ping's TX pipeline dumps up to WINDOW=8 messages back to
+        // back, and the UART event task (free-running) can fill the app
+        // buffer faster than Pong's loop() drains it (loop is capped at
+        // MAX_TX_PER_LOOP=2 echoes per iteration). With WINDOW+2 frames
+        // of headroom, the buffer never overflows under normal Ping/Pong
+        // traffic. The user never has to reason about the
+        // maxMsg/streamBufferSize relationship; if they need more, they
+        // can set cfg.streamBufferSize explicitly.
+        size_t need = (/*WINDOW*/8 + /*Pong headroom*/2) * (cfg.maxMsg + MSG_HDR);
+        if (cfg.streamBufferSize < need) cfg.streamBufferSize = need;
+        // TX ring must hold at least one full COBS-encoded message without
+        // blocking. A maxMsg-byte payload splits into ceil(maxMsg/250) COBS
+        // frames, each at most 256 bytes. Scale by 5/4 for COBS overhead plus
+        // the 6-byte MSG_HDR, then double for two back-to-back sends (Pong
+        // MAX_TX_PER_LOOP=2). Without this, uart_write_bytes blocks while
+        // holding the ALink lock, starving the UART event task and overflowing
+        // the RX ring with no error visible to the application.
+        size_t need_tx = 2 * ((cfg.maxMsg + MSG_HDR) * 5 / 4 + 64);
+        if (cfg.txBufferSize < need_tx) cfg.txBufferSize = need_tx;
+
+        hal = std::make_unique<EspHal>(u_num, rx_pin, tx_pin, cfg);
+        link = std::make_unique<ALink>(*hal, isMasterNode, cfg);
+    }
+
+    void begin() {
+        // The version is logged by UtilMain::setupCommon() (the standard
+        // examples call that before comm_.begin()), so this entry point
+        // stays single-sourced — no version line in the boot log.
+        hal->begin();
+    }
+    // Flash the status LED n times.
+    //   delayMs == 0 (default): asynchronous. Returns immediately; the
+    //     pattern runs on an esp_timer, so blinkWait(1) per packet costs
+    //     nothing. A new call replaces any pattern still running.
+    //   delayMs > 0: blocking. Flashes, then pauses delayMs -- holds the CPU
+    //     for n * (onMs + offMs) + delayMs ms. Use it to pace a loop.
+    void blinkWait(int n, int onMs = 60, int offMs = 60, long delayMs = 0) {
+        if (n <= 0) return;
+        if (delayMs > 0) blinker.flashBlocking(n, onMs, offMs, delayMs);
+        else            blinker.start(n, onMs, offMs);
+    }
+
+    // ======================= Simple API (recommended) =======================
+    // Boundary-preserving, CRC-checked, self-healing. Just send and recv every
+    // loop; both are safe to call when the link is down (send returns 0, recv 0).
+    int  send(const uint8_t* b, int len) { return link->sendMsg(b, len) ? len : 0; }
+    int  recv(uint8_t* b, int max_len)   { return link->recvMsg(b, max_len); }
+    bool ready() const { return link->getState() == State::OK; }
+    void dropLink() { link->dropLink(); }  // send BREAK + restart sweep (use from app to recover from SWP stall)
+    // Flush the receive app buffer and reset the message reassembly state
+    // without dropping the link. Call after a FIFO reset on the application
+    // side to prevent stale echoes from permanently desyncing recvMsg.
+    void flushRx() { link->flushRx(); }
+
+    // Optional: app-stream throughput + lifetime disconnect/frame-error
+    // counts. Replaces the old 2-arg/3-arg getStats overloads and the
+    // standalone getLifetimeErrors() — one struct return, four fields,
+    // impossible to call the wrong one. discCount counts one per
+    // OK->SWP transition (lifetime, monotonic, only zeroed by
+    // resetErrors). frameErrs is the cumulative frame-error tally
+    // (bad CRC, malformed COBS, oversize).
+    void getStats(Stats& s) const { link->getStats(s); }
+    // Zero the tx/rx throughput counters. Does NOT zero the disconnect
+    // counter -- use resetErrors() for that, or per-second B/s sampling
+    // would wipe the very history that lets you see "errors went up
+    // since last sample".
+    void resetStats() { link->resetStats(); }
+    // Zero the lifetime counters (disconnects + frame errors).
+    void resetErrors() { link->resetErrors(); }
+
+    // ======================= Advanced =======================
+    bool isHealthy() const { return hal->isHealthy(); }
+
+    // Raw Stream byte API (unframed/framed bytes, no message boundaries).
+    int available() override { return link->available(); }
+    int read() override { return link->read(); }
+    int peek() override { return link->peek(); }
+    size_t write(uint8_t b) override { return link->write(&b, 1); }
+    size_t write(const uint8_t *buffer, size_t size) override { return link->write(buffer, (int)size); }
+    void flush() override { link->flush(); }
+    int read(uint8_t* b, int max_len) { return link->read(b, max_len); }
+
+    // Explicit message verbs (send()/recv() above are the same thing).
+    bool sendMsg(const uint8_t* b, int len) { return link->sendMsg(b, len); }
+    int  recvMsg(uint8_t* b, int max_len)   { return link->recvMsg(b, max_len); }
+
+    // Manual error control / raw state for custom validation.
+    void err() { link->err(); }
+    void clearErr() { link->clearErr(); }
+    int  getErrCount() const { return link->getErrCount(); }
+    State getState() const { return link->getState(); }
+    uint32_t getCurrentBaud() const { return link->getCurrentBaud(); }
+    // v4.0.0 cobsSeq diagnostics, one struct return (replaces the five
+    // getCobs* getters that v4.0.0..v4.0.2 carried).
+    void getDiag(Diag& d) const { link->getDiag(d); }
+
+    // v4.0.1: the actual app buffer size after auto-size. Lets the
+    // dashboard display it and lets tests verify the auto-size formula.
+    size_t getStreamBufferSize() const { return link->getConfig().streamBufferSize; }
+};
+
+} // namespace autolink
