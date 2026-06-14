@@ -27,68 +27,68 @@ static void test_one_perfect_baud_wins() {
     std::cout << "PASS" << std::endl;
 }
 
-static void test_highest_baud_with_threshold_wins() {
-    std::cout << "\n=== Test: Highest Baud Above Threshold Wins ===" << std::endl;
+static void test_fastest_baud_above_threshold_wins() {
+    std::cout << "\n=== Test: Fastest Baud Above Threshold Wins ===" << std::endl;
+    // v4.0.0 (and v3.2.10): pickBest is fastest-first. With all 5 bauds
+    // scoring 4/4 and threshold 50% (>= 2 hits), the first qualifying
+    // baud is the fastest one, index 0.
     UtilBaudSweep s(5);
     s.configure({4, 0.5f, -1});
-    // 4/4 = 100% at all 5 bauds. With threshold 50% (>= 2 hits), pick the
-    // highest: index 4.
     for (int j = 0; j < 5; j++) {
         for (int k = 0; k < 4; k++) s.score(j);
     }
-    assert(s.pickBest() == 4);
+    assert(s.pickBest() == 0);
     std::cout << "PASS" << std::endl;
 }
 
 static void test_baud_below_threshold_falls_back() {
     std::cout << "\n=== Test: Flaky Top Baud Falls Back to Reliable One ===" << std::endl;
+    // v4.0.0 fastest-first: when the *fastest* baud (index 0) is flaky and
+    // a slower baud is reliable, pickBest should still fall through to
+    // the reliable one rather than locking at the flaky top baud.
     UtilBaudSweep s(5);
     s.configure({4, 0.5f, -1});
-    // Baud 4 got only 1 hit (25%, below 50% threshold). Baud 3 got all 4.
-    // The pick should be 3, not 4.
-    for (int k = 0; k < 1; k++) s.score(4);
-    for (int k = 0; k < 4; k++) s.score(3);
-    for (int k = 0; k < 4; k++) s.score(2);
+    // Baud 0 got 1 hit (25%, below 50% threshold). Baud 1 got all 4.
+    // The pick should be 1, not 0.
+    for (int k = 0; k < 1; k++) s.score(0);
     for (int k = 0; k < 4; k++) s.score(1);
-    for (int k = 0; k < 4; k++) s.score(0);
-    assert(s.pickBest() == 3);
+    for (int k = 0; k < 4; k++) s.score(2);
+    for (int k = 0; k < 4; k++) s.score(3);
+    for (int k = 0; k < 4; k++) s.score(4);
+    assert(s.pickBest() == 1);
     std::cout << "PASS" << std::endl;
 }
 
 static void test_strict_threshold() {
     std::cout << "\n=== Test: Strict Threshold (80%) ===" << std::endl;
+    // v4.0.0 fastest-first. With threshold 80% (>= 4 hits of 5):
+    //   * If baud 0 is flaky (1/5), it fails. The fastest that passes
+    //     (>= 4 hits) wins.
+    //   * If baud 0 is perfect (5/5), it wins.
     UtilBaudSweep s(5);
     s.configure({5, 0.8f, -1});
-    // 4/5 = 80% passes. 3/5 = 60% fails.
-    for (int k = 0; k < 4; k++) s.score(4);   // 80% -- passes
-    for (int k = 0; k < 3; k++) s.score(3);   // 60% -- fails, falls to 3
-    // pickBest should return 3, the highest that *passes* the 80% bar.
-    // Wait: 3/5 = 60%, threshold is 0.8*5=4 hits. So 3 fails. 4 passes.
-    // pickBest returns 4. Hmm, let me re-check.
-    // Actually the test should have baud 4 with < threshold so it falls
-    // back to 3. Let me redo with clearer numbers.
-    UtilBaudSweep s2(5);
-    s2.configure({5, 0.8f, -1});
-    for (int k = 0; k < 3; k++) s2.score(4);   // 60% -- fails
-    for (int k = 0; k < 5; k++) s2.score(3);   // 100% -- passes
-    for (int k = 0; k < 5; k++) s2.score(2);
-    for (int k = 0; k < 5; k++) s2.score(1);
-    for (int k = 0; k < 5; k++) s2.score(0);
-    assert(s2.pickBest() == 3);
+    // Baud 0 flaky: 1/5 = 20%, fails. Baud 1 perfect: 5/5 = 100%, passes.
+    for (int k = 0; k < 1; k++) s.score(0);
+    for (int k = 0; k < 5; k++) s.score(1);
+    for (int k = 0; k < 5; k++) s.score(2);
+    for (int k = 0; k < 5; k++) s.score(3);
+    for (int k = 0; k < 5; k++) s.score(4);
+    assert(s.pickBest() == 1);
     std::cout << "PASS" << std::endl;
 }
 
 static void test_lenient_threshold_picks_flaky_top() {
     std::cout << "\n=== Test: Lenient Threshold (10%) Picks Flaky Top ===" << std::endl;
+    // v4.0.0 fastest-first: with 1/10 = 10% meeting a 10% threshold on
+    // every baud, the fastest one (index 0) qualifies first.
     UtilBaudSweep s(5);
     s.configure({10, 0.1f, -1});
-    // 1/10 = 10% meets a 10% threshold. Pick the highest such baud.
     s.score(4);   // 1/10 = 10%, meets
     for (int k = 0; k < 10; k++) s.score(3);   // 100%
     for (int k = 0; k < 10; k++) s.score(2);
     for (int k = 0; k < 10; k++) s.score(1);
     for (int k = 0; k < 10; k++) s.score(0);
-    assert(s.pickBest() == 4);
+    assert(s.pickBest() == 0);
     std::cout << "PASS" << std::endl;
 }
 
@@ -157,20 +157,21 @@ static void test_explicit_expected_samples_overrides() {
 
 static void test_realistic_cable_scenario() {
     // The scenario from the user's log: 115200 lost a frame, 57600 clean.
+    // v4.0.0: UtilBaudSweep indices match ALink's fastest-first default
+    // {115200, 57600, 38400, 19200, 9600} -- index 0 is the fastest.
     std::cout << "\n=== Test: Realistic Cable Scenario ===" << std::endl;
-    UtilBaudSweep s(5);  // {9600, 19200, 38400, 57600, 115200}
+    UtilBaudSweep s(5);  // index 0 = 115200, index 4 = 9600
     s.configure({4, 0.5f, -1});
-    // 4/4 at every baud except the top: 115200 only got 1 decode.
-    for (int k = 0; k < 4; k++) s.score(0);
+    // 115200 (index 0) only got 1 decode (25%, below 50% threshold).
+    // All other bauds are 4/4 (100%, pass).
+    s.score(0);
     for (int k = 0; k < 4; k++) s.score(1);
     for (int k = 0; k < 4; k++) s.score(2);
     for (int k = 0; k < 4; k++) s.score(3);
-    s.score(4);
-    // Old behavior: pickBest returns 4 (the highest with score > 0).
-    //   -> link negotiates to 115200 with 25% reliability. Frame loss.
-    // New behavior: pickBest returns 3 (highest with >= 50%).
-    //   -> link negotiates to 57600 with 100% reliability. No loss.
-    assert(s.pickBest() == 3);
+    for (int k = 0; k < 4; k++) s.score(4);
+    // pickBest (fastest-first) skips the flaky 115200 and locks at the
+    // next-fastest reliable baud: index 1 = 57600. No frame loss.
+    assert(s.pickBest() == 1);
     std::cout << "PASS" << std::endl;
 }
 
@@ -178,7 +179,7 @@ int main() {
     std::cout << "=== Running UtilBaudSweep Tests ===" << std::endl;
     test_no_scores_picks_nothing();
     test_one_perfect_baud_wins();
-    test_highest_baud_with_threshold_wins();
+    test_fastest_baud_above_threshold_wins();
     test_baud_below_threshold_falls_back();
     test_strict_threshold();
     test_lenient_threshold_picks_flaky_top();
