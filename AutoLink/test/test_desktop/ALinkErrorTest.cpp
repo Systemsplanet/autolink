@@ -49,10 +49,10 @@ void test_error_counter() {
         ALink a(mHal, true, cfg);
         ALink b(sHal, false, cfg);
         uint8_t rx[32];
-        uint64_t btx, brx, berr;
+        Stats bs;
 
-        b.getStats(btx, brx, berr);
-        assert(berr == 0);
+        b.getStats(bs);
+        assert(bs.discCount == 0);
 
         for (int k = 0; k < 10; k++) {
             mHal.txBuf.clear();
@@ -62,9 +62,10 @@ void test_error_counter() {
             pipe_data(mHal, sHal);
             b.recvMsg(rx, sizeof(rx));
         }
-        b.getStats(btx, brx, berr);
-        assert(berr == 0);
+        b.getStats(bs);
+        assert(bs.discCount == 0);
     }
+    (void)0;
 
     // Part 2: each forced drop = exactly one count.
     {
@@ -73,40 +74,40 @@ void test_error_counter() {
         cfg.errThreshold = 2;   // 3 errs trips the threshold
         ALink a(mHal, true, cfg);
         ALink b(sHal, false, cfg);
-        uint64_t btx, brx, berr;
+        Stats bs;
 
-        b.getStats(btx, brx, berr);
-        assert(berr == 0);
+        b.getStats(bs);
+        assert(bs.discCount == 0);
 
         for (int i = 0; i < 6; i++) b.err();
         assert(b.getState() == State::SWP);
-        b.getStats(btx, brx, berr);
-        assert(berr == 1);
+        b.getStats(bs);
+        assert(bs.discCount == 1);
 
         // Post-drop noise: err() while in SWP is a no-op.
         for (int i = 0; i < 100; i++) b.err();
-        b.getStats(btx, brx, berr);
-        assert(berr == 1);
+        b.getStats(bs);
+        assert(bs.discCount == 1);
 
         // resetStats() leaves the disconnect counter alone.
         b.resetStats();
-        b.getStats(btx, brx, berr);
-        assert(berr == 1);
+        b.getStats(bs);
+        assert(bs.discCount == 1);
 
         // resetErrors() zeros it.
         b.resetErrors();
-        b.getStats(btx, brx, berr);
-        assert(berr == 0);
+        b.getStats(bs);
+        assert(bs.discCount == 0);
     }
 
-    // 2-arg getStats() still works (back-compat).
+    // 2-arg getStats() is gone in v4.0.3 (one struct return).
     {
         MockHal mHal, sHal;
         AutoLinkConfig cfg; cfg.reliableMode = true; cfg.streamBufferSize = 8192;
         ALink a(mHal, true, cfg);
-        uint64_t a2tx, a2rx;
-        a.getStats(a2tx, a2rx);
-        (void)a2tx; (void)a2rx;
+        Stats as;
+        a.getStats(as);
+        (void)as.tx; (void)as.rx;
     }
 
     std::cout << "PASS" << std::endl;
@@ -127,25 +128,25 @@ void test_error_counter_during_swp() {
     ALink pong(sHal, false, cfg);
     negotiate_to_ok(ping, pong, mHal, sHal);
 
-    uint64_t tx0, rx0, e0;
-    ping.getStats(tx0, rx0, e0);
-    assert(e0 == 0);
+    Stats s0;
+    ping.getStats(s0);
+    assert(s0.discCount == 0);
 
     for (int i = 0; i < 6; i++) ping.err();
     assert(ping.getState() == State::SWP);
-    ping.getStats(tx0, rx0, e0);
-    assert(e0 == 1);
+    ping.getStats(s0);
+    assert(s0.discCount == 1);
 
     for (int i = 0; i < 100; i++) ping.err();
-    ping.getStats(tx0, rx0, e0);
-    assert(e0 == 1);
+    ping.getStats(s0);
+    assert(s0.discCount == 1);
 
     for (int i = 0; i < 3; i++) {
         ping.onTimer();
         if (!mHal.txBuf.empty()) pipe_data(mHal, sHal);
     }
-    ping.getStats(tx0, rx0, e0);
-    assert(e0 == 1);
+    ping.getStats(s0);
+    assert(s0.discCount == 1);
 
     std::cout << "PASS" << std::endl;
 }
@@ -165,9 +166,9 @@ void test_error_counter_link_failures() {
         ALink ping(mHal, true, cfg);
         ALink pong(sHal, false, cfg);
         ping.begin(); pong.begin();
-        uint64_t tx0, rx0, e0;
-        ping.getStats(tx0, rx0, e0);
-        assert(e0 == 0);
+        Stats s0;
+        ping.getStats(s0);
+        assert(s0.discCount == 0);
     }
 
     // Case 2: idle watchdog trip counts as exactly one.
@@ -184,9 +185,9 @@ void test_error_counter_link_failures() {
         ping.onTimer();
         assert(ping.getState() == State::SWP);
 
-        uint64_t tx1, rx1, e1;
-        ping.getStats(tx1, rx1, e1);
-        assert(e1 == 1);
+        Stats s1;
+        ping.getStats(s1);
+        assert(s1.discCount == 1);
     }
 
     // Case 3: peer's BREAK arriving on us counts as exactly one.
@@ -200,9 +201,9 @@ void test_error_counter_link_failures() {
         ping.onBreak();
         assert(ping.getState() == State::SWP);
 
-        uint64_t tx, rx, e;
-        ping.getStats(tx, rx, e);
-        assert(e == 1);
+        Stats s;
+        ping.getStats(s);
+        assert(s.discCount == 1);
     }
 
     // Case 4: an OK -> SWP transition counts; SWP/LCK recovery noise does
@@ -217,14 +218,14 @@ void test_error_counter_link_failures() {
 
         for (int i = 0; i < 6; i++) ping.err();
         assert(ping.getState() == State::SWP);
-        uint64_t tx, rx, e;
-        ping.getStats(tx, rx, e);
-        assert(e == 1);
+        Stats s;
+        ping.getStats(s);
+        assert(s.discCount == 1);
 
         for (int i = 0; i < 100; i++) ping.onTimer();
-        uint64_t tx2, rx2, e2;
-        ping.getStats(tx2, rx2, e2);
-        assert(e2 == 1);
+        Stats s2;
+        ping.getStats(s2);
+        assert(s2.discCount == 1);
     }
 
     // Case 5: cable-bounce simulation. begin, negotiate, bounce the pong
@@ -251,9 +252,9 @@ void test_error_counter_link_failures() {
         ping.onTimer(); pipe_data(mHal, sHal);
         pipe_data(sHal, mHal);
 
-        uint64_t tx, rx, e;
-        ping.getStats(tx, rx, e);
-        assert(e == 1);
+        Stats s;
+        ping.getStats(s);
+        assert(s.discCount == 1);
     }
 
     // Case 6: a pong reset that emits many BREAKs in a row while the ping
@@ -269,13 +270,13 @@ void test_error_counter_link_failures() {
         ping.onBreak();
         assert(ping.getState() == State::SWP);
         for (int i = 0; i < 5; i++) ping.onBreak();   // spurious, in SWP
-        uint64_t tx, rx, e;
-        ping.getStats(tx, rx, e);
-        assert(e == 1);
+        Stats s;
+        ping.getStats(s);
+        assert(s.discCount == 1);
 
         for (int i = 0; i < 200; i++) ping.onTimer();
-        ping.getStats(tx, rx, e);
-        assert(e == 1);
+        ping.getStats(s);
+        assert(s.discCount == 1);
     }
 
     std::cout << "PASS" << std::endl;
@@ -313,7 +314,7 @@ void test_app_buffer_overflow_does_not_drop_link() {
     // v4.0.1: errs are 0 (app-buffer-full does not count as a wire error).
     assert(b.getErrCount() == 0);
     // v4.0.1: the dropped frames show up as cobsGaps_ increments.
-    assert(b.getCobsGaps() > 0);
+    { Diag d; b.getDiag(d); assert(d.gaps > 0); }
     std::cout << "PASS" << std::endl;
 }
 
