@@ -40,11 +40,13 @@ public:
     virtual void lock() const = 0;
     virtual void unlock() const = 0;
 
-    virtual void pushAppBuf(uint8_t b) = 0;
     virtual int  pushAppBuf(const uint8_t* b, int n) = 0;  // returns bytes accepted
-    virtual int popAppBuf() = 0;
     virtual int popAppBuf(uint8_t* b, int max_len) = 0;
-    virtual int peekAppBuf() = 0;
+    // peekAppBuf() is logically const — the one-byte look-ahead cache it
+    // manages is an internal detail of the pop/peek path, and all callers
+    // must already hold the protocol lock. Marking it const lets the
+    // compiler enforce that contract at every call site.
+    virtual int peekAppBuf() const = 0;
     virtual int appBufAvailable() const = 0;
     virtual void clearAppBuf() = 0;
     // Flush the hardware receive buffer (UART driver ring, DMA buffer, etc.)
