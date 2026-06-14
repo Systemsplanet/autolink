@@ -674,10 +674,22 @@ bool ALink::onPayload(uint8_t cobsSeq, const uint8_t* b, int n) {
     int acc = hw.pushAppBuf(b, n);
     rxBytes += acc;
     if (acc < n) {
-        Log::getLog().error(ALINK_TAG,
-            "RX cobsSeq=%u app buffer full: wanted %d, accepted %d",
+        // v4.0.1: app-buffer-full is an APP-LAYER back-pressure condition,
+        // not a wire error. Do NOT count it toward errs (which would
+        // trip errThreshold and drop the link, even though the wire is
+        // fine). Log it as a warning so the dashboard can show that the
+        // app is falling behind the wire, and drop the frame. The next
+        // valid cobsSeq frame will be accepted; cobsSeq gap detection
+        // will mark it as a gap (the dropped frame's seq is missing from
+        // the stream) so the operator can see the count tick up. The
+        // link stays OK -- the protocol guarantees the next valid seq
+        // is expected+1, so a single dropped frame is recoverable.
+        Log::getLog().info(ALINK_TAG,
+            "RX cobsSeq=%u app buffer full: wanted %d, accepted %d  "
+            "(app falling behind wire; frame dropped, link stays OK)",
             (unsigned)cobsSeq, n, acc);
-        return err_unlocked();
+        cobsGaps_++;   // count it as a gap so the dashboard shows it
+        return false;
     }
     Log::getLog().debug(ALINK_TAG,
         "RX cobsSeq=%u  %d payload bytes  -> app buffer (rxBytes=%llu)",
