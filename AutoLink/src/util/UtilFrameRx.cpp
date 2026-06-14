@@ -1,4 +1,4 @@
-// UtilFrameRx.cpp — reliable-mode frame receive accumulator.
+// UtilFrameRx.cpp — reliable-mode frame receive accumulator (v4.0.0).
 // See UtilFrameRx.h for the public interface.
 #include "UtilFrameRx.h"
 #include "UtilCobs.h"
@@ -28,7 +28,15 @@ int UtilFrameRx::feed(const uint8_t* data, int len) {
             bool dropped;
             if (decLen > 1 &&
                 UtilCrc::crc8(decoded, (int)decLen - 1) == decoded[decLen - 1]) {
-                dropped = lis.onPayload(decoded, (int)decLen - 1);
+                // v4.0.0: first decoded byte is cobsSeq, rest is payload.
+                // Always present, even when n==0 (a 0-byte payload is legal
+                // and lets a sender emit a "cobsSeq-only" frame if it ever
+                // needs to advance the receiver's seq counter).
+                uint8_t cobsSeq = decoded[0];
+                const uint8_t* payload = decoded + 1;
+                int payloadLen = (int)decLen - 1 - 1;  // -1 for CRC, -1 for cobsSeq
+                if (payloadLen < 0) payloadLen = 0;
+                dropped = lis.onPayload(cobsSeq, payload, payloadLen);
             } else {
                 // Malformed COBS, CRC-only frame, or bad CRC: desync.
                 dropped = lis.onFrameError();
