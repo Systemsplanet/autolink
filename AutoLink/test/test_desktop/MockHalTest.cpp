@@ -107,9 +107,10 @@ void test_app_buffer_push_peek_pop_clear() {
     assert(hal.popAppBuf(rb, 2) == 2);
     assert(rb[0] == 0xAA && rb[1] == 0xBB);
     assert(hal.appBufAvailable() == 0);
-    assert(hal.popAppBuf() == -1);          // empty -> -1
+    { uint8_t b = 0; assert(hal.popAppBuf(&b, 1) == 0); }   // empty -> 0
 
-    hal.pushAppBuf(0xCC);
+    uint8_t one = 0xCC;
+    hal.pushAppBuf(&one, 1);
     hal.clearAppBuf();
     assert(hal.appBufAvailable() == 0);
     std::cout << "PASS" << std::endl;
