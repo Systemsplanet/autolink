@@ -7,9 +7,9 @@
 //
 // v4.0.0 wire format (NOT interop-compatible with v3.x):
 //   * Every COBS frame carries a 1-byte cobsSeq (0..255, wraps).
-//   * The receiver drops frames whose cobsSeq is not (lastRxCobsSeq_+1)%256.
-//   * The FIFO length/CRC compare in UtilPing is gone — echoes are matched
-//     by cobsSeq, so a wire-byte shift no longer desyncs the message layer.
+//   * The receiver drops frames whose cobsSeq is not (lastRxCobsSeq+1)%COBS_SEQ_WRAP.
+//   * The FIFO length/CRC compare in UtilPing is gone — echoes are matched by
+//     cobsSeq, so a wire-byte shift no longer desyncs the message layer.
 //   * Command frames (PING, REQ, best-ack) are 5 bytes: [0xAA 0x55 cobsSeq
 //     payload CRC8(first-4)].
 #pragma once
@@ -32,13 +32,25 @@ constexpr uint8_t REQ_CMD  = 0x11;
 
 // v4.0.0: control-frame layout is {0xAA, 0x55, cobsSeq, payload, CRC8}.
 constexpr int CTRL_FRAME_SIZE = 5;
-// Length of the cobsSeq field at index 2 — repeated here so tests/logs
-// don't have to magic-number it.
-constexpr int CTRL_FRAME_SEQ_IDX = 2;
-// Length of the payload field at index 3.
+// Index of the cobsSeq field inside the control frame.
+constexpr int CTRL_FRAME_SEQ_IDX     = 2;
+// Index of the payload field inside the control frame.
 constexpr int CTRL_FRAME_PAYLOAD_IDX = 3;
-// Length of the CRC8 field at index 4.
-constexpr int CTRL_FRAME_CRC_IDX = 4;
+// Index of the CRC8 field inside the control frame.
+constexpr int CTRL_FRAME_CRC_IDX     = 4;
+
+// cobsSeq is a single byte; the wraparound is the modulus of all gap/stale
+// arithmetic. Named so the "mod 256" / "+1 % 256" comments don't have to
+// magic-number it.
+constexpr int COBS_SEQ_WRAP = 256;
+
+// Heuristic for "this looks like a recently-lost frame, not a previous-session
+// leftover": (cobsSeq - lastRxCobsSeq) mod COBS_SEQ_WRAP in (0, MAX_GAP_RESYNC].
+// Beyond this window the frame is treated as stale (drop without re-counting).
+// 3 is empirically enough: with cobsSeq=4 lost in a row, the 5th arrives at
+// diff=4 which is treated as stale, but the receiver re-syncs on the very next
+// expected+1 frame anyway because we don't advance lastRxCobsSeq on a gap.
+constexpr int MAX_GAP_RESYNC = 3;
 
 // Max user payload per wire frame (before COBS + CRC8). Drives the static
 // scratch buffers below; keep <= 251 so a frame fits in 256 bytes.
@@ -112,6 +124,41 @@ struct AutoLinkConfig {
 };
 
 // ----------------------------------------------------------------------------
+// Stats — the one-and-only stats return struct. Replaces the old 2-arg / 3-arg
+// getStats overloads plus getLifetimeErrors(); the field names are the source
+// of truth, the two counters are never separated into "lifetime" vs
+// "session" — they're just one set of monotonic counters that get zeroed
+// (or not) by the reset calls.
+// ----------------------------------------------------------------------------
+struct Stats {
+    uint64_t tx;          // app-stream bytes sent since resetStats()
+    uint64_t rx;          // app-stream bytes received since resetStats()
+    uint64_t discCount;   // OK->SWP transitions since resetErrors()
+    uint64_t frameErrs;   // cumulative frame errors (bad CRC, malformed COBS,
+                          // oversize) since resetErrors() — never decreases
+};
+
+// ----------------------------------------------------------------------------
+// Diag — the one-and-only diagnostics return struct. Replaces the five
+// getCobs* getters on the facade. Internal plumbing; callers that need it
+// pass a reference to getDiag().
+// ----------------------------------------------------------------------------
+struct Diag {
+    uint8_t  txSeq;        // sender's next cobsSeq to use
+    bool     rxSeqSet;     // false until the first valid frame on this link
+    uint8_t  rxSeq;        // last cobsSeq accepted by onPayload
+    uint64_t gaps;         // total gap events (one per out-of-order arrival)
+    uint64_t stale;        // total stale events (out-of-window or duplicates)
+    uint64_t lostMsgs;     // total messages lost on the wire (sum of
+                           // (cobsSeq - rxSeq - 1) across gap events; equals
+                           // gaps only when a single seq is missing, and is
+                           // larger when a burst went missing). Distinct
+                           // from gaps so the dashboard can show "X
+                           // disconnects, Y frames lost" without conflating
+                           // a single big gap with many small ones.
+};
+
+// ----------------------------------------------------------------------------
 // ALink — the AutoLink protocol core: auto-baud negotiation state machine
 // (SWP/LCK/OK), reliable COBS+CRC-8 framing with cobsSeq-based
 // desync-immune frame ordering, boundary-preserving CRC-16 messages, error
@@ -128,7 +175,7 @@ class ALink : private UtilFrameRx::Listener {
     int errs;
     int spdI;
     int pingSample;             // Ping: which sample of N at the current baud
-    int emptySweeps_;           // Pong: consecutive full sweeps with 0 PINGs at any baud
+    int emptySweeps;            // Pong: consecutive full sweeps with 0 PINGs at any baud
     UtilBaudSweep baudSweep;    // per-baud decode scoring on the Pong side
 
     // v4.0.0: control-frame accumulator. Reads {0xAA, 0x55, cobsSeq, payload,
@@ -139,18 +186,18 @@ class ALink : private UtilFrameRx::Listener {
     // frames use cobsSeq for ordering.
     uint8_t rxBuf[CTRL_FRAME_SIZE];
     int rxIdx;
-    int swpRxBytes_ = 0;   // raw bytes received while in SWP (reset each baud window)
+    int swpRxBytes = 0;     // raw bytes received while in SWP (reset each baud window)
 
-    UtilFrameRx frameRx;   // reliable-mode RX accumulator (calls back below)
+    UtilFrameRx frameRx;     // reliable-mode RX accumulator (calls back below)
 
     // Message reassembly state (read side).
-    int      rxMsgLen;   // -1 = waiting on header
+    int      rxMsgLen;      // -1 = waiting on header
     uint16_t rxMsgCrc;
-    int      lckRetries;  // REQ_CMD attempts since entering LCK (Ping only)
+    int      lckRetries;    // REQ_CMD attempts since entering LCK (Ping only)
 
     // Idle watchdog / keepalive clocks (hw.nowMs() domain).
-    uint32_t  lastRxMs;   // last RX activity while in OK
-    uint32_t  lastTxMs;   // last TX while in OK; drives the keepalive
+    uint32_t  lastRxMs;     // last RX activity while in OK
+    uint32_t  lastTxMs;     // last TX while in OK; drives the keepalive
 
     // Throughput counters (app stream bytes).
     uint64_t txBytes;
@@ -162,35 +209,42 @@ class ALink : private UtilFrameRx::Listener {
     // inflate the count. Never decreases on its own -- resetStats()
     // leaves it alone, link drops leave it alone. Use this for
     // longevity testing ("how many bounces did this link survive?").
-    uint64_t totalErrs;
+    uint64_t discCount;
 
     // Cumulative count of every frame error (bad CRC, malformed COBS, buffer
     // overflow) since the last resetErrors(). Unlike the rolling errs counter
     // -- which clearErr() and a successful frame reset to 0 -- this only ever
     // increases. This is what the web dashboard's "Errors" card shows: a
     // lifetime tally rather than a transient that's almost always 0.
-    uint64_t lifetimeErrs;
+    uint64_t frameErrs;
 
     // ---- v4.0.0: cobsSeq state ----
     // Sender's next cobsSeq to use on the next frame sent in OK/reliable mode.
-    // Increments by 1 per frame, wraps at 256. Persists across calls; only
-    // reset on link drop / re-sweep.
-    uint8_t cobsSeq_ = 0;
+    // Increments by 1 per frame, wraps at COBS_SEQ_WRAP. Persists across
+    // calls; only reset on link drop / re-sweep.
+    uint8_t txSeq = 0;
     // Last cobsSeq successfully received (passed CRC, passed gap check, handed
     // to onPayload). false = no frame received yet on this link.
-    bool     lastRxCobsSeqSet_ = false;
-    uint8_t  lastRxCobsSeq_    = 0;
-    // Total gaps detected (received cobsSeq != (lastRxCobsSeq_+1)%256). For
+    bool    rxSeqSet = false;
+    uint8_t rxSeq    = 0;
+    // Total gaps detected (received cobsSeq != (rxSeq+1)%COBS_SEQ_WRAP). For
     // diagnostics — gap events cause a frame drop and a re-sweep, not a
     // reset, so a high gap count means the wire is lossy but the protocol
     // is recovering cleanly.
-    uint64_t cobsGaps_ = 0;
+    uint64_t gaps = 0;
     // Total stale frames dropped (received cobsSeq outside the expected
     // window). Distinct from gaps: a gap is "the next expected seq didn't
     // arrive"; a stale is "a seq from an earlier session / a wraparound
     // duplicate arrived". Both are handled by dropping without invoking the
     // message parser.
-    uint64_t cobsStale_ = 0;
+    uint64_t stale = 0;
+    // Total messages lost on the wire (sum of missed cobsSeq numbers
+    // across gap events; equals gaps when only a single seq is missing
+    // per event, and is larger for a multi-seq burst loss). Distinct
+    // from `gaps` (gap events) so the dashboard can show "X disconnects,
+    // Y frames lost" without conflating a single big gap with many
+    // small ones. Reset only by link drop.
+    uint64_t lostMsgs = 0;
 
     // UtilFrameRx::Listener (called under the lock from onRx).
     // v4.0.0: now takes the cobsSeq of the validated frame so ALink can
@@ -198,27 +252,67 @@ class ALink : private UtilFrameRx::Listener {
     bool onPayload(uint8_t cobsSeq, const uint8_t* b, int n) override;
     bool onFrameError() override;
 
-    void sendFrame(uint8_t payload);              // assign cobsSeq, send 5-byte control frame
-    void sendFrame_unlocked(uint8_t payload);    // caller holds the lock
-    void sendCobsFrame(const uint8_t* b, int n); // reliable mode: COBS(cobsSeq | payload) | CRC | 0x00
+    // Control-frame TX. sendFrame() takes the lock; sendFrame_unlocked()
+    // assumes the caller already holds it (mirroring sendCobsFrame / write).
+    void sendFrame(uint8_t payload);
+    void sendFrame_unlocked(uint8_t payload);
+
+    // Reliable-mode data frame TX. sendCobsFrame() takes the lock;
+    // sendCobsFrame_unlocked() assumes the caller holds it. With n=0 this
+    // emits a 0-payload data frame, which is the keepalive shape (a
+    // cobsSeq-bearing frame so the receiver's gap detection sees traffic
+    // even when the app has nothing to send).
+    void sendCobsFrame(const uint8_t* b, int n);
     void sendCobsFrame_unlocked(const uint8_t* b, int n);
+
     void changeState_unlocked(State newState);
-    int  bestSpd_unlocked() const;        // highest baud index that scored reliably
-    int  readStream(uint8_t* b, int n);   // pull up to n bytes from the app buffer
-    void resetCobsSeq_unlocked();         // cobsSeq_ = 0, lastRxCobsSeqSet_ = false
-    void logCobsSeq_unlocked(const char* tag, const char* dir, uint8_t seq) const;
+
+    // Highest baud index that has at least minHitsForReliable() decodes.
+    // 0 if no baud has scored yet (so a fresh caller falls back to the
+    // lowest baud). Caller holds the lock.
+    int  bestSpd_unlocked() const;
+
+    // Internal RX (called with the lock held by the message parser).
+    int  readStream(uint8_t* b, int n);
+
+    // cobsSeq sender + receiver state both zeroed. Caller holds the lock.
+    void resetSeq_unlocked();
+
+    // Transition from SWP/LCK to OK at baud index `idx`. Sets the baud,
+    // clears the error counter, refreshes the watchdog clocks, switches
+    // state, and (optionally) arms the keepalive timer. `tag` is the
+    // log line label (e.g. "fast-ack", "REQ"). The five callsites that
+    // used to paste this 6-line block now all funnel through here.
+    // Caller holds the lock. Returns nothing — caller is responsible for
+    // any post-lock work (e.g. sendFrame_unlocked) in the original order.
+    void lockOk_unlocked(int idx, const char* tag);
+
+    // onRx helpers (all assume the lock is held on entry/exit).
+    // ctrlFrameReady_unlocked consumes the assembled 5-byte control frame
+    // and dispatches to the SWP / LCK handlers. handleSwp_unlocked and
+    // handleLck_unlocked process one PING/REQ frame; they do NOT touch
+    // the lock themselves. Returns true if the link was dropped (so the
+    // caller should send a BREAK after releasing the lock).
+    bool ctrlFrameReady_unlocked(uint8_t cobsSeq, uint8_t payload, State curState);
+    bool handleSwp_unlocked(uint8_t cobsSeq, uint8_t payload);
+    bool handleLck_unlocked(uint8_t cobsSeq, uint8_t payload);
+
+    // onTimer helpers (assume the lock is held by the caller of onTimer;
+    // the SWP-master branch in particular takes the lock once for the
+    // whole branch instead of churning lock/unlock mid-call).
+    void onTimerOk_unlocked();
+    void onTimerSwp_unlocked();
+    void onTimerLck_unlocked();
 
     // Reset all link state, retune to allowedBauds[0], Ping arms the sweep
-    // timer. Idempotent. Caller must hold the lock. Counts as one disconnect
-    // event for the lifetime error counter *only when the link was actually
-    // up* (state == OK at entry) -- a single "thing happened" from the app's
-    // perspective. Spurious onBreak() calls and threshold trips that happen
-    // while already in SWP/LCK (e.g. a Pong emitting multiple BREAKs while
-    // rebooting) are part of the same recovery and do not inflate the count.
-    // begin() uses reset_unlocked() to do the same work without counting.
-    void dropLink_unlocked();
-    void reset_unlocked();      // like dropLink_unlocked but doesn't count
-    int  okTickMs() const;   // watchdog/keepalive poll interval while in OK
+    // timer. Idempotent. Caller must hold the lock. When `count` is true,
+    // this counts as one disconnect event for discCount — the canonical
+    // "drop the link" path. When false, it does the same work without
+    // counting — used by begin() and the Pong's initial SWP entry, which
+    // are the same "fresh start" but should not inflate discCount.
+    void reset_unlocked(bool count);
+
+    int  okTickMs() const;  // watchdog/keepalive poll interval while in OK
 
 public:
     ALink(ILink& hw, bool isMasterNode, const AutoLinkConfig& config = AutoLinkConfig());
@@ -235,7 +329,6 @@ public:
     int  read();
     int  read(uint8_t* b, int max_len);
     int  write(const uint8_t* b, int len);   // returns bytes accepted while OK
-    int  writeLocked(const uint8_t* b, int len); // caller holds hw.lock()
     void flush();
     // Discard all bytes in the receive app buffer and reset the message
     // reassembly state. Call after a FIFO reset on the application side to
@@ -250,14 +343,14 @@ public:
     void dropLink();   // send BREAK and transition to SWP (restarts sweep from app code)
     int  recvMsg(uint8_t* b, int max_len);
 
-    // Throughput. Counters are app-stream bytes since the last reset.
-    // The 3-arg form also returns the lifetime disconnect count (one
-    // per OK->SWP transition; survives resetStats() and link drops;
-    // only zeroed by resetErrors()).
-    void getStats(uint64_t& tx, uint64_t& rx) const;
-    void getStats(uint64_t& tx, uint64_t& rx, uint64_t& errors) const;
-    void resetStats();     // zeros tx/rx only; leaves errors alone
-    void resetErrors();    // zeros the lifetime error counter
+    // Throughput + error counters, all in one struct return. Fields:
+    //   tx           — app-stream bytes sent since resetStats()
+    //   rx           — app-stream bytes received since resetStats()
+    //   discCount    — OK->SWP transitions since resetErrors()
+    //   frameErrs    — cumulative frame errors since resetErrors()
+    void getStats(Stats& s) const;
+    void resetStats();     // zeros tx/rx only; leaves discCount + frameErrs alone
+    void resetErrors();    // zeros discCount + frameErrs
 
     // The active config (with any auto-size applied). Useful for tests
     // and for the dashboard to show the actual buffer sizes.
@@ -265,16 +358,11 @@ public:
 
     State getState() const;
     int getErrCount() const;
-    uint64_t getLifetimeErrors() const; // cumulative frame errors since last resetErrors()
     int getCurrentSpdIndex() const;
     uint32_t getCurrentBaud() const; // current UART baud rate (0 if allowedBauds is empty)
 
-    // v4.0.0 diagnostics.
-    uint8_t  getCobsSeq()        const { return cobsSeq_; }
-    bool     getLastRxCobsSeqSet() const { return lastRxCobsSeqSet_; }
-    uint8_t  getLastRxCobsSeq()  const { return lastRxCobsSeq_; }
-    uint64_t getCobsGaps()       const { return cobsGaps_; }
-    uint64_t getCobsStale()      const { return cobsStale_; }
+    // One-and-only diagnostics return — replaces the five getCobs* getters.
+    void getDiag(Diag& d) const;
 
     // HAL callbacks — called by EspHal from the UART event task and FreeRTOS
     // timer. Not part of the user-facing API; do not call from application code.
