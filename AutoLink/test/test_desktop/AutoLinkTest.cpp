@@ -40,11 +40,9 @@ public:
     uint32_t nowMs() override { return 0; }
     void lock() const override {}
     void unlock() const override {}
-    void pushAppBuf(uint8_t) override {}
     int  pushAppBuf(const uint8_t*, int) override { return 0; }
-    int  popAppBuf() override { return -1; }
     int  popAppBuf(uint8_t*, int) override { return 0; }
-    int  peekAppBuf() override { return -1; }
+    int  peekAppBuf() const override { return -1; }
     int  appBufAvailable() const override { return 0; }
     void clearAppBuf() override {}
     bool isHealthy() const { return true; }
@@ -123,17 +121,15 @@ void test_state_api() {
     (void)link.getCurrentBaud();
     (void)link.ready();
     (void)link.getErrCount();
-    (void)link.getLifetimeErrors();
+    { Stats s; link.getStats(s); (void)s.frameErrs; }
     std::cout << "PASS" << std::endl;
 }
 
 void test_stats_api() {
     std::cout << "\n=== Test: Stats API ===" << std::endl;
     AutoLink link(0, 16, 17, true);
-    uint64_t tx, rx;
-    link.getStats(tx, rx);
-    uint64_t errs;
-    link.getStats(tx, rx, errs);
+    Stats s;
+    link.getStats(s);
     link.resetStats();
     link.resetErrors();
     std::cout << "PASS" << std::endl;
