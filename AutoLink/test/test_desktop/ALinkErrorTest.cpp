@@ -281,25 +281,39 @@ void test_error_counter_link_failures() {
     std::cout << "PASS" << std::endl;
 }
 
-void test_app_buffer_overflow_errs() {
-    std::cout << "\n=== Test: App Buffer Overflow Counts Errors ===" << std::endl;
+void test_app_buffer_overflow_does_not_drop_link() {
+    // v4.0.1: app-buffer-full is an APP-LAYER back-pressure condition, not
+    // a wire error. Previously this test verified that app-buffer-full
+    // would count toward errThreshold and drop the link. With v4.0.1, it
+    // does NOT count -- the link stays in OK. The dropped frame shows up
+    // in cobsGaps_ instead. This test pins the v4.0.1 contract.
+    std::cout << "\n=== Test: App Buffer Overflow Does Not Drop Link (v4.0.1) ===" << std::endl;
     AutoLinkConfig cfg; cfg.reliableMode = true; cfg.errThreshold = 2;
+    cfg.streamBufferSize = 256;
     MockHal mHal, sHal;
     ALink a(mHal, true, cfg);
     ALink b(sHal, false, cfg);
-    sHal.appBufCap = 4;
+    sHal.appBufCap = 4;   // very small app buffer -- overflows on every frame
 
     uint8_t msg[64];
     for (int i = 0; i < 64; i++) msg[i] = (uint8_t)i;
-    int errsSeen = 0;
+
+    // Send several messages. The first 1-2 will partially fit in the
+    // 4-byte app buffer; the rest will overflow. Under v4.0.0 behavior
+    // this would count toward errThreshold and drop the link after a
+    // few iterations. Under v4.0.1, it doesn't count, so the link
+    // stays in OK.
     for (int k = 0; k < 5; k++) {
         if (!a.sendMsg(msg, 64)) break;
         pipe_data(mHal, sHal);
         if (b.getState() != State::OK) break;
-        errsSeen = b.getErrCount();
     }
-    assert(errsSeen > 0 || b.getState() == State::SWP);
-    assert(b.getState() == State::SWP);
+    // v4.0.1: link did NOT drop.
+    assert(b.getState() == State::OK);
+    // v4.0.1: errs are 0 (app-buffer-full does not count as a wire error).
+    assert(b.getErrCount() == 0);
+    // v4.0.1: the dropped frames show up as cobsGaps_ increments.
+    assert(b.getCobsGaps() > 0);
     std::cout << "PASS" << std::endl;
 }
 
@@ -376,7 +390,7 @@ int main() {
     test_error_counter();
     test_error_counter_during_swp();
     test_error_counter_link_failures();
-    test_app_buffer_overflow_errs();
+    test_app_buffer_overflow_does_not_drop_link();
     test_scattered_errors_dont_drop();
     test_parser_yields_after_drop();
     std::cout << "\n=== ALinkError Tests Completed Successfully ===" << std::endl;
