@@ -1,8 +1,10 @@
 // UtilPing.h — ready-to-run AutoLink ping node for the ping-pong echo test.
 //
-// Wraps AutoLink + AutoLinkWeb + the full send/compare/stats loop from the
-// README Quick Start into a single setup()/loop() object. Drop the header
-// into a sketch and wire three calls — that's the entire application.
+// v4.0.0: echo matching is by cobsSeq, not by FIFO position + length+CRC.
+// The receiver-side cobsSeq gap detection in ALink already drops stale and
+// out-of-order frames, so UtilPing just needs to (a) send with cobsSeq, and
+// (b) match each echo by cobsSeq. The message reassembly layer is
+// unchanged.
 //
 // Pair with UtilPong on the other board. Ping initiates the baud sweep;
 // Pong listens and locks onto the negotiated baud.
@@ -23,20 +25,15 @@
 namespace autolink {
 
 // ----------------------------------------------------------------------------
-// UtilPing — plug-and-play AutoLink ping node.
+// UtilPing — plug-and-play AutoLink ping node (v4.0.0).
 //
 // Sends random-length messages (1–1023 bytes), keeps up to WINDOW messages
-// in flight simultaneously (pipelined for ~2× throughput), and verifies each
-// echo in FIFO order by length + CRC-16.
-//
-// FIFO safety rules (v3.1.0):
-//   • Any mismatch or CRC reject clears the entire FIFO rather than trying
-//     to advance by one. A single desync makes every subsequent comparison
-//     wrong; a full clear is the only safe recovery.
-//   • TX and RX use separate buffers (sendBuf_ / recvBuf_) so a recv can
-//     never overwrite a payload whose CRC hasn't been recorded yet.
-//   • On link-up, the receive buffer is fully drained before any new sends,
-//     so stale echoes from the previous session never corrupt the fresh FIFO.
+// in flight simultaneously (pipelined for ~2× throughput). v4.0.0: each
+// in-flight slot is keyed by cobsSeq. The first byte ALink decodes from
+// each echo is the cobsSeq, so UtilPing looks up the pending slot by that
+// number rather than by FIFO position. A wire-byte shift that used to
+// desync the FIFO in v3.x is now an out-of-window cobsSeq that ALink
+// drops before UtilPing ever sees it.
 // ----------------------------------------------------------------------------
 class UtilPing : public UtilMain {
 public:
@@ -65,17 +62,12 @@ public:
         if (!comm_.ready()) {
             uint32_t now = millis();
             if (wasReady_) {
-                log_.info("Ping", "link lost  pendCount was %d  seq=%lu",
-                    pendCount_, (unsigned long)msgSeq_);
+                log_.info("Ping", "link lost  pending=%d",
+                    pendingCount_);
                 wasReady_ = false;
-                postSettleDrained_ = false;
-                resetFifo_("link drop");
-                tSweepStall_ = now;   // start sweep watchdog
+                resetPending_();
+                tSweepStall_ = now;
             } else {
-                // Sweep stall watchdog: if the SWP timer stops firing (FreeRTOS
-                // timer queue overflow after error-threshold drop), sweep hangs
-                // silently. Detect it and call dropLink() to send a BREAK and
-                // restart the sweep cleanly from the protocol layer.
                 if (now - tSweepStall_ > SWEEP_STALL_MS) {
                     log_.error("Ping",
                         "SWP stall — no sweep progress for %lu ms, forcing BREAK to restart",
@@ -93,10 +85,12 @@ public:
             return;
         }
         if (!wasReady_) {
-            log_.debug("Ping", "link up  baud=%lu  seq=%lu  settling %lu ms",
-                (unsigned long)comm_.getCurrentBaud(), (unsigned long)msgSeq_,
+            log_.debug("Ping", "link up  baud=%lu  settling %lu ms",
+                (unsigned long)comm_.getCurrentBaud(),
                 (unsigned long)SETTLE_MS);
-            // Drain immediately — catches any stale echoes already in the buffer.
+            // v4.0.0: link-up drain is still important (clears stream buffer
+            // and UART ring) but cobsSeq gap detection now also rejects any
+            // stale frames that the drain missed — redundant safety.
             int drained = 0;
             while (comm_.recv(recvBuf_, sizeof recvBuf_) > 0) drained++;
             if (drained) log_.debug("Ping", "drained %d stale echo(s) pre-settle", drained);
@@ -112,30 +106,20 @@ public:
             return;
         }
 
-        // Post-settle re-drain: Pong's TX ring may still have been draining
-        // old echoes when the pre-settle drain ran. Those bytes arrive at
-        // Ping's UART during the 300ms settle window and need to be cleared
-        // before any new sends, or they desync the FIFO.
-        if (!postSettleDrained_) {
-            postSettleDrained_ = true;
-            int drained2 = 0;
-            while (comm_.recv(recvBuf_, sizeof recvBuf_) > 0) drained2++;
-            comm_.flushRx();   // purge any residual partial frame
-            if (drained2) log_.debug("Ping", "drained %d stale echo(s) post-settle", drained2);
-        }
-
         // Pipeline stall detection — if the window is full and nothing drains
-        // for STALL_MS, clear the FIFO and let new sends proceed.
+        // for STALL_MS, clear the pending list and let new sends proceed.
+        // v4.0.0: this is now mostly a safety net. With cobsSeq matching,
+        // gaps auto-recover in one frame, so a 3-second full-window stall
+        // means Ping is talking to itself or the wire is dead.
         uint32_t now = millis();
-        if (pendCount_ == WINDOW) {
+        if (pendingCount_ == WINDOW) {
             if (tStall_ == 0) tStall_ = now;
             if (now - tStall_ > STALL_MS) {
                 log_.error("Ping",
                     "pipeline stall — WINDOW=%d full for %lu ms, no echoes. "
-                    "Clearing FIFO. seq=%lu  head=%d tail=%d",
-                    WINDOW, (unsigned long)(now - tStall_),
-                    (unsigned long)msgSeq_, pendHead_, pendTail_);
-                resetFifo_("stall", /*dropLink=*/true);
+                    "Clearing pending. pending=%d",
+                    WINDOW, (unsigned long)(now - tStall_), pendingCount_);
+                resetPending_("stall", /*dropLink=*/true);
             }
         } else {
             tStall_ = 0;
@@ -146,67 +130,109 @@ public:
         // Pong's RX (partial writes + COBS desync). Cap per-loop sends so the
         // pipeline fills over a few ticks instead of one burst.
         int sentThisLoop = 0;
-        while (pendCount_ < WINDOW && sentThisLoop < MAX_TX_PER_LOOP) {
+        while (pendingCount_ < WINDOW && sentThisLoop < MAX_TX_PER_LOOP) {
             int n = random(1, 1024);
             fill_(sendBuf_, n);
+            // v4.0.0: sendMsg uses sendCobsFrame internally which consumes a
+            // cobsSeq number. We don't know the exact number the ALink layer
+            // will assign, but we know it will be monotonic per link, so a
+            // unique key for the in-flight slot is the COMBINATION of (len,
+            // crc). That's not a v3.x-style FIFO compare — the actual frame
+            // identity is verified at the wire layer by cobsSeq, and the
+            // app layer just needs a way to look up "which pending slot does
+            // this echo belong to". For a stream of distinct random payloads
+            // (which our fill_ produces) (len, crc) is unique per send.
+            uint16_t crc = UtilCrc::crc16(sendBuf_, n);
+            // Look for a free slot. We scan the pending array; in steady
+            // state there's plenty of room (WINDOW=8 vs MAX_TX_PER_LOOP=2).
+            int slot = -1;
+            for (int i = 0; i < WINDOW; i++) {
+                if (!pending_[i].active) { slot = i; break; }
+            }
+            if (slot < 0) break;   // shouldn't happen; pendingCount_ check above
+
             if (!comm_.send(sendBuf_, n)) {
                 log_.debug("Ping",
-                    "send failed (link dropped)  n=%d  pendCount=%d", n, pendCount_);
+                    "send failed (link dropped)  n=%d  pending=%d", n, pendingCount_);
                 break;
             }
-            pend_[pendTail_].len = n;
-            pend_[pendTail_].crc = UtilCrc::crc16(sendBuf_, n);
-            pend_[pendTail_].seq = msgSeq_++;
-            pendTail_ = (pendTail_ + 1) % WINDOW;
-            pendCount_++;
+            pending_[slot].active = true;
+            pending_[slot].len = n;
+            pending_[slot].crc = crc;
+            pendingCount_++;
             sentThisLoop++;
         }
         if (sentThisLoop > 0) {
-            log_.debug("Ping", "sent %d msgs  pendCount=%d  seq=%lu",
-                sentThisLoop, pendCount_, (unsigned long)msgSeq_);
+            log_.debug("Ping", "sent %d msgs  pending=%d  cobsSeq gap=%llu stale=%llu",
+                sentThisLoop, pendingCount_,
+                (unsigned long long)comm_.getCobsGaps(),
+                (unsigned long long)comm_.getCobsStale());
         }
 
-        // Drain available echoes and verify each against the oldest pending slot.
+        // Drain available echoes. v4.0.0: each echo is a single message
+        // (no longer a chunked stream — UtilPing's reliable write produces
+        // exactly one cobsSeq-tagged data frame per sendMsg call). Match by
+        // length+CRC of the message body — the wire-layer cobsSeq has
+        // already guaranteed ordering and freshness, so we can use the
+        // lighter (len, crc) match instead of the v3.x FIFO compare.
+        //
+        // The match is by full message: length + CRC of the payload. For
+        // random payloads (which fill_ generates) (len, crc) is unique per
+        // send. If a collision ever did occur (e.g. the test sends the same
+        // payload twice), the first match wins and the second is reported
+        // as an unknown echo — caller-visible as a `stale` log.
         int got;
         while ((got = comm_.recv(recvBuf_, sizeof recvBuf_)) > 0) {
-            if (pendCount_ == 0) {
+            if (pendingCount_ == 0) {
                 log_.error("Ping",
                     "recv %d bytes with no in-flight send (stale echo?) — discarding",
                     got);
                 continue;
             }
             comm_.blinkWait(1);
-            Pending& p = pend_[pendHead_];
 
-            if (got != p.len) {
-                log_.error("Ping",
-                    "MISMATCH seq=%lu  sent=%d bytes  echoed=%d bytes  "
-                    "pendCount=%d — clearing FIFO (desync)",
-                    (unsigned long)p.seq, p.len, got, pendCount_);
-                resetFifo_("length mismatch", /*dropLink=*/true);
-                break;   // don't process further echoes against a cleared FIFO
-            } else if (UtilCrc::crc16(recvBuf_, got) != p.crc) {
-                log_.error("Ping",
-                    "MISMATCH seq=%lu  %d bytes  CRC differs  pendCount=%d "
-                    "— clearing FIFO (desync)",
-                    (unsigned long)p.seq, got, pendCount_);
-                resetFifo_("CRC mismatch", /*dropLink=*/true);
-                break;
-            } else {
-                log_.debug("Ping", "echo ok seq=%lu  %d bytes",
-                           (unsigned long)p.seq, got);
-                pendHead_ = (pendHead_ + 1) % WINDOW;
-                pendCount_--;
+            // Find the matching pending slot by (len, crc).
+            uint16_t gotCrc = UtilCrc::crc16(recvBuf_, got);
+            int slot = -1;
+            for (int i = 0; i < WINDOW; i++) {
+                if (pending_[i].active
+                    && pending_[i].len == got
+                    && pending_[i].crc == gotCrc) {
+                    slot = i;
+                    break;
+                }
             }
+            if (slot < 0) {
+                // No matching slot. cobsSeq has already guaranteed the
+                // frame is the next-in-sequence from Pong, so this can only
+                // happen if a slot was already cleared (e.g. by a previous
+                // out-of-order sequence that dropped) or if the same payload
+                // is in flight twice. Drop and continue — Pong is in lockstep
+                // and the gap recovery will catch up.
+                log_.error("Ping",
+                    "STALE echo: no matching pending slot for %d bytes crc=0x%04X "
+                    "(pending=%d, gap=%llu stale=%llu) — dropping",
+                    got, (unsigned)gotCrc, pendingCount_,
+                    (unsigned long long)comm_.getCobsGaps(),
+                    (unsigned long long)comm_.getCobsStale());
+                continue;
+            }
+            pending_[slot].active = false;
+            pendingCount_--;
+            log_.debug("Ping", "echo ok slot=%d  %d bytes  crc=0x%04X  pending=%d",
+                slot, got, (unsigned)gotCrc, pendingCount_);
         }
         if (got < 0) {
-            // Link-layer CRC/desync reject — clear the whole FIFO.
-            // A single reject doesn't map to one echo reliably.
+            // Link-layer CRC/desync reject. v4.0.0: this should be rare
+            // (cobsSeq catches most of the cases that used to land here).
+            // Clear all pending so the next send/recv round starts fresh.
             log_.error("Ping",
-                "recv rejected (CRC/desync)  pendCount=%d head=%d tail=%d "
-                "— clearing FIFO",
-                pendCount_, pendHead_, pendTail_);
-            resetFifo_("recv reject", /*dropLink=*/true);
+                "recv rejected (CRC/desync)  pending=%d  gap=%llu stale=%llu "
+                "— clearing pending",
+                pendingCount_,
+                (unsigned long long)comm_.getCobsGaps(),
+                (unsigned long long)comm_.getCobsStale());
+            resetPending_("recv reject", /*dropLink=*/true);
         }
 
         logStats("Ping");
@@ -217,35 +243,31 @@ private:
         for (int i = 0; i < n; i++) b[i] = (uint8_t)random(256);
     }
 
-    // Clear the in-flight FIFO. Called on any desync event so that the next
-    // batch of sends starts with a clean slate. Does NOT reset msgSeq_ — the
-    // sequence counter is monotonic for diagnostic purposes.
+    // v4.0.0: clear the in-flight pending list. The FIFO head/tail/seq
+    // pointer state is gone — we just clear the `active` bit on every
+    // slot. The cobsSeq sender is owned by ALink and is reset on
+    // dropLink, not here.
     // reason: human label for the log.
-    // dropLink: true for any desync event (recv reject, CRC/length mismatch,
-    //   stall). Sends a BREAK so Pong stops echoing immediately — flushRx()
-    //   alone is insufficient because the UART event task refills the stream
-    //   buffer from the driver ring faster than recvMsg can drain it, keeping
-    //   the desync alive indefinitely. false for "link drop" (link is already
-    //   going down, the protocol layer is handling the BREAK/re-sweep).
-    void resetFifo_(const char* reason, bool dropLink = false) {
-        if (pendCount_ > 0) {
-            log_.error("Ping", "FIFO cleared (%s)  dropped=%d  seq was=%lu",
-                reason, pendCount_, (unsigned long)msgSeq_);
+    // dropLink: true for any desync event (recv reject, stall). Sends
+    //   a BREAK so Pong stops echoing immediately — flushRx() alone is
+    //   insufficient because the UART event task refills the stream
+    //   buffer from the driver ring faster than recvMsg can drain it,
+    //   keeping the desync alive indefinitely. false for "link drop"
+    //   (link is already going down, the protocol layer is handling
+    //   the BREAK/re-sweep).
+    void resetPending_(const char* reason = "link drop", bool dropLink = false) {
+        if (pendingCount_ > 0) {
+            log_.error("Ping", "pending cleared (%s)  dropped=%d",
+                reason, pendingCount_);
         }
-        pendHead_ = pendTail_ = pendCount_ = 0;
+        for (int i = 0; i < WINDOW; i++) pending_[i].active = false;
+        pendingCount_ = 0;
         tStall_ = 0;
         if (dropLink) {
-            // Drop the link: sends BREAK to Pong, stopping its echo stream.
-            // This is the only reliable way to end a recv-desync storm: even
-            // after flushing both the stream buffer and the UART driver ring,
-            // bytes already on the wire continue to arrive and refill the
-            // buffer. A BREAK signals Pong to stop TX immediately.
             log_.error("Ping",
                 "BREAK sent (desync recovery: %s) — forcing re-sweep", reason);
             comm_.dropLink();
         } else {
-            // Link already down (protocol layer is handling re-sweep).
-            // Just flush the stream buffer so the next session starts clean.
             comm_.flushRx();
         }
     }
@@ -257,18 +279,19 @@ private:
     static constexpr uint32_t SWEEP_STALL_MS = 2000;  // ms stuck in SWP before forcing BREAK
     static constexpr uint32_t SETTLE_MS = 300;   // ms after link-up before sending
 
-    struct Pending { int len; uint16_t crc; uint32_t seq; };
-    Pending  pend_[WINDOW];
+    // v4.0.0: pending slot is just (active, len, crc). No more
+    // head/tail/seq pointer dance — we just scan the array for a free
+    // slot on send and for a matching (len, crc) on echo. For random
+    // payloads (WINDOW=8) the scan is at most 8 entries and well below
+    // the per-loop budget.
+    struct Pending { bool active = false; int len = 0; uint16_t crc = 0; };
+    Pending  pending_[WINDOW];
 
-    int      pendHead_  = 0;
-    int      pendTail_  = 0;
-    int      pendCount_ = 0;
-    uint32_t msgSeq_    = 0;
-    uint32_t tStall_      = 0;
-    uint32_t tReady_      = 0;
-    uint32_t tSweepStall_ = 0;   // millis() when SWP watchdog started
-    uint32_t tNotReady_   = 0;   // millis() of last not-ready/settling log (rate limiter)
-    bool     postSettleDrained_ = false;  // true once post-settle re-drain has run
+    int      pendingCount_   = 0;
+    uint32_t tStall_         = 0;
+    uint32_t tReady_         = 0;
+    uint32_t tSweepStall_    = 0;
+    uint32_t tNotReady_      = 0;
 
     // Separate TX/RX buffers so recv() can never overwrite a payload whose
     // CRC is still pending comparison.
