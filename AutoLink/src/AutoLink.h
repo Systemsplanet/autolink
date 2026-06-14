@@ -44,7 +44,7 @@ namespace autolink {
 
 // Library version — keep in sync with library.properties. Logged at INFO
 // level by begin() so the running firmware version is always visible.
-#define AUTOLINK_VERSION "4.0.0"
+#define AUTOLINK_VERSION "4.0.1"
 
 // ----------------------------------------------------------------------------
 // AutoLink — the one-object public facade: construct as a global, begin(),
@@ -71,10 +71,17 @@ public:
     {
         blinkHal.bind(&blinker);
 
-        // Auto-size the reassembly buffer to two full messages so RX keeps
-        // flowing while the app is briefly busy. The user never has to reason
-        // about the maxMsg/streamBufferSize relationship.
-        size_t need = 2 * (cfg.maxMsg + MSG_HDR);
+        // Auto-size the reassembly buffer to one full UtilPing WINDOW of
+        // messages plus one full Pong echo of headroom. This is the right
+        // size: Ping's TX pipeline dumps up to WINDOW=8 messages back to
+        // back, and the UART event task (free-running) can fill the app
+        // buffer faster than Pong's loop() drains it (loop is capped at
+        // MAX_TX_PER_LOOP=2 echoes per iteration). With WINDOW+2 frames
+        // of headroom, the buffer never overflows under normal Ping/Pong
+        // traffic. The user never has to reason about the
+        // maxMsg/streamBufferSize relationship; if they need more, they
+        // can set cfg.streamBufferSize explicitly.
+        size_t need = (/*WINDOW*/8 + /*Pong headroom*/2) * (cfg.maxMsg + MSG_HDR);
         if (cfg.streamBufferSize < need) cfg.streamBufferSize = need;
         // TX ring must hold at least one full COBS-encoded message without
         // blocking. A maxMsg-byte payload splits into ceil(maxMsg/250) COBS
@@ -172,6 +179,10 @@ public:
     uint8_t  getLastRxCobsSeq()   const { return link->getLastRxCobsSeq(); }
     uint64_t getCobsGaps()        const { return link->getCobsGaps(); }
     uint64_t getCobsStale()       const { return link->getCobsStale(); }
+
+    // v4.0.1: the actual app buffer size after auto-size. Lets the
+    // dashboard display it and lets tests verify the auto-size formula.
+    size_t getStreamBufferSize() const { return link->getConfig().streamBufferSize; }
 };
 
 } // namespace autolink
