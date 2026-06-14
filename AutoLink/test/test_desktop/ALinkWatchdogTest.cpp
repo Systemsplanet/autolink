@@ -57,8 +57,14 @@ void test_keepalive() {
 
     mHal.now = 1000;
     ping.onTimer();
-    assert(mHal.txBuf.size() == 2);
-    assert(mHal.txBuf[0] == 0x00 && mHal.txBuf[1] == 0x00);
+    // v4.0.0: keepalive is [0x00, COBS(cobsSeq | CRC), 0x00] = 5 bytes
+    // (COBS of a 2-byte input [cobsSeq, CRC] with a leading 0x00 is
+    // [0x01, 0x02, cobsSeq, CRC] -- but the cobsSeq=0 case is special
+    // because the input starts with 0x00; we get [0x01, 0x02, CRC] where
+    // the second code byte is at index 2).
+    assert(mHal.txBuf.size() == 5);
+    assert(mHal.txBuf[0] == 0x00);
+    assert(mHal.txBuf[4] == 0x00);
 
     sHal.now = 1000;
     pipe_data(mHal, sHal);
@@ -174,8 +180,9 @@ void test_asymmetric_peer_death_recovery() {
     // The ping is now sweeping on its own.
     ping.onTimer();
     assert(!mHal.txBuf.empty());
-    assert(mHal.txBuf.size() == 4);
-    assert(mHal.txBuf[2] == PING_CMD);
+    // v4.0.0: control frame is {0xAA, 0x55, cobsSeq, PING_CMD, CRC8} = 5 bytes.
+    assert(mHal.txBuf.size() == 5);
+    assert(mHal.txBuf[3] == PING_CMD);
 
     pipe_data(mHal, sHal);
     assert(pong.getCurrentSpdIndex() == 1);
