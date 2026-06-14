@@ -25,7 +25,7 @@ LINK_SRC = $(SRC)/ALink.cpp $(SRC)/Log.cpp $(UTIL)/UtilCrc.cpp $(UTIL)/UtilCobs.
 TEST_BINS = run_test_crc run_test_cobs run_test_blink run_test_framerx \
             run_test_baudsweep run_test_log run_test_mockhal run_test_autolink \
             run_test_alink_io run_test_alink_message run_test_alink_negotiation \
-            run_test_alink_error run_test_alink_watchdog
+            run_test_alink_error run_test_alink_watchdog run_test_alink_cobsseq
 
 all: $(TEST_BINS)
 	@echo "=== All $(words $(TEST_BINS)) test suites PASS ==="
@@ -70,6 +70,12 @@ test_alink_error: run_test_alink_error
 
 test_alink_watchdog: run_test_alink_watchdog
 	./run_test_alink_watchdog
+
+test_alink_cobsseq: run_test_alink_cobsseq
+	./run_test_alink_cobsseq
+
+run_test_alink_cobsseq: $(LINK_SRC) ALinkCobsSeqTest.cpp
+	$(CXX) $(CXXFLAGS) $(LINK_SRC) ALinkCobsSeqTest.cpp -o $@
 
 run_test_crc: $(UTIL)/UtilCrc.cpp UtilCrcTest.cpp
 	$(CXX) $(CXXFLAGS) $(UTIL)/UtilCrc.cpp UtilCrcTest.cpp -o $@
@@ -168,4 +174,4 @@ clean:
 .PHONY: all asan test_asan coverage clean \
         test_crc test_cobs test_blink test_framerx test_baudsweep test_log \
         test_mockhal test_alink_io test_alink_message test_alink_negotiation \
-        test_alink_error test_alink_watchdog test_autolink
+        test_alink_error test_alink_watchdog test_alink_cobsseq test_autolink
