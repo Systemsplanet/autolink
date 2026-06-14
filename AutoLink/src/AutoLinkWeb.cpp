@@ -1,4 +1,6 @@
 #include <time.h>
+#include <sys/time.h>  // gettimeofday() — gives us microsecond resolution
+                       // for the milliseconds field in log timestamps.
 // AutoLinkWeb.cpp — AutoLinkWeb implementation (Arduino/ESP32 only).
 //
 // Embeds the full dashboard HTML/CSS/JS as a raw string literal, connects
@@ -368,7 +370,7 @@ bool AutoLinkWeb::begin(const char* ssid, const char* pass, uint16_t port) {
                 ti.tm_year+1900, ti.tm_mon+1, ti.tm_mday,
                 ti.tm_hour, ti.tm_min, ti.tm_sec);
         } else {
-            log.info(TAG, "NTP not available — timestamps are uptime (HH:MM:SS*)");
+            log.info(TAG, "NTP not available — timestamps are uptime (HH:MM:SS.mmm*)");
         }
     }
 
@@ -474,23 +476,36 @@ void AutoLinkWeb::logSinkCb(char sev, const char* tag, const char* msg, void* ct
     const uint32_t idx  = self->logHead_ % RING_CAP;
     self->logRing_[idx].seq = self->logHead_;
     self->logRing_[idx].sev = sev;
-    char ts[12]; // "HH:MM:SS" or "HH:MM:SS*"
+    // "HH:MM:SS.mmm" = 12 chars + NUL = 13. The optional '*' suffix
+    // (uptime fallback marker) adds one more, so 16 is the safe size.
+    char ts[16];
     if (self->ntpSynced_) {
-        struct tm ti = {};
-        if (getLocalTime(&ti, 0)) {
-            snprintf(ts, sizeof(ts), "%02d:%02d:%02d",
-                     ti.tm_hour, ti.tm_min, ti.tm_sec);
+        struct timeval tv = {};
+        if (gettimeofday(&tv, nullptr) == 0) {
+            // Wall-clock with millisecond resolution. We deliberately
+            // skip getLocalTime() and read tv_sec through localtime_r()
+            // ourselves so the wall-clock seconds and the sub-second
+            // millis come from the same instant — no skew between them.
+            struct tm ti = {};
+            localtime_r(&tv.tv_sec, &ti);
+            int ms = (int)(tv.tv_usec / 1000);
+            snprintf(ts, sizeof(ts), "%02d:%02d:%02d.%03d",
+                     ti.tm_hour, ti.tm_min, ti.tm_sec, ms);
         } else {
-            // NTP was synced but getLocalTime failed (rare) — use uptime
-            uint32_t s = millis() / 1000;
-            snprintf(ts, sizeof(ts), "%02lu:%02lu:%02lu*",
-                     (unsigned long)(s/3600), (unsigned long)(s%3600/60), (unsigned long)(s%60));
+            // NTP was synced but gettimeofday failed (very rare) — uptime
+            uint32_t ms_total = millis();
+            uint32_t s = ms_total / 1000;
+            snprintf(ts, sizeof(ts), "%02lu:%02lu:%02lu.%03lu*",
+                     (unsigned long)(s/3600), (unsigned long)(s%3600/60),
+                     (unsigned long)(s%60), (unsigned long)(ms_total % 1000));
         }
     } else {
         // No NTP — uptime with * suffix so the reader knows it's not wall-clock
-        uint32_t s = millis() / 1000;
-        snprintf(ts, sizeof(ts), "%02lu:%02lu:%02lu*",
-                 (unsigned long)(s/3600), (unsigned long)(s%3600/60), (unsigned long)(s%60));
+        uint32_t ms_total = millis();
+        uint32_t s = ms_total / 1000;
+        snprintf(ts, sizeof(ts), "%02lu:%02lu:%02lu.%03lu*",
+                 (unsigned long)(s/3600), (unsigned long)(s%3600/60),
+                 (unsigned long)(s%60), (unsigned long)(ms_total % 1000));
     }
     snprintf(self->logRing_[idx].line, LINE_CAP, "%s %c %s %s", ts, sev, tag, msg);
     self->logHead_++;
