@@ -44,7 +44,7 @@ namespace autolink {
 
 // Library version — keep in sync with library.properties. Logged at INFO
 // level by begin() so the running firmware version is always visible.
-#define AUTOLINK_VERSION "3.2.10"
+#define AUTOLINK_VERSION "4.0.0"
 
 // ----------------------------------------------------------------------------
 // AutoLink — the one-object public facade: construct as a global, begin(),
@@ -166,6 +166,12 @@ public:
     State getState() const { return link->getState(); }
     uint32_t getCurrentBaud() const { return link->getCurrentBaud(); }
     uint64_t getLifetimeErrors() const { return link->getLifetimeErrors(); }
+    // v4.0.0 cobsSeq diagnostics.
+    uint8_t  getCobsSeq()         const { return link->getCobsSeq(); }
+    bool     getLastRxCobsSeqSet() const { return link->getLastRxCobsSeqSet(); }
+    uint8_t  getLastRxCobsSeq()   const { return link->getLastRxCobsSeq(); }
+    uint64_t getCobsGaps()        const { return link->getCobsGaps(); }
+    uint64_t getCobsStale()       const { return link->getCobsStale(); }
 };
 
 } // namespace autolink
