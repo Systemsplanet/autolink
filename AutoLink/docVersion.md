@@ -4,16 +4,100 @@ All releases, most recent first.
 
 ---
 
+## v4.0.0
+
+**MAJOR WIRE-FORMAT CHANGE. v4.0.0 nodes are NOT interop-compatible with v3.x nodes.** Both ends of every AutoLink link must be on v4.0.0 (or later, v4-compatible) firmware.
+
+Eliminates the **v3.0.0..v3.2.10 disconnect storm** that has been present since the pipelined FIFO compare was introduced. Every reliable-mode frame now carries a 1-byte `cobsSeq` (0..255, wraps) and the receiver drops stale or out-of-order frames **at the wire layer**, before they can desync the message parser. The FIFO length/CRC compare in `UtilPing` is gone — echoes are matched by `cobsSeq`, so a wire-byte shift that used to lock Ping in OK with `rx=0` forever while Pong bounced on desyncs is now an out-of-window `cobsSeq` that the receiver rejects before the message layer ever sees it.
+
+**Wire format changes (v4.0.0 — not v3-compatible).**
+
++ **Control frames (PING, REQ, best-ack):** `{0xAA, 0x55, cobsSeq, payload, CRC8(first-4)}` — 5 bytes, was 4. The `cobsSeq` field carries the sender's per-link counter but is NOT used to order command frames (each command is independent). It is logged at INFO for diagnostic visibility.
++ **Reliable-mode data frames:** `[0x00] [COBS(cobsSeq | payload) | CRC8(cobsSeq | payload)] [0x00]` — the `cobsSeq` byte is the first decoded byte of every reliable-mode frame. Payload is the message data without CRC8; the trailing CRC8 is verified by the wire layer before the payload is handed to the message layer.
++ **Keepalive (in OK with reliable mode):** a 0-payload reliable frame so the receiver's gap detection sees a continuous `cobsSeq` stream. Wire: `[0x00, COBS(cobsSeq | CRC8(cobsSeq)), 0x00]` — 5 bytes on the wire, was 2 bytes (`0x00 0x00`).
++ **`UtilFrameRx::Listener::onPayload(uint8_t cobsSeq, const uint8_t* b, int n)`** — now takes the `cobsSeq` byte so the owner can do gap/stale detection before invoking the message parser.
+
+**`ALink::onPayload(uint8_t cobsSeq, const uint8_t* b, int n)`** — gap/stale detection rules:
+
++ First valid frame: `lastRxCobsSeqSet_ = true`, `lastRxCobsSeq_ = cobsSeq`. No rejection.
++ Subsequent frames: `expected = (uint8_t)(lastRxCobsSeq_ + 1)`. If `cobsSeq == expected`, accept and advance. If `cobsSeq != expected`:
+  - `diff = (cobsSeq - lastRxCobsSeq_) mod 256`. If `0 < diff <= 3` → **GAP** (one or two lost frames in flight). Drop the frame, do NOT advance `lastRxCobsSeq_` (the next valid frame is still expected+1, so the receiver resyncs in one frame). `cobsGaps_` increments.
+  - Otherwise (duplicate, wraparound duplicate, big skip) → **STALE** (a frame from an earlier session or a previous-window duplicate). Drop without advancing. `cobsStale_` increments.
+
+**Sender side:** `ALink::cobsSeq_` is incremented on every reliable-mode **data frame** TX (one number per frame sent). Keepalive consumes a number. Control frames (PING, REQ, best-ack) do NOT consume a number — they're independent.
+
+**Link drop resets both sides.** `dropLink_unlocked()` sets `cobsSeq_ = 0` and `lastRxCobsSeqSet_ = false` on the local side. The peer does the same when it receives the BREAK. After re-sweep, both sides start from `cobsSeq=0`, so any stale bytes from the previous session are immediately rejected as out-of-window on the very first frame.
+
+**`UtilPing::loop()` FIFO rewrite.** v3.x had an 8-deep FIFO of `{len, crc16, seq}` keyed by `pendHead_/pendTail_/pendCount_` with a `msgSeq_` counter. v4.0.0 has an 8-element `pending_[WINDOW]` array of `{active, len, crc16}` scanned linearly for a free slot on send and a matching `(len, crc)` on echo. The head/tail/seq-pointer dance is gone — the wire layer's `cobsSeq` does the ordering. `postSettleDrained_` and the `tSweepStall_` watchdog are retained as belt-and-suspenders safety nets, but in normal operation the cobsSeq layer handles every case they used to catch.
+
+**New public diagnostics** (all on `AutoLink`, with matching `get*()` on `ALink`):
+
++ `getCobsSeq()` — sender's next `cobsSeq` to use.
++ `getLastRxCobsSeqSet()` / `getLastRxCobsSeq()` — receiver's last-accepted `cobsSeq` (or "unset" before the first frame).
++ `getCobsGaps()` — total gap events seen on RX since boot.
++ `getCobsStale()` — total stale events seen on RX since boot.
+
+**New debug logs** at every `cobsSeq` event:
+
++ `TX cobsSeq=N  M payload bytes  K wire bytes` (debug) — every reliable-mode data frame.
++ `TX keepalive cobsSeq=N` (debug) — every keepalive.
++ `RX cobsSeq=N  M payload bytes  -> app buffer` (debug) — every accepted reliable-mode frame.
++ `RX cobsSeq=N GAP: expected E, last good=L  M payload bytes DROPPED` (info) — a gap was detected and a frame was dropped.
++ `RX cobsSeq=N STALE: expected E, last good=L  M payload bytes DROPPED` (info) — a stale frame was dropped.
++ `Locked at N baud (fast-ack cobsSeq=C)` / `Locked at N baud (cobsSeq=C)` — control-frame lock transitions now include the `cobsSeq` byte of the received command.
++ `SWP Pong: first PING at baud[N]=B (cobsSeq=C)` — first PING at a baud now logs the `cobsSeq`.
+
+**New host test suite `ALinkCobsSeqTest.cpp`** (11 tests) pins the `cobsSeq` behavior:
+
++ First frame is accepted and sets `lastRxCobsSeqSet_`.
++ Consecutive frames advance `cobsSeq`.
++ Gap in `cobsSeq` drops the frame, app buffer stays clean.
++ Gap then recover on the expected next seq.
++ Duplicate `cobsSeq` is stale (not a gap).
++ Wraparound at 256 is continuous (seq=255 → seq=0 is NOT a gap).
++ Post-wraparound gap is detected.
++ Sender's `cobsSeq` increments per data frame.
++ `dropLink()` resets `cobsSeq` on both sides.
++ Wire-byte-shift is caught at the `cobsSeq` layer (the v3.x bug, now an explicit test).
++ Gap/stale counters are accessible via the public API.
+
+**New `UtilFrameRx` tests** (15 tests, two new for `cobsSeq`):
+
++ Zero-byte payload with `cobsSeq` is delivered (lets a sender emit a "seq-only" frame if it ever needs to).
++ `cobsSeq=0xFF` passes through (no special-casing in the wire layer).
+
+**Pre-existing v3.x test bugs fixed** as a side effect of the protocol rewrite:
+
++ `test_error_counter`, `test_error_counter_during_swp`, and the Case 4 sub-test in `test_error_counter_link_failures` (ALinkErrorTest) were not setting `cfg.errThreshold` and were testing against the default 20. They now set `errThreshold=2` to actually trip the threshold in 3 errs.
++ `test_best_baud_selection` (ALinkNegotiationTest) was written for the v3.0.0 slowest-first `pickBest()` and was failing under v3.2.10's fastest-first behavior. Updated expectations.
++ `test_highest_baud_with_threshold_wins`, `test_baud_below_threshold_falls_back`, `test_strict_threshold`, `test_lenient_threshold_picks_flaky_top`, `test_explicit_expected_samples_overrides`, `test_realistic_cable_scenario` (UtilBaudSweepTest) — all written for the v3.0.0 slowest-first `pickBest()`. Renamed to `test_fastest_baud_above_threshold_wins` and updated to verify the v3.2.10+ fastest-first contract.
+
+**Motivation — the bug that has been here since v3.0.0.** Pipelined echo verification (introduced v3.0.0) compared the oldest pending slot's `(len, crc)` to the incoming echo's `(len, crc)`. A wire-byte shift in the middle of the pipeline produced a "valid" COBS frame whose decoded message had the wrong length (e.g. `sent=656 echoed=780` from the user's log). The v3.x protocol's recovery was: drop the FIFO, send a BREAK, re-sweep. But the wire bytes-in-flight at the time of the BREAK (Pong's TX ring still draining) arrived at Ping's UART AFTER the re-sweep completed, and Ping's settle-drain didn't catch them (the drain ran immediately on link-up, but Pong's TX ring finishes draining ~300 ms later). The stale echoes were matched against the new pipeline, failed the FIFO compare, and triggered another BREAK — the v3.x "PING sent 8 msgs pendCount=8 → 3 second stall → BREAK sent (desync recovery: stall)" cycle. The user's `16:51:35`..`16:52:22` log shows this pattern running continuously. v4.0.0's cobsSeq gap detection catches every one of these stale frames at the wire layer — the pipeline never sees them.
+
+**Upgrade notes.** Both ends of every AutoLink link must be flashed to v4.0.0 (or later v4-compatible firmware) before they can talk to each other. A v3.x node on one end and a v4.0.0 node on the other will not establish a link: the 4-byte control frames from v3.x will fail the v4.0.0 5-byte CRC check, and the v3.x node will not recognize the v4.0.0 cobsSeq byte in the wire stream.
+
+---
+
+## v3.2.11
+
+Adds millisecond precision to live log timestamps so timing-sensitive diagnostics (PING-settling countdown, BREAK storm, CRC-reject burst, MISMATCH + re-sweep) are resolvable to the millisecond instead of getting smeared across the second.
+
+**`AutoLinkWeb::logSinkCb()` timestamp format.** Changed from `HH:MM:SS` to `HH:MM:SS.mmm` (12 chars + optional `*` uptime marker, buffer bumped from 12 to 16). The NTP-synced path now uses `gettimeofday()` + `localtime_r()` to read the wall-clock seconds and sub-second microseconds from the same `timeval` snapshot — no skew between the seconds and millis fields. The no-NTP fallback uses `millis()` directly. Three-digit zero-padded millis (`%03d`) so the column lines up in monospace. Format examples:
++ `16:51:37.842 I ALinkWeb NTP synced: 2026-06-13 16:51:37 EST/EDT`
++ `16:52:08.451 D Ping settling  10 ms remaining`
++ `00:00:39.001* D Pong echo #1  76 bytes  ok`  ← the `*` suffix still marks uptime-only timestamps
+
+**Motivating use case.** `UtilPing`'s settle-phase debug log prints "N ms remaining" on every `loop()` call (~4 ms apart). At second-resolution the entire 300 ms settle collapses to a single timestamp; with milliseconds, the per-iteration ticks are individually visible. The Ping log in v3.2.10 was producing ~80 nearly-identical lines per settle that all shared the same `HH:MM:SS` prefix, making the log file unusable; the millisecond column makes each entry a unique point on a time axis.
+
+---
+
 ## v3.2.10
 
-Adds the `test_embedded.ino` self-loopback test for the `AutoLink` facade and hardens `UtilBlink::flashBlocking()` against the race where the esp_timer task is still dispatching the previous async pattern's callback when `setup()` calls the blocking variant.
+Adds the `test_embedded.ino` self-loopback test for the `AutoLink` facade and hardens `UtilBlink::flashBlocking()` against the race where the esp_timer task is still dispatching the previous async pattern's callback when the blocking variant is entered.
 
-**Embedded facade test (`test/test_embedded/test_embedded.ino`).** New self-contained on-hardware test that covers the public surface that the host test suite cannot reach: real UART peripheral, FreeRTOS stream buffer, esp_timer, and the AutoLink wiring. Flash to a single board with GPIO17 (TX) jumpered to GPIO16 (RX) — external self-loopback, the board talks to itself — and watch the serial monitor. Eleven sub-tests cover construction, state API (`ready`, `getCurrentBaud`, `getErrCount`, `getLifetimeErrors`), the two- and three-arg `getStats`/`resetStats`/`resetErrors` forms, the Stream byte API (`available`/`peek`/`flush`/`write`), the message API (`sendMsg`/`recvMsg`), `isHealthy`, the async and blocking `blinkWait` paths, the `n<=0` ignored case, `dropLink()` safety before negotiation, and `err()`/`clearErr()`. The host test suite covers `ALink`, `UtilBlink`, `UtilCobs`, `UtilCrc`, `UtilFrameRx`, `UtilBaudSweep`, and the `AutoLink` facade stubs; this file is the missing end-to-end coverage path for the hardware layer.
+**Embedded facade test (`test/test_embedded/test_embedded.ino`).** New self-contained on-hardware test that covers the public surface the host test suite cannot reach: real UART peripheral, FreeRTOS stream buffer, esp_timer, and the AutoLink wiring. Flash to a single board with GPIO17 (TX) jumpered to GPIO16 (RX) — external self-loopback, the board talks to itself — and watch the serial monitor. Eleven sub-tests cover construction, state API (`ready`, `getCurrentBaud`, `getErrCount`, `getLifetimeErrors`), the two- and three-arg `getStats`/`resetStats`/`resetErrors` forms, the Stream byte API (`available`/`peek`/`flush`/`write`), the message API (`sendMsg`/`recvMsg`), `isHealthy`, the async and blocking `blinkWait` paths, the `n<=0` ignored case, `dropLink()` safety before negotiation, and `err()`/`clearErr()`. The host test suite covers `ALink`, `UtilBlink`, `UtilCobs`, `UtilCrc`, `UtilFrameRx`, `UtilBaudSweep`, and the `AutoLink` facade stubs; this file is the missing end-to-end coverage path for the hardware layer. The test is invoked from `loop()` (not `setup()`) via a `facCheckStarted`/`facCheckDone` state machine so the Arduino-ESP32 core's deferred "After Setup End" task fires its board-info dump before the suite starts; `[ALL_TESTS_DONE]` is printed on success.
 
-**`UtilBlink::flashBlocking()` race fix.** The blocking variant calls `cancel()` to stop any in-flight async pattern. If the esp_timer task is currently dispatching the previous pattern's callback (i.e. `cb()` is mid-execution on the timer task), `esp_timer_stop()` returns `ESP_ERR_INVALID_STATE` without waiting for the callback to finish, and the callback runs to completion on the timer task. In the embedded test this manifested as the second `blinkWait(2, 50, 50, 100)` apparently "hanging" at the very start — `[t8]a` printed but `[t8]b` never did, because the previous async `blinkWait(1, 60, 60, 0)`'s 60 ms one-shot fired during the next test's `Serial.printf` and the callback re-armed itself just as the blocking call entered its loop. Fixed by:
-+ Adding a `portYIELD()` immediately after `cancel()` in `flashBlocking()` so any in-flight `cb()` is guaranteed to complete (and not re-arm via `startOnce()`) before the blocking loop starts toggling the pin.
-+ Making `EspBlinkHal::startOnce()` skip the `esp_timer_stop()` call if the timer's pending expiry is at most one tick away (the callback is about to fire anyway, calling `esp_timer_stop` mid-dispatch wastes a queue slot and can briefly mask the next arm).
-+ Adding diagnostic prints inside `flashBlocking()` (`[t8]a1`..`[t8]a5`) so any future hang is immediately pinpointed to a specific phase: pre-cancel, post-cancel-yield, before-on, before-off, after-loop. Remove for production.
+**`UtilBlink::flashBlocking()` race fix.** The blocking variant calls `cancel()` to stop any in-flight async pattern. ESP-IDF's `esp_timer_stop()` is non-blocking: per the framework source, *"after esp_timer_stop() the timer is disarmed, but its callback may still be running."* If the esp_timer task is mid-dispatch on the previous pattern's callback (`cb()` → `tick()`) when `flashBlocking` enters, the callback can run concurrently with the blocking loop and re-arm the timer via `startOnce()`. Fixed by adding a new `IBlinkHal::yield()` (no-op default; `portYIELD()` in the ESP implementation) called once after `cancel()` and before the for-loop, so any in-flight callback runs to completion and observes the post-cancel state (`left=0`, `on=false`) before the loop starts toggling the pin. The cost is a single yield-from-task switch — a few microseconds. No-op on host; the existing `UtilBlinkTest` cases (`test_blocking_sequence`, `test_blocking_cancels_async`) still pass because the `MockBlinkHal` doesn't override `yield()` and gets the default no-op.
 
 **`docVersion.md` reorder.** The v3.2.6 / v3.2.7 / v3.2.9 entries were appended at the bottom of the file even though the header says "most recent first" — they now sit in the correct position immediately below v3.2.5, restoring the descending-order invariant.
 
@@ -221,14 +305,14 @@ v3.0.9 addressed #2 (pinning + priority). The FIFO desync (#1) is diagnosed here
 
 ## v3.0.7
 
-+ **NTP wall-clock timestamps in web log.** `AutoLinkWeb::begin()` now calls `configTime()` immediately after WiFi connects and waits up to 5 s for an SNTP response. On success, `logSinkCb` uses `getLocalTime()` so the web log shows real EST/EDT wall-clock times that match ArduinoDroid. The timezone is `EST5EDT,M3.2.0,M11.1.0` (Eastern, auto-DST). A successful sync logs: `NTP synced: YYYY-MM-DD HH:MM:SS EST/EDT`.
-+ **Uptime fallback with `*` marker.** If NTP doesn't respond within 5 s (no internet, isolated LAN, etc.) the web log falls back to `HH:MM:SS*` uptime timestamps. The `*` suffix makes it unambiguous that the time is uptime, not wall-clock. This is the same behaviour as before for no-WiFi builds, since `AutoLinkWeb` is only constructed when WiFi credentials are provided.
++ **NTP wall-clock timestamps in web log.** `AutoLinkWeb::begin()` now calls `configTime()` immediately after WiFi connects and waits up to 5 s for an SNTP response. On success, `logSinkCb` uses `getLocalTime()` so the web log shows real EST/EDT wall-clock times that match ArduinoDroid. The timezone is `EST5EDT,M3.2.0,M11.1.0` (Eastern, auto-DST). A successful sync logs: `NTP synced: YYYY-MM-DD HH:MM:SS EST/EDT`. *(Superseded by v3.2.11: timestamps now have millisecond resolution; the `getLocalTime()` call was replaced by `gettimeofday()` + `localtime_r()` so the seconds and millis come from one snapshot.)*
++ **Uptime fallback with `*` marker.** If NTP doesn't respond within 5 s (no internet, isolated LAN, etc.) the web log falls back to `HH:MM:SS*` uptime timestamps. The `*` suffix makes it unambiguous that the time is uptime, not wall-clock. This is the same behaviour as before for no-WiFi builds, since `AutoLinkWeb` is only constructed when WiFi credentials are provided. *(Superseded by v3.2.11: format is now `HH:MM:SS.mmm*`, e.g. `00:01:23.456*`.)*
 
 ---
 
 ## v3.0.6
 
-+ **Live log timestamps.** Each log entry is now stored as `HH:MM:SS I Tag message` (uptime-based, from `millis()`). Previously the format was `[I][Tag] message` with no time component.
++ **Live log timestamps.** Each log entry is now stored as `HH:MM:SS I Tag message` (uptime-based, from `millis()`). Previously the format was `[I][Tag] message` with no time component. *(Superseded by v3.2.11: timestamp now `HH:MM:SS.mmm` with millisecond resolution; NTP path uses wall-clock, no-NTP path stays uptime with `*` marker.)*
 + **Copy button fixed.** `navigator.clipboard.writeText` requires a secure context (HTTPS). Since the monitor serves plain HTTP, the Copy button was silently failing. It now falls back to `document.execCommand('copy')` via a temporary textarea, which works on HTTP.
 + **Log DOM capped at 100 entries.** Previously 200; trimmed to match the 48-entry server-side ring more sensibly.
 
