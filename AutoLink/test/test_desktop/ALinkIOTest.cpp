@@ -137,18 +137,18 @@ void test_stats() {
     uint8_t rx[128];
     assert(b.recvMsg(rx, sizeof(rx)) == 100);
 
-    uint64_t atx, arx, btx, brx, aerr, berr;
-    a.getStats(atx, arx, aerr);
-    b.getStats(btx, brx, berr);
-    assert(atx == 100 + MSG_HDR);
-    assert(brx == 100 + MSG_HDR);
-    assert(aerr == 0);
-    assert(berr == 0);
+    Stats as, bs;
+    a.getStats(as);
+    b.getStats(bs);
+    assert(as.tx == 100 + MSG_HDR);
+    assert(bs.rx == 100 + MSG_HDR);
+    assert(as.discCount == 0);
+    assert(bs.discCount == 0);
 
     a.resetStats();
-    a.getStats(atx, arx, aerr);
-    assert(atx == 0 && arx == 0);
-    assert(aerr == 0);
+    a.getStats(as);
+    assert(as.tx == 0 && as.rx == 0);
+    assert(as.discCount == 0);
     std::cout << "PASS" << std::endl;
 }
 
