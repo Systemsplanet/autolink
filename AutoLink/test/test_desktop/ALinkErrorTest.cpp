@@ -70,6 +70,7 @@ void test_error_counter() {
     {
         MockHal mHal, sHal;
         AutoLinkConfig cfg; cfg.reliableMode = true; cfg.streamBufferSize = 8192;
+        cfg.errThreshold = 2;   // 3 errs trips the threshold
         ALink a(mHal, true, cfg);
         ALink b(sHal, false, cfg);
         uint64_t btx, brx, berr;
@@ -121,6 +122,7 @@ void test_error_counter_during_swp() {
     std::cout << "\n=== Test: One Count Per Cable Bounce ===" << std::endl;
     MockHal mHal, sHal;
     AutoLinkConfig cfg; cfg.allowedBauds = {9600, 115200}; cfg.pingSamplesPerBaud = 1;
+    cfg.errThreshold = 2;   // 3 errs trips the threshold
     ALink ping(mHal, true, cfg);
     ALink pong(sHal, false, cfg);
     negotiate_to_ok(ping, pong, mHal, sHal);
@@ -208,6 +210,7 @@ void test_error_counter_link_failures() {
     {
         MockHal mHal, sHal;
         AutoLinkConfig cfg; cfg.allowedBauds = {9600, 115200}; cfg.pingSamplesPerBaud = 1;
+        cfg.errThreshold = 2;   // 3 errs trips the threshold
         ALink ping(mHal, true, cfg);
         ALink pong(sHal, false, cfg);
         negotiate_to_ok(ping, pong, mHal, sHal);
@@ -347,17 +350,18 @@ void test_parser_yields_after_drop() {
 
     // Two bad frames trip threshold 1 (errs > 1), then a valid PING follows.
     uint8_t bad[] = {0x00, 0x02, 0xFF, 0x00, 0x02, 0xFF, 0x00};
-    uint8_t ping[4] = {0xAA, 0x55, PING_CMD, 0};
-    // CRC8 of the first 3 bytes (poly 0x07).
+    // v4.0.0: control frame is {0xAA, 0x55, cobsSeq, payload, CRC8(first 4)}
+    uint8_t ping[5] = {0xAA, 0x55, /*cobsSeq=*/0, PING_CMD, 0};
+    // CRC8 of the first 4 bytes (poly 0x07).
     uint8_t crc = 0;
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
         crc ^= ping[i];
         for (int k = 0; k < 8; k++) crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0x07) : (uint8_t)(crc << 1);
     }
-    ping[3] = crc;
+    ping[4] = crc;
 
     std::vector<uint8_t> event(bad, bad + sizeof(bad));
-    event.insert(event.end(), ping, ping + 4);
+    event.insert(event.end(), ping, ping + 5);
     pong.onRx(event.data(), (int)event.size());
 
     assert(pong.getState() == State::SWP);
