@@ -4,6 +4,42 @@ All releases, most recent first.
 
 ---
 
+## v4.0.1
+
+**Decouples app-buffer-full from the wire error threshold, and enlarges the default app buffer to fit a full Ping pipeline.** Two related changes, both motivated by the v4.0.0 hardware log analysis.
+
+### Change 1: app-buffer-full is no longer a wire error
+
+v4.0.0 treated an app-side `pushAppBuf` shortfall as a wire error and counted it toward `errThreshold` (default 20). With v4.0.0's stable link, this surfaced as a new failure mode: a fast Ping node sending a burst of 8 frames in 200 ms would overflow the Pong's 2 KB app buffer, the per-frame shortfall logged as an error, 15-20 of those in a row tripped the threshold, the link dropped, re-sweep, repeat. The wire itself was fine — the gap was in the app layer, not the COBS layer.
+
+`ALink::onPayload` (v4.0.1). App-buffer-full no longer calls `err_unlocked()`. Instead:
++ The shortfall is logged at INFO level: `app buffer full: wanted N, accepted M  (app falling behind wire; frame dropped, link stays OK)`.
++ `cobsGaps_` is incremented so the gap is visible on the dashboard (a `cobsSeq` number went missing from the wire).
++ The frame is dropped; the next valid `cobsSeq` will be accepted normally.
++ The link stays in OK; no BREAK, no re-sweep.
+
+Wire errors (CRC-8 fail, COBS desync, oversize frame) still count toward `errThreshold` — those are real wire-layer problems and the existing behavior is correct.
+
+### Change 2: default app buffer auto-sized to (WINDOW + 2) * (maxMsg + MSG_HDR)
+
+`AutoLink` facade constructor (v4.0.1). The app buffer auto-size formula was:
++ **v4.0.0:** `2 * (maxMsg + MSG_HDR)` = 2 * 1030 = 2060 bytes for default `maxMsg=1024`. With Ping's 8-message pipeline (~8 KB) arriving in 200 ms, the buffer overflows after just 2 messages.
++ **v4.0.1:** `(WINDOW=8 + PONG_HEADROOM=2) * (maxMsg + MSG_HDR)` = 10 * 1030 = **10300 bytes** for default `maxMsg=1024`. An entire Ping pipeline fits in the app buffer, and the 2-message Pong headroom covers the round-trip echo. The buffer never overflows under normal Ping/Pong traffic.
+
+The user can still override `cfg.streamBufferSize` explicitly if they need more. The new `AutoLink::getStreamBufferSize()` getter returns the post-auto-size value for the dashboard to display.
+
+### Diagnostic in the v4.0.0 → v4.0.1 change
+
+The v4.0.0 hardware log (2-board Ping/Pong, ~30 seconds of steady state) showed exactly this pattern: link locks cleanly at 115200 baud, Ping's 8-frame pipeline drained into Pong in ~200 ms (`RX cobsSeq=0..12` arriving at ~15 ms intervals), Pong's 2 KB app buffer overflowed at `cobsSeq=13` (`wanted 250, accepted 42`), 15+ more `app buffer full` errors fired in a row, all of them counted toward `errThreshold=20`, the threshold tripped, `BREAK received -> re-sweep`, repeat. The cobsSeq layer itself was working correctly throughout — only 1 gap and 2 stale frames were observed in 50+ successful echoes, vs the v3.x behavior of perpetual desync storms every 3 seconds. The v4.0.1 fix separates the wire error counter from the app-side back-pressure indicator, and gives the app buffer enough room to absorb a full Ping pipeline without overflowing.
+
+### Backward compatibility
+
+v4.0.1 is wire-compatible with v4.0.0. No change to the protocol, wire format, or cobsSeq semantics. The only changes are:
++ Error accounting: app-buffer-full is no longer a wire error.
++ Auto-sized default: app buffer is now 5x larger by default (10300 vs 2060 for maxMsg=1024).
+
+---
+
 ## v4.0.0
 
 **MAJOR WIRE-FORMAT CHANGE. v4.0.0 nodes are NOT interop-compatible with v3.x nodes.** Both ends of every AutoLink link must be on v4.0.0 (or later, v4-compatible) firmware.
