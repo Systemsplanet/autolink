@@ -44,24 +44,26 @@ void test_facade_construction() {
 }
 
 void test_facade_state_api() {
-    Serial.printf("[t2] state=%s  baud=%lu  errCount=%d  lifetimeErrs=%llu\n",
+    Stats s; alink.getStats(s);
+    Serial.printf("[t2] state=%s  baud=%lu  errCount=%d  frameErrs=%llu\n",
         alink.ready() ? "OK" : "negotiating",
         (unsigned long)alink.getCurrentBaud(),
         alink.getErrCount(),
-        (unsigned long long)alink.getLifetimeErrors());
+        (unsigned long long)s.frameErrs);
 }
 
 void test_facade_stats_api() {
-    uint64_t tx = 0, rx = 0, errs = 0;
-    alink.getStats(tx, rx);
-    alink.getStats(tx, rx, errs);
-    Serial.printf("[t3] stats tx=%llu  rx=%llu  errs=%llu\n",
-        (unsigned long long)tx, (unsigned long long)rx, (unsigned long long)errs);
+    Stats s;
+    alink.getStats(s);
+    Serial.printf("[t3] stats tx=%llu  rx=%llu  disc=%llu  frameErrs=%llu\n",
+        (unsigned long long)s.tx, (unsigned long long)s.rx,
+        (unsigned long long)s.discCount, (unsigned long long)s.frameErrs);
     alink.resetStats();
     alink.resetErrors();
-    alink.getStats(tx, rx, errs);
-    Serial.printf("[t3] after reset: tx=%llu  rx=%llu  errs=%llu\n",
-        (unsigned long long)tx, (unsigned long long)rx, (unsigned long long)errs);
+    alink.getStats(s);
+    Serial.printf("[t3] after reset: tx=%llu  rx=%llu  disc=%llu  frameErrs=%llu\n",
+        (unsigned long long)s.tx, (unsigned long long)s.rx,
+        (unsigned long long)s.discCount, (unsigned long long)s.frameErrs);
 }
 
 void test_facade_stream_api() {
@@ -161,17 +163,18 @@ void loop() {
     if (!facCheckDone) return;
     static uint32_t t = 0;
     if (millis() - t > 2000) {
+        Diag d; alink.getDiag(d);
         Serial.printf("[test_embedded] state=%s baud=%lu heap=%lu uptime=%lus"
                       "  cobsSeq(TX)=%u lastRX=%s%u gap=%llu stale=%llu\n",
             alink.ready() ? "OK" : "negotiating",
             (unsigned long)alink.getCurrentBaud(),
             (unsigned long)ESP.getFreeHeap(),
             (unsigned long)((millis() - tBoot) / 1000),
-            (unsigned)alink.getCobsSeq(),
-            alink.getLastRxCobsSeqSet() ? "" : "(unset)",
-            alink.getLastRxCobsSeqSet() ? (unsigned)alink.getLastRxCobsSeq() : 0,
-            (unsigned long long)alink.getCobsGaps(),
-            (unsigned long long)alink.getCobsStale());
+            (unsigned)d.txSeq,
+            d.rxSeqSet ? "" : "(unset)",
+            d.rxSeqSet ? (unsigned)d.rxSeq : 0,
+            (unsigned long long)d.gaps,
+            (unsigned long long)d.stale);
         t = millis();
     }
 }
