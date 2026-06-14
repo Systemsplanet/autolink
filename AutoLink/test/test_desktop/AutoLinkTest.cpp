@@ -91,6 +91,31 @@ void test_custom_config_construction() {
     std::cout << "PASS" << std::endl;
 }
 
+// v4.0.1: the AutoLink facade auto-sizes cfg.streamBufferSize to fit a full
+// UtilPing WINDOW of messages plus Pong's MAX_TX_PER_LOOP echo headroom.
+// Before this change, the default was 2 * (maxMsg + MSG_HDR) which was too
+// small for the Ping/Pong example: Ping's 8-message pipeline (~8 KB) would
+// overflow Pong's 2 KB app buffer at link-up, which the old code treated
+// as a wire error and dropped the link. Verify the new auto-size.
+void test_app_buffer_auto_sized_for_pingpong() {
+    std::cout << "\n=== Test: App Buffer Auto-Sized for Ping/Pong (v4.0.1) ===" << std::endl;
+    // v4.0.1: the AutoLink facade auto-sizes the app buffer to fit one
+    // full UtilPing WINDOW (8) plus Pong's MAX_TX_PER_LOOP echo headroom
+    // (2). With default maxMsg=1024 and MSG_HDR=6, the minimum size is
+    // 10 * 1030 = 10300 bytes. This eliminates the link-up overflow
+    // cascade observed in the v4.0.0 hardware log.
+    AutoLinkConfig cfg;
+    cfg.maxMsg = 1024;          // default for UtilPing/UtilPong
+    AutoLink link(0, 16, 17, /*isMaster=*/false, cfg);
+    const size_t WINDOW = 8;
+    const size_t PONG_HEADROOM = 2;
+    const size_t MSG_HDR = 6;
+    const size_t expected_min = (WINDOW + PONG_HEADROOM) * (cfg.maxMsg + MSG_HDR);
+    assert(expected_min == 10300);
+    assert(link.getStreamBufferSize() >= expected_min);
+    std::cout << "PASS  (streamBufferSize=" << link.getStreamBufferSize() << "  min=" << expected_min << ")" << std::endl;
+}
+
 void test_state_api() {
     std::cout << "\n=== Test: State API ===" << std::endl;
     AutoLink link(0, 16, 17, true);
@@ -198,6 +223,7 @@ int main() {
     std::cout << "=== Running AutoLink Facade Tests ===" << std::endl;
     test_default_construction();
     test_custom_config_construction();
+    test_app_buffer_auto_sized_for_pingpong();
     test_state_api();
     test_stats_api();
     test_stream_api();
