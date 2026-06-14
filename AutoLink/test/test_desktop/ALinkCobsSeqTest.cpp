@@ -22,11 +22,11 @@
 
 using namespace autolink;
 
-// Build a 4-byte reliable-mode wire frame for the cobsSeq tests. The
-// payload is a 6-byte message header (len=0, crc=0) so the COBS-encoded
-// length is small and predictable. Uses the same wire format as
-// UtilFrameRxTest's wireFrame helper, minus the trailing message body.
-static std::vector<uint8_t> cobsFrame(uint8_t cobsSeq, int payloadLen = 0) {
+// Build a reliable-mode wire frame for the cobsSeq tests. Each frame
+// has `cobsSeq` as the first decoded byte and `payloadLen` payload bytes
+// (default 16 to exercise non-trivial app-buffer pressure). Uses the same
+// wire format as UtilFrameRxTest's wireFrame helper.
+static std::vector<uint8_t> cobsFrame(uint8_t cobsSeq, int payloadLen = 16) {
     // Build the unencoded form: cobsSeq | payload | CRC8(cobsSeq | payload)
     std::vector<uint8_t> raw;
     raw.push_back(cobsSeq);
@@ -297,6 +297,47 @@ void test_gap_stale_counters_accessible() {
     std::cout << "PASS" << std::endl;
 }
 
+// v4.0.1: app-buffer-full is an app-layer back-pressure condition, not a
+// wire error. It must NOT count toward errThreshold (which would drop the
+// link even though the wire is fine). This test pins the contract: feed
+// the receiver more bytes than the app buffer can hold, verify the link
+// stays in OK and no errs are counted.
+void test_app_buffer_full_does_not_drop_link() {
+    std::cout << "\n=== Test: App Buffer Full Doesn't Trip errThreshold (v4.0.1) ===" << std::endl;
+    MockHal mHal, sHal;
+    AutoLinkConfig cfg; cfg.reliableMode = true;
+    cfg.streamBufferSize = 256;  // modest app buffer
+    cfg.errThreshold = 5;       // low threshold so a wire error would drop quickly
+    ALink a(mHal, true, cfg);
+    ALink b(sHal, false, cfg);
+    // Force the mock's app buffer to be smaller than the cfg so the
+    // overflow path is exercised even with cobsFrame's modest payloads.
+    sHal.appBufCap = 16;        // 1 frame fits, the rest overflow
+
+    // Negotiate to OK so we're exercising the OK-mode RX path (which has
+    // the app-buffer-full code path).
+    negotiate_to_ok(a, b, mHal, sHal);
+    assert(b.getState() == State::OK);
+
+    int errsBefore = b.getErrCount();
+    uint64_t gapsBefore = b.getCobsGaps();
+
+    // Feed many reliable-mode frames. Once the app buffer (cap=16) fills,
+    // subsequent frames overflow. The link must NOT drop.
+    for (int seq = 0; seq < 30; seq++) {
+        b.onRx(cobsFrame(seq).data(), (int)cobsFrame(seq).size());
+    }
+
+    // Link is still in OK (no BREAK, no re-sweep).
+    assert(b.getState() == State::OK);
+    // errCount is unchanged: app-buffer-full is NOT a wire error.
+    assert(b.getErrCount() == errsBefore);
+    // At least some gaps were counted (the dropped frames show up as
+    // missing cobsSeq numbers in the wire stream).
+    assert(b.getCobsGaps() > gapsBefore);
+    std::cout << "PASS" << std::endl;
+}
+
 int main() {
     std::cout << "=== Running ALinkCobsSeq Tests (v4.0.0) ===" << std::endl;
     test_first_frame_accepted();
@@ -310,6 +351,7 @@ int main() {
     test_drop_resets_cobsSeq();
     test_wire_byte_shift_caught_at_cobsSeq();
     test_gap_stale_counters_accessible();
+    test_app_buffer_full_does_not_drop_link();
     std::cout << "\n=== ALinkCobsSeq Tests Completed Successfully ===" << std::endl;
     return 0;
 }
