@@ -93,9 +93,11 @@ void test_loopback_noise_triggers_baud_fallback() {
         int wallMs = (int)std::chrono::duration_cast<std::chrono::milliseconds>(now - t0).count();
         if (wallMs >= RUN_MS) break;
 
-        // Drive both sides, then send a payload from ping if both OK.
-        ping.onTimer();
-        pong.onTimer();
+        // v5.1.40: pumpClock drives both sides from the link's
+        // scheduled deadline. We still iterate in wall-clock
+        // chunks (RUN_MS total) so the test stays real-time.
+        mHal.pumpClock(20);
+        sHal.pumpClock(20);
         pipe_data(mHal, sHal);
         pipe_data(sHal, mHal);
 
