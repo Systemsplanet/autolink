@@ -17,7 +17,7 @@ The two sketches live in `examples/PingPong/` as `Ping.ino` (ping) and `Pong.ino
 ### Ping
 
 ```cpp
-#include <pingpong/PingPong.h>
+#include "PingPong.h"
 using namespace autolink;
 
 PingPong upp(
