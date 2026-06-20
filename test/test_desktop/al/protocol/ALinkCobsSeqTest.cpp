@@ -224,6 +224,20 @@ void test_wraparound_continuity() {
 }
 
 // After wraparound, seq=1 is the expected next. seq=2 is a gap.
+//
+// v5.1.45: seeded with seq=254 (last valid data seq) instead of
+// seq=255. 0xFF is the reserved ACK discriminator — a data
+// frame stamped 255 would be silently discarded as an ACK by
+// UtilFrameRx::feed, leaving the receiver in "no-rx-yet"
+// state (rxSeqSet=false). The math would still happen to land
+// right (the next data frame would set rxSeqSet, the one after
+// would be a gap), but the test would be pinning "rxSeqSet
+// transitions false→0→gap" rather than "wraparound→gap" — a
+// weaker invariant than the comment claims. With seq=254 as
+// the seed, the receiver sees a valid data frame at its
+// last-good seq, the next frame at seq=0 is the wraparound
+// forward, and seq=2 is the post-wrap gap the test intends to
+// pin.
 void test_wraparound_then_gap() {
  std::cout << "\n=== Test: Post-Wraparound Gap Forward-Resyncs ===" << std::endl;
  MockHal mHal, sHal;
@@ -231,9 +245,13 @@ void test_wraparound_then_gap() {
  ALink a(mHal, true, cfg);
  ALink b(sHal, false, cfg);
 
- b.onRx(cobsFrame(255).data(), (int)cobsFrame(255).size());
+ // Seed: a valid data frame at seq=254 (the wraparound boundary).
+ // v5.1.45: this is the last valid data seq (COBS_SEQ_MAX=0xFE).
+ b.onRx(cobsFrame(254).data(), (int)cobsFrame(254).size());
+ // seq=0 is the wraparound forward (254 → 0). Expected after 254.
  b.onRx(cobsFrame(0).data(), (int)cobsFrame(0).size());
- b.onRx(cobsFrame(2).data(), (int)cobsFrame(2).size()); // gap (1 missing)
+ // seq=1 is the next-expected. seq=2 is a gap (1 missing).
+ b.onRx(cobsFrame(2).data(), (int)cobsFrame(2).size());
  Diag d;
  b.getDiag(d);
  assert(d.gaps == 1);
