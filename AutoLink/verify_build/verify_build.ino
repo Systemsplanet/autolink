@@ -8,8 +8,8 @@
 // Core:  esp32:esp32@3.3.5 (the user's exact version).
 
 #include "AutoLink.h"
-#include "AutoLinkWeb.h"
-#include "Log.h"
+#include "al/web/AutoLinkWeb.h"
+#include "al/util/Log.h"
 #include <Arduino.h>
 
 using namespace autolink;
@@ -69,8 +69,8 @@ void setup() {
     // Touch AutoLinkWeb public API.
     g_web->isUp();
 
-    Log::getLog().setLevel(Log::DEBUG);
-    Log::getLog().info("verify", "compile-check OK, AUTOLINK_VERSION=%s", AUTOLINK_VERSION);
+    Log::log().setLevel(Log::DEBUG);
+    Log::log().info("verify", "compile-check OK, AUTOLINK_VERSION=%s", AUTOLINK_VERSION);
 }
 
 void loop() {
