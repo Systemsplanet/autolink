@@ -33,20 +33,22 @@ void test_negotiation_state_machine() {
  assert(ping.getCurrentSpdIndex() == 0);
  assert(pong.getCurrentSpdIndex() == 0);
 
+ // v5.1.40: pumpClock advances time AND fires the SWP timer
+ // deterministically. No manual onTimer needed (pumpClock does it).
  // Tick 1: ping sends PING@9600, pong scores index 0.
- ping.onTimer();
+ mHal.pumpClock(50);  // drive SWP tick #1
  pipe_data(mHal, sHal);
  assert(ping.getCurrentSpdIndex() == 1);
  assert(pong.getCurrentSpdIndex() == 1);
 
  // Tick 2: ping sends PING@115200, pong scores index 1, ping -> LCK.
- ping.onTimer();
+ mHal.pumpClock(50);  // drive SWP tick #2
  pipe_data(mHal, sHal);
- assert(ping.getCurrentSpdIndex() == 0); // reset to 0 on LCK entry
+ assert(ping.getCurrentSpdIndex() == 0);
  assert(ping.getState() == State::LCK);
 
  // Tick 3: ping sends REQ_CMD; pong -> OK, replies best index.
- ping.onTimer();
+ mHal.pumpClock(50);  // drive LCK tick #1
  pipe_data(mHal, sHal);
  assert(pong.getState() == State::OK);
 
@@ -121,6 +123,7 @@ void test_top_down_fast_ack_locks_top() {
  ping.begin(); pong.begin();
 
  for (int s = 0; s < 4; s++) {
+ mHal.pumpClock(50);  // v5.1.40: drive SWP/LCK tick
  ping.onTimer();
  pipe_data(mHal, sHal);
  }
