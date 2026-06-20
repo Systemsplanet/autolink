@@ -75,7 +75,7 @@ async function setup() {
     // Load the dashboard HTML from the .h file. We extract the
     // DASHBOARD_HTML constant value.
     const htmlSrc = fs.readFileSync(
-        path.join(__dirname, '../../src/AutoLinkWebHtml.h'),
+        path.join(__dirname, '../../src/al/web/AutoLinkWebHtml.h'),
         'utf8'
     );
     const m = htmlSrc.match(/DASHBOARD_HTML\[\] = R"HTML\(([\s\S]*?)\)HTML";/);
