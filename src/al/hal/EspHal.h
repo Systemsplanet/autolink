@@ -127,20 +127,25 @@ class EspHal : public ILink {
 public:
     EspHal(uart_port_t u_num, int rx_pin, int tx_pin, const AutoLinkConfig& config)
         : uart_num(u_num), rx_pin(rx_pin), tx_pin(tx_pin), cfg(config) {
-        mutex = xSemaphoreCreateMutex();
-        task_exit_sem = xSemaphoreCreateBinary();
-        // xStreamBufferCreate returns NULL on heap fragmentation. The
-        // symptom is "app buffer full" on the first data frame after
-        // link-up — because pushAppBuf returns 0 when stream_buf is
-        // NULL — which blames the wire instead of the real cause.
-        stream_buf = xStreamBufferCreate(cfg.streamBufferSize, 1);
-        if (!stream_buf) {
-            Log::log().error(HAL_TAG,
-                "xStreamBufferCreate failed: requested %u bytes, app buffer disabled. "
-                "Increase configSUPPORT_DYNAMIC_ALLOCATION or reduce streamBufferSize.",
-                (unsigned)cfg.streamBufferSize);
-        }
-        
+        // v5.1.45 (post-audit fix): RTOS primitives (mutex, binary
+        // semaphore, stream buffer) used to be allocated here. That
+        // was safe IF EspHal was constructed lazily inside begin().
+        // But user sketches put `PingPong upp(...)` at namespace
+        // scope — which Arduino's startup hoists into .init_array,
+        // running BEFORE the FreeRTOS scheduler is up. The ctor
+        // then called xSemaphoreCreateMutex() / xStreamBufferCreate()
+        // on a kernel that wasn't initialized, and the very first
+        // timer interrupt fired into vApplicationGetTimerTaskMemory
+        // with pxTCBBufferTemp == NULL — abort loop.
+        //
+        // Lesson (v5.1.17): the v5.1.17 Log& bug had the same shape
+        // (namespace-scope reference bound to a singleton whose
+        // ctor touched the heap before RTOS was up). The fix there
+        // was a Meyers singleton — defer ctor to first call. Same
+        // shape here, same fix shape: store config + zero-fill the
+        // config struct in the ctor (cheap, no RTOS), and let
+        // begin() do the RTOS allocations after setup() runs.
+        //
         // Zero first so fields added/removed across ESP-IDF versions start known.
         memset(&uart_config, 0, sizeof(uart_config_t));
 
@@ -155,7 +160,29 @@ public:
     void begin() override {
         if (running) return;
         running = true;
-        
+
+        // v5.1.45 (post-audit fix): RTOS primitives used to be
+        // allocated in the ctor (see ctor comment for the boot-loop
+        // post-mortem). Moved here so they fire AFTER setup() —
+        // i.e. after FreeRTOS is fully up and the scheduler is
+        // running. Idempotent: begin() is guarded by `running`.
+        if (!mutex) mutex = xSemaphoreCreateMutex();
+        if (!task_exit_sem) task_exit_sem = xSemaphoreCreateBinary();
+        // xStreamBufferCreate returns NULL on heap fragmentation.
+        // The symptom is "app buffer full" on the first data frame
+        // after link-up — because pushAppBuf returns 0 when
+        // stream_buf is NULL — which blames the wire instead of the
+        // real cause.
+        if (!stream_buf) {
+            stream_buf = xStreamBufferCreate(cfg.streamBufferSize, 1);
+            if (!stream_buf) {
+                Log::log().error(HAL_TAG,
+                    "xStreamBufferCreate failed: requested %u bytes, app buffer disabled. "
+                    "Increase configSUPPORT_DYNAMIC_ALLOCATION or reduce streamBufferSize.",
+                    (unsigned)cfg.streamBufferSize);
+            }
+        }
+
         auto cleanup_resources = [&]() {
             running = false;
             if(mutex) { vSemaphoreDelete(mutex); mutex = nullptr; }
