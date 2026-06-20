@@ -82,7 +82,7 @@ public:
 namespace autolink {
 
 // Keep in sync with library.properties.
-#define AUTOLINK_VERSION "5.1.30"
+#define AUTOLINK_VERSION "5.1.31"
 
 class AutoLink : public Stream {
 private:
@@ -240,6 +240,13 @@ public:
     bool ready() const { return link->getState() == State::OK; }
     void dropLink() { link->dropLink(); }
     void flushRx()  { link->flushRx(); }
+
+    // v5.1.31: forward facade-driven link pause to the protocol
+    // layer. While paused, the protocol suppresses idle-watchdog
+    // drops and keepalive emissions. Used by UtilPing's Pause/Start
+    // button so the link stays up while the operator inspects the
+    // dashboard before clicking Start. Default false (sends normally).
+    void setLinkPaused(bool p) { link->setLinkPaused(p); }
 
     void getStats(Stats& s) const { link->getStats(s); }
     void resetStats()  { link->resetStats(); }
