@@ -37,7 +37,8 @@ TEST_BINS = run_test_crc run_test_cobs run_test_blink run_test_framerx \
             run_test_baudsweep run_test_log run_test_mockhal run_test_autolink \
             run_test_alink_io run_test_alink_message run_test_alink_negotiation \
             run_test_alink_error run_test_alink_watchdog run_test_alink_cobsseq \
-            run_test_alink_arq run_test_alink_web run_loopback_noise
+            run_test_alink_arq run_test_alink_web run_loopback_noise \
+            run_test_alink_facade
 
 LOOPBACK_BIN = run_loopback
 
@@ -102,8 +103,8 @@ test_alink_cobsseq: run_test_alink_cobsseq
 run_test_alink_cobsseq: $(LINK_SRC) $(TPROTO)/ALinkCobsSeqTest.cpp
 	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/ALinkCobsSeqTest.cpp -o $@
 
-run_test_alink_arq: $(LINK_SRC) $(TPROTO)/ALinkArqTest.cpp
-	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/ALinkArqTest.cpp -o $@
+run_test_alink_arq: $(AUTOLINK_SRC) $(TPROTO)/ALinkArqTest.cpp
+	$(CXX) $(CXXFLAGS) $(AUTOLINK_SRC) $(TPROTO)/ALinkArqTest.cpp -o $@
 
 run_test_alink_web: $(LINK_SRC) $(WEB)/AutoLinkWebCore.cpp $(TWEB)/AutoLinkWebTest.cpp
 	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(WEB)/AutoLinkWebCore.cpp $(TWEB)/AutoLinkWebTest.cpp -o $@
@@ -131,6 +132,9 @@ run_test_mockhal: $(LINK_SRC) MockHalTest.cpp
 
 run_test_autolink: $(AUTOLINK_SRC) AutoLinkTest.cpp
 	$(CXX) $(CXXFLAGS) $(AUTOLINK_SRC) AutoLinkTest.cpp -o $@
+
+run_test_alink_facade: $(AUTOLINK_SRC) AutoLinkFacadeTest.cpp
+	$(CXX) $(CXXFLAGS) $(AUTOLINK_SRC) AutoLinkFacadeTest.cpp -o $@
 
 run_test_alink_io: $(LINK_SRC) $(TPROTO)/ALinkIOTest.cpp
 	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/ALinkIOTest.cpp -o $@
