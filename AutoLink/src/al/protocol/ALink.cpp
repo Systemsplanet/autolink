@@ -491,6 +491,91 @@ bool ALink::sendMsg(const uint8_t* b, int len) {
     return ok;
 }
 
+// v5.1.37: variant of sendMsg that reports the base cobsSeq it
+// stamped on the wire header. The facade uses this to key its
+// payload cache under the same seq the protocol layer will use to
+// ACK. Returning the seq from inside the lock (instead of the
+// caller calling the lock-free peekTxSeq() before sendMsg) closes
+// the race window where a keepalive or onRx-driven frame could
+// advance txSeq between the peek and the actual send. The old
+// pattern would cache a payload under seq=N while the wire carried
+// seq=N+1; the cache entry never got ACKed, chunks_left never
+// reached 0, the slot leaked. With this variant the seq and the
+// send are one atomic step.
+bool ALink::sendMsgEx(const uint8_t* b, int len, uint8_t* outBaseSeq) {
+    if (len == 0) {
+        // 0-byte sendMsg is a no-op (returns true). The keepalive
+        // path handles cobsSeq-only frames separately. No seq
+        // consumed, so *outBaseSeq is undefined.
+        if (outBaseSeq) *outBaseSeq = 0;
+        return true;
+    }
+    if (len < 0) {
+        Log::log().error(ALINK_TAG,
+            "sendMsgEx rejected: len=%d (negative).", len);
+        if (outBaseSeq) *outBaseSeq = 0;
+        return false;
+    }
+    if ((size_t)len > cfg.maxMsg) {
+        Log::log().error(ALINK_TAG,
+            "sendMsgEx rejected: len=%d exceeds cfg.maxMsg=%u.", len, (unsigned)cfg.maxMsg);
+        if (outBaseSeq) *outBaseSeq = 0;
+        return false;
+    }
+
+    uint16_t c = UtilCrc::crc16(b, len);
+    uint8_t hdr[MSG_HDR] = {
+        (uint8_t)(len), (uint8_t)(len >> 8), (uint8_t)(len >> 16), (uint8_t)(len >> 24),
+        (uint8_t)(c), (uint8_t)(c >> 8)
+    };
+
+    hw.lock();
+    if (state != State::OK) {
+        State s = state;
+        hw.unlock();
+        Log::log().warning(ALINK_TAG,
+            "sendMsgEx rejected: link not in OK (state=%s), %d bytes dropped.",
+            StateToStr(s), len);
+        if (outBaseSeq) *outBaseSeq = 0;
+        return false;
+    }
+
+    bool ok = true;
+    uint8_t baseSeq = 0;
+    if (cfg.reliableMode) {
+        // Stamp the base seq ONCE under the lock and return it to
+        // the caller. All subsequent chunks inherit the same base.
+        // This is the same sendCobsFrameAcked_unlocked that sendMsg
+        // uses internally, just exposed via the return value.
+        baseSeq = sendCobsFrameAcked_unlocked(hdr, MSG_HDR, NO_BASE);
+        int offset = 0;
+        while (offset < len) {
+            if (state != State::OK) { ok = false; break; }
+            int chunk = std::min(len - offset, MAX_CHUNK);
+            sendCobsFrameAcked_unlocked(b + offset, chunk, baseSeq);
+            txBytes += chunk;
+            lastTxMs = hw.nowMs();
+            offset += chunk;
+        }
+    } else {
+        int sent = hw.tx(b, len);
+        if (sent != len) {
+            Log::log().error(ALINK_TAG,
+                "TX truncated (raw): wanted %d, UART accepted %d", len, sent);
+            err_unlocked();
+            ok = false;
+        } else {
+            txBytes += len; lastTxMs = hw.nowMs();
+        }
+    }
+    hw.unlock();
+    if (outBaseSeq) *outBaseSeq = baseSeq;
+#ifdef ARDUINO
+    portYIELD();
+#endif
+    return ok;
+}
+
 // Scan the app buffer forward from a corrupt header looking for the
 // next plausibly-valid MSG_HDR boundary (L in [1, cfg.maxMsg]). The
 // CRC is over the payload, not the header, so we can't fully validate
@@ -839,6 +924,16 @@ void ALink::reset_unlocked(bool count) {
     hw.setSpd(cfg.allowedBauds[spdI]);
     if (isMaster) hw.startTimer(cfg.delayMs);
     else          hw.startTimer(cfg.pingSamplesPerBaud * cfg.delayMs);
+    // v5.1.37: notify the facade (if any) that the link has been
+    // reset. The protocol ARQ maps are now empty and cobsSeq has
+    // been reset to 0. Any facade state keyed on the previous
+    // session's cobsSeqs is now stale and must be cleared, or the
+    // facade's view of "what's in flight" will diverge from the
+    // protocol's. The callback fires under the link lock — keep it
+    // short and lock-free on any shared state. AutoLink's hook
+    // (arqCacheClearAll) only touches the facade's own arrays,
+    // which have no lock of their own today.
+    if (linkResetCallback_) linkResetCallback_(arqCtx_);
 }
 
 // UtilFrameRx::Listener callback for validated reliable-mode frames.
@@ -927,12 +1022,31 @@ bool ALink::onPayload(uint8_t cobsSeq, const uint8_t* b, int n) {
         // Hold the ACK: the sender's retransmit will retry, and
         // when the app catches up the next attempt will deliver
         // fully and we ACK then.
+        //
+        // v5.1.37: do NOT bump `gaps` on this branch. `gaps` is a
+        // wire-quality signal (something is wrong with the bytes
+        // on the wire). An app-buffer-full hold is a flow-control
+        // signal (the receiver can't keep up, but the wire is
+        // fine). Counting one as the other caused the receiver's
+        // errThreshold to trip on a perfectly good wire, which
+        // dropped the link right when the receiver needed to slow
+        // down. The opening-burst scenario (Ping's first WINDOW
+        // messages all arriving before Pong can drain its app
+        // buffer) was the most common trigger: every held frame
+        // pushed errs one closer to errThreshold, the threshold
+        // tripped, reset_unlocked(true) fired, the facade cache
+        // was orphaned (v5.1.36 gate latched), and the link was
+        // dead. We log at INFO so the operator can still see the
+        // event, but the wire-quality counters stay untouched.
+        // `lostMsgs` and the gap-detection path earlier in this
+        // function (the `diff` check above) are the right place
+        // for actual wire losses.
         Log::log().info(ALINK_TAG,
             "RX cobsSeq=%u app buffer full: wanted %d accepted %d (frame NOT acked, sender will retransmit). "
+            "This is flow control, not a wire error — gaps/errs not bumped. "
             "If this fires on the FIRST frame, check the EspHal boot log for "
             "xStreamBufferCreate failure (heap too small or streamBufferSize too large).",
             (unsigned)cobsSeq, n, acc);
-        gaps++;
         return true;
     }
     // ACK the frame so the sender frees its retransmit slot.
