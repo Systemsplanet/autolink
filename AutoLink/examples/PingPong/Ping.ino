@@ -7,7 +7,7 @@
 // PingPong::PONG and re-flash. The two .ino files are otherwise
 // identical.
 
-#include <pingpong/PingPong.h>
+#include "PingPong.h"
 using namespace autolink;
 
 PingPong upp(
