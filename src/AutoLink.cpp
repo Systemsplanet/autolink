@@ -132,29 +132,38 @@ void AutoLink::arqCache_freeBySeq(uint8_t seq) {
 bool AutoLink::arqCache_retx(uint8_t seq) {
     int8_t idx = arqCache_findBySeq(seq);
     if (idx < 0) {
-        // v5.1.39 (one-owner design): cache miss after a previous
-        // retx already took the slot. The protocol still has
-        // ackedPending_[s]=true for the original chunks. Clear
-        // them via onAck so the timer stops firing for them. We
-        // can't know chunks_total from the cleared slot, but
-        // onAck is idempotent for non-pending seqs — it just
-        // returns false. So calling onAck on seq..seq+7 (max
-        // chunk count for cfg.maxMsg=1024) is safe: only the
-        // actually-pending chunks clear; the rest are no-ops.
+        // v5.1.47 (cache-miss cascade fix): the v5.1.39 width-8
+        // sweep `for i<8 onAck(seq+i)` corrupted neighbour
+        // messages. seq is the BASE of THIS message, but most
+        // messages have far fewer than 8 chunks. A 2-chunk
+        // message at base=8 (chunks 8, 9) would call onAck(10..15)
+        // — seqs belonging to later, still-in-flight messages
+        // (e.g. base=10, base=13). Each of those onAcks fired the
+        // facade's arqAckCallback_ for the neighbour's base,
+        // prematurely decrementing or freeing the neighbour's
+        // cache slot. The next chunk of those neighbour messages
+        // then missed its cache on retx → another width-8 sweep →
+        // cascade. This is what produced the runaway "RX ACK …
+        // DROPPED (not in pending map)" bursts and the
+        // multi-second ACK ages, wedging the pipeline.
+        //
+        // Correct behavior: do NOT clear neighbour state. The
+        // single chunk we knew about (this base seq) is already
+        // not in our cache — the previous successful retx took
+        // it. The protocol's ackedPending_[seq]=true entry for
+        // that one chunk will simply persist; the retransmit
+        // timer will eventually time it out again and we'll see
+        // another miss, which is the right thing — the message
+        // was successfully delivered, no further action needed.
+        // Returning false tells the protocol NOT to drop the
+        // link. (Dropping the link on every miss was the original
+        // v5.1.38 bug; the cascade fix in v5.1.39 was the
+        // for-loop; the v5.1.47 fix is to drop the for-loop too.)
         Log::log().warning("AutoLink",
-            "ARQ retransmit cache miss at cobsSeq=%u; clearing "
-            "protocol state to break v5.1.38 cache-miss loop",
+            "ARQ retransmit cache miss at cobsSeq=%u; not clearing "
+            "neighbour state to avoid v5.1.45 cascade",
             (unsigned)seq);
-        if (link) {
-            ALink* lk = linkForTest();
-            if (lk) {
-                for (int i = 0; i < 8; i++) {
-                    uint8_t chunkSeq = (uint8_t)(seq + i);
-                    lk->onAck(chunkSeq);
-                }
-            }
-        }
-        return false;  // do not drop
+        return false;  // do not drop, do not touch neighbours
     }
     // v5.1.39: use chunks_total (set at insert time, before any
     // ACKs decremented chunks_left). The cleanup needs to clear
