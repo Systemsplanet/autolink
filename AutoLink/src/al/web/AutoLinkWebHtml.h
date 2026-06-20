@@ -348,14 +348,42 @@ function togglePause(){
   ['pbtn','pbtn2'].forEach(function(id){var b=document.getElementById(id);if(b)b.textContent=lbl;});
   console.log('[autolink] button: log scroll '+(logPaused?'paused':'resumed'));
 }
-function toggleMsgPause(){
+// v5.1.29: toggleMsgPause now hits the device (POST /pausemsg) AND
+// updates the local JS state. Previously the button only flipped a
+// JS variable that affected log polling; Ping kept blasting bytes
+// regardless. Now the operator's button click is honored by the
+// firmware: Ping starts paused at boot and waits for /pausemsg?p=0
+// before sending its first byte. The button label also reconciles
+// with /stats.msgPaused on every poll so the UI reflects the device's
+// actual state (handles refresh mid-session, race on boot, etc.).
+async function toggleMsgPause(){
+  // Optimistic UI flip — the device round-trip is async.
   msgPaused=!msgPaused;
+  applyMsgPauseLabel();
+  console.log('[autolink] button: message pause -> '+msgPaused+' (sending /pausemsg)');
+  try{
+    var r=await tfetch('/pausemsg?p='+(msgPaused?'1':'0'),{method:'POST'},5000);
+    if(!r.ok){
+      // 404 = Pong side (no hook). Revert local state so the UI
+      // doesn't lie about a state the device doesn't support.
+      if(r.status===404){
+        msgPaused=!msgPaused;
+        applyMsgPauseLabel();
+        console.log('[autolink] /pausemsg 404 — this device does not support device-side pause (Pong?)');
+      } else {
+        console.warn('[autolink] /pausemsg returned '+r.status+' — local UI shows optimistic state');
+      }
+    }
+  } catch(e){
+    console.warn('[autolink] /pausemsg fetch failed: '+(e&&e.message?e.message:e)+' — local UI shows optimistic state');
+  }
+}
+function applyMsgPauseLabel(){
   var b=document.getElementById('topPbtn');
   if(b){
     if(msgPaused){b.innerHTML='\u25b6 Resume';b.className='btn pause on';}
     else{b.innerHTML='\u25ae\u25ae Pause';b.className='btn pause';}
   }
-  console.log('[autolink] button: message updates '+(msgPaused?'paused':'resumed'));
 }
 
 // Log level radio (inline + overlay). The inline row and the
@@ -512,6 +540,19 @@ async function poll(){
         var inp=document.querySelector('input[name=mode][value="'+m+'"]');
         if(inp)inp.checked=true;
         highlightMode();
+      }
+    }
+    // v5.1.29: reconcile the pause button label with /stats.msgPaused
+    // on every poll. The device is the source of truth — handles
+    // refresh-after-pause, race on boot, and any /pausemsg POST that
+    // came in from another tab/phone. fieldMissing means no hook
+    // registered (Pong or old firmware); leave msgPaused as-is.
+    if(d.msgPaused!==undefined&&d.msgPaused!==null){
+      var devPaused=d.msgPaused===1;
+      if(devPaused!==msgPaused){
+        msgPaused=devPaused;
+        applyMsgPauseLabel();
+        console.log('[autolink] /stats msgPaused='+devPaused+' — reconciled button label');
       }
     }
     fails=0;hide('alert');
