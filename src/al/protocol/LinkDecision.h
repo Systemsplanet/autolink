@@ -35,9 +35,17 @@ namespace autolink {
 // COBS sequence width. Defined here as a free constant for the
 // decision functions (LinkDecision.h is the only header that needs
 // it; ALink.h still has its own copy for the protocol\'s array sizes).
-// v5.1.45: the cobsSeq counter skips ACK_TYPE (0xFF) so ACK and
-// data frames can be discriminated by the first decoded byte alone.
-// Effective wrap is 255 values per counter cycle, not 256.
+// v5.1.45 (fix-2): the cobsSeq counter skips ACK_TYPE (0xFF)
+// so ACK and data frames can be discriminated by the first
+// decoded byte alone. Effective wrap is 255 values per counter
+// cycle, not 256. The skip is enforced on the SENDER at
+// ALink.cpp:sendCobsFrame_unlocked (`txSeq = (txSeq ==
+// COBS_SEQ_MAX) ? 0 : txSeq + 1`) — this header assumes the
+// sender honors the contract. If the sender is changed to
+// plain `txSeq + 1` (the v5.1.45 fix-1 mistake), the receiver
+// will silently drop the seq-255 frame as a duplicate ACK and
+// no warning will fire here — the test that pins this is
+// `ALinkIOTest::test_txSeq_wraps_254_to_0_without_dropping_0xFF`.
 static constexpr int LD_SEQ_WRAP = 255;
 
 // ---- Gap / stale classification (was inline in onPayload) ----
