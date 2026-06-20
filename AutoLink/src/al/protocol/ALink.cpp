@@ -813,6 +813,24 @@ void ALink::reset_unlocked(bool count) {
     emptySweeps = 0;
     swpRxBytes = 0;
     lastRxMs = hw.nowMs();
+    // v5.1.35: clear the ARQ state maps on every drop. Without
+    // this, slots that were in-flight in the previous session stay
+    // marked as pending, and the new session (which restarts from
+    // cobsSeq=0) inherits a stale map. When the new session's first
+    // chunk arrives, the ACK handler might find an unrelated entry
+    // in ackedPending_/baseSeq_ and try to retransmit a payload
+    // that doesn't exist (cache was cleared) or skip a real send
+    // because of a phantom ACK. The result is sporadic link drops
+    // and phantom retransmits after a re-sweep. Also reset
+    // hasPendingRetx_ so the post-timer dispatch doesn't fire a
+    // stale retx callback into a link that hasn't finished
+    // re-sweeping yet.
+    memset(ackedPending_,   0, sizeof(ackedPending_));
+    memset(retxCount_,      0, sizeof(retxCount_));
+    memset(sentAtMs_,       0, sizeof(sentAtMs_));
+    memset(baseSeq_,        0, sizeof(baseSeq_));
+    hasPendingRetx_   = false;
+    pendingRetxBase_  = NO_BASE;
     // cobsSeq sender + receiver reset on every drop. After re-sweep
     // both sides restart from cobsSeq=0, so stale bytes from the
     // previous session are immediately rejected as gaps.
