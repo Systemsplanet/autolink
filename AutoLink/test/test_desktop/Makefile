@@ -38,7 +38,8 @@ TEST_BINS = run_test_crc run_test_cobs run_test_blink run_test_framerx \
             run_test_alink_io run_test_alink_message run_test_alink_negotiation \
             run_test_alink_error run_test_alink_watchdog run_test_alink_cobsseq \
             run_test_alink_arq run_test_alink_web run_loopback_noise \
-            run_test_alink_facade run_test_wiresim_closedloop
+            run_test_alink_facade run_test_wiresim_closedloop \
+            run_test_clock_injection
 
 LOOPBACK_BIN = run_loopback
 
@@ -106,6 +107,9 @@ run_test_alink_cobsseq: $(LINK_SRC) $(TPROTO)/ALinkCobsSeqTest.cpp
 run_test_alink_arq: $(AUTOLINK_SRC) $(TPROTO)/ALinkArqTest.cpp
 	$(CXX) $(CXXFLAGS) $(AUTOLINK_SRC) $(TPROTO)/ALinkArqTest.cpp -o $@
 
+run_test_linkdecision: $(TPROTO)/LinkDecisionTest.cpp
+	$(CXX) $(CXXFLAGS) $(TPROTO)/LinkDecisionTest.cpp -o $@
+
 run_test_alink_web: $(LINK_SRC) $(WEB)/AutoLinkWebCore.cpp $(TWEB)/AutoLinkWebTest.cpp
 	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(WEB)/AutoLinkWebCore.cpp $(TWEB)/AutoLinkWebTest.cpp -o $@
 
@@ -138,6 +142,12 @@ run_test_alink_facade: $(AUTOLINK_SRC) AutoLinkFacadeTest.cpp
 
 run_test_wiresim_closedloop: $(AUTOLINK_SRC) WireSimClosedLoopTest.cpp
 	$(CXX) $(CXXFLAGS) $(AUTOLINK_SRC) WireSimClosedLoopTest.cpp -o $@
+
+# v5.1.40: deterministic clock-injection tests. Pins the three
+# time-dependent protocol paths (idle timeout, ACK RTO, sweep stall)
+# as sub-ms host tests via MockHal::pumpClock.
+run_test_clock_injection: $(AUTOLINK_SRC) ClockInjectionTest.cpp
+	$(CXX) $(CXXFLAGS) $(AUTOLINK_SRC) ClockInjectionTest.cpp -o $@
 
 run_test_alink_io: $(LINK_SRC) $(TPROTO)/ALinkIOTest.cpp
 	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/ALinkIOTest.cpp -o $@
