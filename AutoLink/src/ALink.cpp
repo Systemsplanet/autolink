@@ -1,50 +1,21 @@
-// ALink.cpp — AutoLink protocol core implementation (v4.0.6).
+// ALink.cpp — AutoLink protocol core.
 //
-// v4.0.0 changes:
-//   * Every COBS frame carries a cobsSeq byte. The receiver uses it to
-//     drop stale or out-of-order frames so a wire-byte shift no longer
-//     desyncs the message layer (this was the v3.0.0..v3.2.10 bug).
-//   * Control frames (PING, REQ, best-ack) are 5 bytes:
-//       {0xAA, 0x55, cobsSeq, payload, CRC8(first-4)}
-//   * Reliable-mode data frames prepend cobsSeq to the COBS payload:
-//       [0x00] [COBS(cobsSeq | payload) | CRC8(cobsSeq | payload)] [0x00]
-//   * FIFO length/CRC compare in UtilPing is gone. Echoes are matched by
-//     cobsSeq; a gap in cobsSeq means a lost frame, not a desync.
-//
-// v4.0.6: fix sendMsg() mutex deadlock.
-//   * sendMsg() held hw.lock() then called write(), which also called
-//     hw.lock() — a non-recursive re-entrant take on a FreeRTOS
-//     xSemaphoreCreateMutex(), which deadlocks the calling task
-//     indefinitely. The loop() task froze on the first comm_.send()
-//     after link-up; the FreeRTOS timer task continued sending
-//     keepalives (never touching write()), so the link stayed alive
-//     but no messages were ever delivered. Fixed by replacing the two
-//     write() calls with direct sendCobsFrame_unlocked() / hw.tx()
-//     calls that assume the lock is already held. As a side-effect,
-//     header and payload are now sent inside a single locked scope so
-//     no keepalive frame can interleave between them.
-//
-// v4.0.5: remove flushTx() from sendFrame_unlocked() (control frames).
-//   * dropLink_unlocked() / reset_unlocked() merged into reset_unlocked(bool count).
-//   * sendFrame() / sendFrame_unlocked() / write() / writeLocked() merged.
-//   * The hand-rolled keepalive in onTimer replaced with sendCobsFrame_unlocked
-//     (n=0 produces the same wire bytes via the real COBS encoder).
-//   * onRx / onTimer split into per-state helpers so the SWP-master branch
-//     can hold the lock for the whole call instead of churning it.
-//   * Five copies of the "enter OK at baud N" block collapsed to lockOk_unlocked.
-//   * Private-member naming normalized (no trailing underscore).
-//   * 5 getCobs* getters + 2-arg/3-arg getStats + getLifetimeErrors collapsed
-//     to getDiag(Diag&) and getStats(Stats&).
-//   * Dead helpers (logCobsSeq_unlocked) and unused ILink seams (pushAppBuf
-//     single-byte, popAppBuf no-arg) removed.
-//   * Magic numbers (gap window, cobsSeq wrap) named.
-//
-// State machine (SWP/LCK/OK), COBS+CRC-8 framing, CRC-16 message layer,
-// auto-baud sweep with reliability scoring, idle watchdog, keepalive, and
-// error thresholding. All physical I/O goes through the injected ILink so
-// this file compiles and runs cleanly on the host for unit testing.
+// State machine (SWP/LCK/OK), COBS+CRC-8 framing with cobsSeq ordering,
+// CRC-16 message layer, auto-baud sweep with reliability scoring, idle
+// watchdog, keepalive, and error thresholding. All physical I/O goes
+// through the injected ILink so this file compiles and runs on the host
+// for unit testing.
 #include "ALink.h"
 #include "Log.h"
+#include <cstdio>      // snprintf (RX hex dump)
+
+#ifdef ARDUINO
+// portYIELD() is defined by FreeRTOS.h. Include it at file scope so
+// its extern "C" blocks aren't nested inside namespace autolink.
+#  if defined(ESP_PLATFORM) || defined(ESP32) || defined(ARDUINO_ARCH_ESP32)
+#    include <freertos/FreeRTOS.h>
+#  endif
+#endif
 #include "util/UtilCrc.h"
 #include "util/UtilCobs.h"
 #include <algorithm>
@@ -60,8 +31,14 @@ static_assert(MAX_CHUNK + 6 <= 256, "MAX_CHUNK too large for 256-byte frame buff
 // Watchdog/keepalive poll interval while in OK: a third of the timeout so a
 // keepalive always lands well before the peer's window closes.
 int ALink::okTickMs() const {
-    int t = cfg.idleTimeoutMs / 3;
-    return t < 50 ? 50 : t;
+    // Timer tick rate for the OK state. MUST be at least
+    // ACK_RTO_MS so the retransmit scan runs often enough to catch
+    // a lost wire frame within one RTO. The keepalive check inside
+    // onTimerOk_unlocked uses cfg.idleTimeoutMs / 3 as its own
+    // interval and is independent of the tick rate.
+    int keep = cfg.idleTimeoutMs / 3;
+    if (keep < 50) keep = 50;
+    return keep < (int)ACK_RTO_MS ? (int)ACK_RTO_MS : keep;
 }
 
 const char* StateToStr(State s) {
@@ -76,7 +53,7 @@ const char* StateToStr(State s) {
 ALink::ALink(ILink& h, bool isMasterNode, const AutoLinkConfig& config)
     : hw(h), isMaster(isMasterNode), cfg(config),
       state(State::OK), errs(0), spdI(0), pingSample(0), emptySweeps(0),
-      baudSweep((int)config.allowedBauds.size()),
+      baudSweep((int)config.allowedBaudsCount),
       rxIdx(0), frameRx(*this),
       rxMsgLen(-1), rxMsgCrc(0), lckRetries(0), lastRxMs(0), lastTxMs(0),
       txBytes(0), rxBytes(0), discCount(0), frameErrs(0)
@@ -100,21 +77,23 @@ void ALink::resetSeq_unlocked() {
     txSeq = 0;
     rxSeqSet = false;
     rxSeq = 0;
-    // lostMsgs is *not* reset here — it is the lifetime wire-loss tally
-    // the dashboard's "lost msgs" card shows, and survives drop/re-sweep
-    // on purpose. If the user wants to zero it, that's what resetErrors()
-    // is for (which currently zeros discCount and frameErrs; if the
-    // dashboard exposes a "lostMsgs=0" button, plumb it there).
+    // lostMsgs is the lifetime wire-loss tally (dashboard "lost msgs"
+    // card); survives drop/re-sweep on purpose. Zero via resetDiag().
     Log::getLog().debug(ALINK_TAG, "cobsSeq reset (sender=%u, lastRx cleared)", (unsigned)txSeq);
 }
 
 void ALink::begin() {
-    if (!cfg.allowedBauds.empty()) {
+    // v5.1.14 (audit #6): the condition was inverted — the log used
+    // to fire only when allowedBaudsCount == 0, which is the empty
+    // case (and the log would also OOB-read allowedBauds[-1]). Flip
+    // to != so the log fires whenever there's at least one baud to
+    // sweep. Disclosed.
+    if (cfg.allowedBaudsCount != 0) {
         Log::getLog().info(ALINK_TAG, "%s: %d bauds %lu..%lu, %d samples/baud, fastAck=%s",
             isMaster ? "Ping" : "Pong",
-            (int)cfg.allowedBauds.size(),
-            (unsigned long)cfg.allowedBauds.front(),
-            (unsigned long)cfg.allowedBauds.back(),
+            (int)cfg.allowedBaudsCount,
+            (unsigned long)cfg.allowedBauds[0],
+            (unsigned long)cfg.allowedBauds[cfg.allowedBaudsCount-1],
             cfg.pingSamplesPerBaud,
             cfg.fastBaudLock ? "on" : "off");
     }
@@ -144,39 +123,28 @@ void ALink::begin() {
 
 void ALink::changeState_unlocked(State newState) {
     if (state != newState) {
-        // v4.0.6: demoted from INFO to DEBUG. State transitions fire on
-        // every baud-sweep tick (SWP <-> LCK at ~50 ms cadence during
-        // negotiation) and on every link drop / re-lock. At INFO this
-        // was drowning the live log on the dashboard — a 4-second
-        // negotiation emitted ~80 transition lines for what is, from
-        // the operator's perspective, a single "link just locked" event.
-        // DEBUG is the right home: a user investigating a stuck link
-        // re-enables it with Log::setLevel(DEBUG) and gets the full
-        // SWP/LCK chatter. INFO keeps only the user-meaningful events
-        // (link up/down, threshold trips, RX errors).
+        // DEBUG: transitions fire every baud tick during negotiation
+        // (~80 lines for a 4 s SWP), which drowns the live log at INFO.
+        // INFO keeps only user-meaningful events (link up/down, errors).
         Log::getLog().debug(ALINK_TAG, "State Transition: %s -> %s",
                             StateToStr(state), StateToStr(newState));
         state = newState;
     }
 }
 
-// Highest baud index that has at least minHitsForReliable() decodes.
-// Returns 0 if no baud has scored (so a fresh caller falls back to the
-// lowest baud). Caller holds the lock.
 int ALink::bestSpd_unlocked() const {
     int best = baudSweep.pickBest();
     if (best < 0) return 0;
-    // Prefer the highest baud that has *any* decodes, falling back to the
-    // scoring-based best. Matches the inline loop that used to live in
-    // the SWP fast-ack handler.
+    // Prefer the highest baud with any decodes, falling back to the
+    // scoring-based best.
     for (int j = 0; j < best; j++) {
         if (baudSweep.scoreAt(j) > 0) return j;
     }
     return best;
 }
 
-// v4.0.0: build a 5-byte control frame {0xAA, 0x55, cobsSeq, payload, CRC8(first 4)}.
-// The cobsSeq is monotonic per-link and resets only on link drop.
+// Control frame: [0xAA, 0x55, cobsSeq, payload, CRC8(first-4)].
+// cobsSeq is monotonic per-link and resets only on link drop.
 void ALink::sendFrame_unlocked(uint8_t payload) {
     uint8_t frame[CTRL_FRAME_SIZE];
     frame[0] = 0xAA;
@@ -189,30 +157,18 @@ void ALink::sendFrame_unlocked(uint8_t payload) {
             "sendFrame TX truncated (cobsSeq=%u payload=0x%02X)",
             (unsigned)txSeq, (unsigned)payload);
     }
-    // v4.0.5: removed hw.flushTx(). v4.0.0..v4.0.4 called
-    //   uart_wait_tx_done(uart_num, pdMS_TO_TICKS(100))
-    // here, which blocks the calling task until the UART TX FIFO drains
-    // to empty. Control frames are 5 bytes — at 115200 baud that's
-    // ~0.4 ms of wire time — but the FreeRTOS tick granularity means
-    // the task yields and may not be rescheduled for a full tick
-    // (1 ms). The data path (sendCobsFrame_unlocked) does NOT call
-    // flushTx(), so the data path was unaffected, but the control
-    // path (PING/REQ/fast-ack/keepalive) was unnecessarily serialized.
-    // The auto-sized TX ring is large enough to accept 5 bytes
-    // instantly and non-blocking; hw.tx() returning == CTRL_FRAME_SIZE
-    // is the success signal. Users who need an explicit drain still
-    // have the public ALink::flush() / AutoLink::flush() entry point.
-    // DEBUG log here makes the "no flush" decision visible in the log;
-    // in practice this fires on every PING/REQ/fast-ack/keepalive so
-    // it's gated behind Log::DEBUG (not INFO) to keep the steady-state
-    // log readable.
-    Log::getLog().debug(ALINK_TAG,
-        "sendFrame TX  cobsSeq=%u  payload=0x%02X  (no flushTx, v4.0.5)",
+    // No flushTx(): the auto-sized TX ring accepts 5 bytes instantly
+    // and non-blocking, and the data path doesn't flush either. Users
+    // who need an explicit drain have the public flush() entry point.
+    // VERBOSE: fires on every control byte (PING/PONG/keepalive);
+    // hundreds of lines per second at 115200 baud. Opt in via the
+    // dashboard's Verbose radio for wire-trace forensics.
+    Log::getLog().verbose(ALINK_TAG,
+        "sendFrame TX  cobsSeq=%u  payload=0x%02X",
         (unsigned)txSeq, (unsigned)payload);
     // Don't bump txSeq for control frames: Pong replies with the same
-    // cobsSeq so Ping can match request/ack. Only the *reliable-mode data
-    // path* (sendCobsFrame_unlocked) consumes cobsSeq numbers, one per
-    // data frame.
+    // cobsSeq so Ping can match request/ack. Only the data path
+    // (sendCobsFrame_unlocked) consumes cobsSeq numbers.
 }
 
 void ALink::sendFrame(uint8_t payload) {
@@ -221,24 +177,21 @@ void ALink::sendFrame(uint8_t payload) {
     hw.unlock();
 }
 
-// v4.0.0: reliable-mode data frame. Wire format:
+// Reliable-mode data frame:
 //   [0x00] [COBS(cobsSeq | payload) | CRC8(cobsSeq | payload)] [0x00]
-// Each data frame consumes one cobsSeq number. With n=0 this is the
-// keepalive shape: a cobsSeq-bearing frame so the receiver's gap
-// detection sees a continuous stream even when the app has nothing to
-// send. Wire is always 5 bytes — see the keepalive comment in onTimer.
+// Each data frame consumes one cobsSeq. With n=0 this is the keepalive
+// shape — a cobsSeq-bearing frame so the receiver's gap detection sees
+// traffic even when the app has nothing to send.
 void ALink::sendCobsFrame_unlocked(const uint8_t* b, int n) {
     if (n < 0) n = 0;
     if (n > MAX_CHUNK) n = MAX_CHUNK;
 
-    // Build unencoded: cobsSeq || payload || crc8(cobsSeq || payload)
     uint8_t unenc[MAX_CHUNK + 3];
     unenc[0] = txSeq;
     if (n > 0) memcpy(unenc + 1, b, n);
     unenc[1 + n] = UtilCrc::crc8(unenc, 1 + n);
-    size_t rawLen = (size_t)(1 + n) + 1;   // cobsSeq + payload + crc
+    size_t rawLen = (size_t)(1 + n) + 1;
 
-    // COBS-encode, then bracket with 0x00 delimiters
     uint8_t frame[MAX_CHUNK + 6];
     frame[0] = 0x00;
     size_t encLen = UtilCobs::encode(unenc, rawLen, frame + 1);
@@ -254,7 +207,6 @@ void ALink::sendCobsFrame_unlocked(const uint8_t* b, int n) {
         Log::getLog().debug(ALINK_TAG, "TX cobsSeq=%u  %d payload bytes  %d wire bytes",
             (unsigned)txSeq, n, (int)frameLen);
     }
-    // Bump txSeq for the next data frame (wrap at COBS_SEQ_WRAP).
     txSeq = (uint8_t)(txSeq + 1);
 }
 
@@ -262,6 +214,52 @@ void ALink::sendCobsFrame(const uint8_t* b, int n) {
     hw.lock();
     sendCobsFrame_unlocked(b, n);
     hw.unlock();
+}
+
+// v5 ARQ: same wire frame as sendCobsFrame_unlocked, but ALSO marks
+// the cobsSeq used as "waiting for ACK" in the pending map and
+// stamps sentAtMs_ + zeros retxCount_.
+//
+// For multi-chunk messages, the caller passes the message's base
+// cobsSeq (the one the facade cached the payload under). The protocol
+// remembers it in baseSeq_[chunkSeq] so that when a chunk's ACK
+// times out, the retransmit hook can look up the cache entry via
+// the base seq and re-send the whole message. Without this, a
+// chunk's retransmit looks up an empty cache slot and the link
+// drops.
+//
+// Pass baseSeq == 0xFF (NO_BASE) for a single-frame message — the
+// chunk IS the base, and the cache key is the chunk's cobsSeq.
+//
+// Caller holds the lock.
+uint8_t ALink::sendCobsFrameAcked_unlocked(const uint8_t* b, int n, uint8_t baseSeq) {
+    uint8_t seq = txSeq;
+    sendCobsFrame_unlocked(b, n);  // bumps txSeq by 1 inside
+    ackedPending_[seq] = true;
+    retxCount_[seq]    = 0;
+    sentAtMs_[seq]     = hw.nowMs();
+    baseSeq_[seq]      = (baseSeq == NO_BASE) ? seq : baseSeq;
+    return seq;
+}
+
+// Send a 1-byte-payload ACK frame acknowledging the given cobsSeq.
+// Wire format: [0x00][COBS(ACK_TYPE | ackedSeq) | CRC8][0x00]. Caller
+// holds the lock.
+void ALink::sendAckFrame_unlocked(uint8_t ackedCobsSeq) {
+    uint8_t unenc[3] = { ACK_TYPE, ackedCobsSeq, 0 };
+    unenc[2] = UtilCrc::crc8(unenc, 2);
+    uint8_t frame[8];
+    frame[0] = 0x00;
+    size_t encLen = UtilCobs::encode(unenc, 3, frame + 1);
+    frame[1 + encLen] = 0x00;
+    int sent = hw.tx(frame, (int)(encLen + 2));
+    if ((int)(encLen + 2) != sent) {
+        Log::getLog().error(ALINK_TAG,
+            "sendAckFrame TX truncated (ackedSeq=%u accepted=%d)",
+            (unsigned)ackedCobsSeq, sent);
+    }
+    // No cobsSeq bump — ACKs don't consume data-path sequence numbers.
+    // No ACK of the ACK — that would loop forever.
 }
 
 void ALink::err() {
@@ -275,6 +273,11 @@ bool ALink::err_unlocked() {
     if (state != State::OK) return false;
     errs++;
     frameErrs++;
+    // DEBUG: per-frame-error counter for the operator. Threshold trip
+    // stays at INFO (it's a state change worth highlighting).
+    Log::getLog().debug(ALINK_TAG,
+        "frame error #%d (cumulative frameErrs=%llu, threshold=%d)",
+        errs, (unsigned long long)frameErrs, cfg.errThreshold);
     if (errs > cfg.errThreshold) {
         Log::getLog().info(ALINK_TAG, "Error threshold exceeded (%d > %d). Dropping link.",
                            errs, cfg.errThreshold);
@@ -311,9 +314,27 @@ int ALink::readStream(uint8_t* b, int n) {
 }
 
 int ALink::write(const uint8_t* b, int len) {
-    if (len <= 0) return 0;
+    if (len <= 0) {
+        // n=0 is a no-op (the keepalive path handles cobsSeq-only
+        // frames). Negative len is a programmer error.
+        if (len < 0) {
+            Log::getLog().error(ALINK_TAG,
+                "write rejected: len=%d (negative). No bytes sent.", len);
+        }
+        return 0;
+    }
     hw.lock();
-    if (state != State::OK) { hw.unlock(); return 0; }
+    if (state != State::OK) {
+        // Warning: silent state-rejection was the source of the
+        // "sendMsg returned but data never arrived" confusion.
+        State s = state;
+        hw.unlock();
+        Log::getLog().warning(ALINK_TAG,
+            "write rejected: link not in OK (state=%s), %d bytes dropped. "
+            "Call dropLink() and wait for re-sweep, or check wiring/peer.",
+            StateToStr(s), len);
+        return 0;
+    }
 
     if (!cfg.reliableMode) {
         int sent = hw.tx(b, len);
@@ -332,7 +353,15 @@ int ALink::write(const uint8_t* b, int len) {
 
     int offset = 0;
     while (offset < len) {
-        if (state != State::OK) break;
+        if (state != State::OK) {
+            // Bailed mid-message: peer sees a gap, partial is lost.
+            State s = state;
+            Log::getLog().warning(ALINK_TAG,
+                "write aborted mid-message at offset=%d/%d (state=%s). "
+                "Peer will see a gap; the partial message is lost.",
+                offset, len, StateToStr(s));
+            break;
+        }
         int chunk = std::min(len - offset, MAX_CHUNK);
         sendCobsFrame_unlocked(b + offset, chunk);
         txBytes += chunk; lastTxMs = hw.nowMs();
@@ -357,9 +386,9 @@ void ALink::flushRx() {
     int app_bytes = hw.appBufAvailable();
     hw.clearAppBuf();
     rxMsgLen = -1;
-    // v4.0.0: also reset cobsSeq receiver state so the next byte is treated
-    // as the start of a fresh sequence (handles the Pong->Ping link-up case
-    // where Pong might have stale bytes in its ring from a previous session).
+    // Reset cobsSeq receiver state so the next byte is treated as the
+    // start of a fresh sequence (handles Pong->Ping link-up with stale
+    // bytes from a previous session in the ring).
     rxSeqSet = false;
     rxSeq = 0;
     hw.unlock();
@@ -370,7 +399,25 @@ void ALink::flushRx() {
 }
 
 bool ALink::sendMsg(const uint8_t* b, int len) {
-    if (len <= 0 || (size_t)len > cfg.maxMsg) return false;
+    if (len == 0) {
+        // 0-byte sendMsg is a no-op (returns true). The keepalive
+        // path handles cobsSeq-only frames separately.
+        return true;
+    }
+    if (len < 0) {
+        Log::getLog().error(ALINK_TAG,
+            "sendMsg rejected: len=%d (negative). The 0-payload data-message "
+            "path was removed; the keepalive handles cobsSeq advancement "
+            "automatically in OK.", len);
+        return false;
+    }
+    if ((size_t)len > cfg.maxMsg) {
+        Log::getLog().error(ALINK_TAG,
+            "sendMsg rejected: len=%d exceeds cfg.maxMsg=%u. Either shrink "
+            "the message or raise cfg.maxMsg in AutoLinkConfig before "
+            "constructing AutoLink.", len, (unsigned)cfg.maxMsg);
+        return false;
+    }
 
     uint16_t c = UtilCrc::crc16(b, len);
     uint8_t hdr[MSG_HDR] = {
@@ -379,20 +426,33 @@ bool ALink::sendMsg(const uint8_t* b, int len) {
     };
 
     hw.lock();
-    if (state != State::OK) { hw.unlock(); return false; }
+    if (state != State::OK) {
+        State s = state;
+        hw.unlock();
+        Log::getLog().warning(ALINK_TAG,
+            "sendMsg rejected: link not in OK (state=%s), %d bytes dropped.",
+            StateToStr(s), len);
+        return false;
+    }
 
-    // Use unlocked send paths — sendMsg already holds hw.lock().
-    // Calling write() here would re-enter the non-recursive mutex and deadlock.
-    // Sending header and payload inside one lock scope also guarantees no
-    // keepalive frame (from the timer task) can interleave between them.
+    // Use unlocked send paths — calling write() would re-enter the
+    // non-recursive mutex and deadlock. Header and payload inside one
+    // lock scope so no keepalive (timer task) interleaves between them.
     bool ok = true;
     if (cfg.reliableMode) {
-        sendCobsFrame_unlocked(hdr, MSG_HDR);
+        // v5 ARQ: every cobsSeq-bearing frame arms a retransmit
+        // timer. The first byte of the header (L=lo) is the FIRST
+        // cobsSeq; subsequent chunks increment by 1 each. If any of
+        // those cobsSeq numbers aren't ACKed within ACK_RTO_MS, the
+        // OK-state timer retransmits the WHOLE message (the facade
+        // looks up the base seq in the cache and re-sends from
+        // offset 0).
+        uint8_t baseSeq = sendCobsFrameAcked_unlocked(hdr, MSG_HDR, NO_BASE);
         int offset = 0;
         while (offset < len) {
             if (state != State::OK) { ok = false; break; }
             int chunk = std::min(len - offset, MAX_CHUNK);
-            sendCobsFrame_unlocked(b + offset, chunk);
+            sendCobsFrameAcked_unlocked(b + offset, chunk, baseSeq);
             txBytes += chunk;
             lastTxMs = hw.nowMs();
             offset += chunk;
@@ -409,7 +469,60 @@ bool ALink::sendMsg(const uint8_t* b, int len) {
     }
 
     hw.unlock();
+#ifdef ARDUINO
+    // Yield to the scheduler. The Arduino loopTask runs at priority
+    // 25 and a tight sendMsg burst can hold the CPU for ~50 ms per
+    // message (UART TX-FIFO drain). Without a yield the httpd task
+    // at priority 10 is starved for the entire burst and the
+    // dashboard's /stats /logs /level calls time out. portYIELD()
+    // is a no-op when no other task is ready (cheap), and gives
+    // the httpd task a turn when it is. FreeRTOS.h is included at
+    // file scope (top of ALink.cpp) so this call compiles on every
+    // Arduino-ESP32 core/combo. No-op on host.
+    portYIELD();
+#endif
     return ok;
+}
+
+// Scan the app buffer forward from a corrupt header looking for the
+// next plausibly-valid MSG_HDR boundary (L in [1, cfg.maxMsg]). The
+// CRC is over the payload, not the header, so we can't fully validate
+// here — the next recvMsg will fail with a CRC mismatch and re-resync.
+// Bound `max_scan` keeps the worst-case search bounded.
+//
+// Snapshots (max_scan + MSG_HDR) bytes from the app buffer, scans the
+// snapshot, and (on success) re-pushes the suffix starting at the
+// resync point. On failure re-pushes the whole snapshot so the caller's
+// clearAppBuf sees the right bytes.
+int ALink::findMsgHeaderResync_unlocked(int max_scan) {
+    int avail = hw.appBufAvailable();
+    if (avail < MSG_HDR) return -1;
+    int scan = (max_scan > 0 && max_scan < avail) ? max_scan : avail;
+    int snapLen = scan + MSG_HDR;
+    if (snapLen > avail) snapLen = avail;
+    uint8_t* snap = (uint8_t*)malloc(snapLen);
+    if (!snap) return -1;
+    int got = hw.popAppBuf(snap, snapLen);
+    int validLen = got;
+    Log::getLog().debug(ALINK_TAG,
+        "findMsgHeaderResync: avail=%d snapLen=%d got=%d validLen=%d",
+        avail, snapLen, got, validLen);
+    for (int drop = 0; drop + MSG_HDR <= validLen; drop++) {
+        uint32_t L = (uint32_t)snap[drop] |
+                     ((uint32_t)snap[drop + 1] << 8) |
+                     ((uint32_t)snap[drop + 2] << 16) |
+                     ((uint32_t)snap[drop + 3] << 24);
+        if (L < 1 || L > cfg.maxMsg) continue;
+        Log::getLog().debug(ALINK_TAG,
+            "findMsgHeaderResync: candidate drop=%d L=%u", drop, (unsigned)L);
+        hw.pushAppBuf(snap + drop, validLen - drop);
+        free(snap);
+        return drop;
+    }
+    // No resync point. Re-push the whole snapshot.
+    hw.pushAppBuf(snap, validLen);
+    free(snap);
+    return -1;
 }
 
 int ALink::recvMsg(uint8_t* out, int max_len) {
@@ -422,11 +535,50 @@ int ALink::recvMsg(uint8_t* out, int max_len) {
         uint32_t L = (uint32_t)h[0] | ((uint32_t)h[1] << 8) |
                      ((uint32_t)h[2] << 16) | ((uint32_t)h[3] << 24);
         rxMsgCrc = (uint16_t)h[4] | ((uint16_t)h[5] << 8);
+        // Corrupt header: scan forward for the next valid MSG_HDR
+        // boundary. If none found within maxMsg + MSG_HDR bytes
+        // (one full legitimate message + header), the buffer is
+        // genuinely garbage — clear it. This breaks the
+        // cascading-desync the old "drop one header and hope" path
+        // caused when a cobsSeq forward-gap resync realigned the wire
+        // mid-payload.
         if (L == 0 || L > cfg.maxMsg) {
+            int drop = findMsgHeaderResync_unlocked(cfg.maxMsg + MSG_HDR);
+            if (drop >= 0) {
+                if (drop > 0) {
+                    Log::getLog().error(ALINK_TAG,
+                        "recvMsg: corrupt MSG_HDR (L=%u) — resynced forward "
+                        "by %d bytes to the next valid header. Lost %d bytes "
+                        "of stream.", (unsigned)L, drop, drop);
+                    hw.unlock();
+                    err();
+                    return -1;
+                }
+                // drop == 0: the bytes just past the head form a plausible L.
+                // This is a benign self-correction, NOT a wire error — we
+                // didn't drop anything. Don't bump frameErrs. Just return
+                // -1 and let the next recvMsg re-read from there.
+                Log::getLog().debug(ALINK_TAG,
+                    "recvMsg: corrupt MSG_HDR (L=%u) at the very start of "
+                    "the scan window — the bytes just past it form a "
+                    "plausible L. Returning -1; the next recvMsg will "
+                    "re-read from there.", (unsigned)L);
+                hw.unlock();
+                return -1;
+            }
+            int cleared = hw.appBufAvailable();
             hw.clearAppBuf();
             rxMsgLen = -1;
+            Log::getLog().error(ALINK_TAG,
+                "recvMsg: corrupt MSG_HDR (L=%u) and no resync point found "
+                "within %d bytes — cleared the app buffer (%d bytes dropped). "
+                "Link stays OK; the next sendMsg from the peer will be "
+                "received cleanly.", (unsigned)L, cfg.maxMsg + MSG_HDR, cleared);
             hw.unlock();
-            err();
+            // Only bump frameErrs if we actually dropped real bytes.
+            // 0-bytes-dropped is a benign case (buffer is genuinely
+            // empty, resync was just confirming it).
+            if (cleared > 0) err();
             return -1;
         }
         rxMsgLen = (int)L;
@@ -469,12 +621,18 @@ void ALink::resetErrors() {
     hw.lock(); discCount = 0; frameErrs = 0; hw.unlock();
 }
 
+void ALink::resetDiag() {
+    // Dashboard Reset clears the cobsSeq diagnostic counters too so
+    // the "X lost msgs" pill doesn't stay at its lifetime value forever.
+    hw.lock(); gaps = 0; stale = 0; lostMsgs = 0; hw.unlock();
+}
+
 State ALink::getState() const { hw.lock(); State s = state; hw.unlock(); return s; }
 int ALink::getErrCount() const { hw.lock(); int e = errs; hw.unlock(); return e; }
 int ALink::getCurrentSpdIndex() const { hw.lock(); int idx = spdI; hw.unlock(); return idx; }
 uint32_t ALink::getCurrentBaud() const {
     hw.lock();
-    uint32_t b = (spdI >= 0 && spdI < (int)cfg.allowedBauds.size())
+    uint32_t b = (spdI >= 0 && spdI < (int)cfg.allowedBaudsCount)
                  ? cfg.allowedBauds[spdI] : 0;
     hw.unlock();
     return b;
@@ -491,15 +649,9 @@ void ALink::getDiag(Diag& d) const {
     hw.unlock();
 }
 
-// =============================================================================
-// lockOk_unlocked — the "enter OK at baud N" block, single source of truth.
-//
-// All five callsites that used to paste the 6-line sequence
-// (setSpd / spdI / errs=0 / lastRx=lastTx / changeState(OK) / startTimer)
-// now funnel through here. The one piece of variation is the log label
-// ("fast-ack", "REQ") — passed as `tag` so the caller's log line reads
-// the way it always did. Caller holds the lock.
-// =============================================================================
+// lockOk_unlocked — single source of truth for "enter OK at baud N".
+// All five callsites that used to paste the 6-line sequence funnel
+// through here. Caller holds the lock.
 void ALink::lockOk_unlocked(int idx, const char* tag) {
     hw.setSpd(cfg.allowedBauds[idx]);
     spdI = idx;
@@ -511,13 +663,6 @@ void ALink::lockOk_unlocked(int idx, const char* tag) {
     if (cfg.idleTimeoutMs > 0) hw.startTimer(okTickMs());
 }
 
-// =============================================================================
-// onRx — split into OK-path (delegates to frameRx.feed) and control-frame
-// path (delegates to ctrlFrameReady_unlocked). The control-frame handlers
-// handleSwp_unlocked / handleLck_unlocked keep the lock for the whole
-// frame so a state transition + timer arm + reply don't race with another
-// RX event.
-// =============================================================================
 void ALink::onRx(const uint8_t* data, int len) {
     hw.lock();
     int i = 0;
@@ -544,9 +689,8 @@ void ALink::onRx(const uint8_t* data, int len) {
             }
         }
         else {
-            // Control-frame accumulator. Strips the 0xAA 0x55 preamble
-            // and feeds the rest into the 5-byte rxBuf. Caller of
-            // ctrlFrameReady_unlocked holds the lock — see that fn.
+            // Control-frame accumulator. Strips 0xAA 0x55 preamble,
+            // fills rxBuf, validates CRC, dispatches at full size.
             uint8_t b = data[i++];
             if (rxIdx == 0 && b != 0xAA) continue;
             if (rxIdx == 1 && b != 0x55) { rxIdx = 0; continue; }
@@ -555,7 +699,6 @@ void ALink::onRx(const uint8_t* data, int len) {
             if (rxIdx == CTRL_FRAME_SIZE) {
                 rxIdx = 0;
                 if (UtilCrc::crc8(rxBuf, CTRL_FRAME_SIZE - 1) != rxBuf[CTRL_FRAME_CRC_IDX]) {
-                    // Bad CRC on a control frame: corrupt wire, count it.
                     Log::getLog().debug(ALINK_TAG,
                         "control frame bad CRC: %02X %02X %02X %02X %02X",
                         rxBuf[0], rxBuf[1], rxBuf[2], rxBuf[3], rxBuf[4]);
@@ -582,8 +725,8 @@ bool ALink::ctrlFrameReady_unlocked(uint8_t cobsSeq, uint8_t payload, State curS
 
 bool ALink::handleSwp_unlocked(uint8_t cobsSeq, uint8_t payload) {
     if (!isMaster && payload == REQ_CMD) {
-        // Pong saw Ping's REQ at the top of the sweep: pick the best baud,
-        // tell Ping, and both sides enter OK at that baud.
+        // Pong saw Ping's REQ at the top of the sweep: pick best baud,
+        // tell Ping, both sides enter OK at that baud.
         int best = bestSpd_unlocked();
         sendFrame_unlocked((uint8_t)best);
         lockOk_unlocked(best, "REQ");
@@ -592,15 +735,13 @@ bool ALink::handleSwp_unlocked(uint8_t cobsSeq, uint8_t payload) {
 
     if (isMaster && cfg.fastBaudLock
         && payload != PING_CMD && payload != REQ_CMD
-        && payload < (int)cfg.allowedBauds.size()) {
+        && payload < (int)cfg.allowedBaudsCount) {
         // Pong sent a fast-ack with a baud index instead of a PING/REQ.
-        // Lock immediately at that baud.
         lockOk_unlocked((int)payload, "fast-ack");
         return false;
     }
 
-    if (payload == PING_CMD && spdI < (int)cfg.allowedBauds.size()) {
-        // Pong-side: score this PING and consider locking early (fast-ack).
+    if (payload == PING_CMD && spdI < (int)cfg.allowedBaudsCount) {
         baudSweep.score(spdI);
         if (cfg.fastBaudLock && baudSweep.scoreAt(spdI) >= baudSweep.minHitsForReliable()) {
             int best = bestSpd_unlocked();
@@ -608,8 +749,8 @@ bool ALink::handleSwp_unlocked(uint8_t cobsSeq, uint8_t payload) {
             lockOk_unlocked(best, "fast-ack");
             return false;
         }
-        // Not enough samples yet; advance after the last sample in this
-        // window so the next baud is tested next tick.
+        // Not enough samples yet; advance after the last sample in
+        // this window so the next baud is tested next tick.
         int samples = baudSweep.samplesPerBaud();
         if (samples < 1) samples = 1;
         if (baudSweep.scoreAt(spdI) == 1) {
@@ -620,7 +761,7 @@ bool ALink::handleSwp_unlocked(uint8_t cobsSeq, uint8_t payload) {
         if (++pingSample >= samples) {
             pingSample = 0;
             spdI++;
-            int next = (spdI < (int)cfg.allowedBauds.size()) ? spdI : 0;
+            int next = (spdI < (int)cfg.allowedBaudsCount) ? spdI : 0;
             hw.setSpd(cfg.allowedBauds[next]);
             hw.startTimer(cfg.pingSamplesPerBaud * cfg.delayMs);
         }
@@ -630,10 +771,10 @@ bool ALink::handleSwp_unlocked(uint8_t cobsSeq, uint8_t payload) {
 }
 
 bool ALink::handleLck_unlocked(uint8_t cobsSeq, uint8_t payload) {
-    (void)cobsSeq;   // LCK uses the payload as a baud index; cobsSeq is just echoed back
+    (void)cobsSeq;   // LCK uses payload as a baud index; cobsSeq is just echoed back
     if (isMaster) {
-        // Pong's REQ-reply: it carries a baud index. Lock there.
-        if (payload < (int)cfg.allowedBauds.size()) {
+        // Pong's REQ-reply carries a baud index. Lock there.
+        if (payload < (int)cfg.allowedBaudsCount) {
             lockOk_unlocked((int)payload, "REQ");
         }
         return false;
@@ -647,13 +788,10 @@ bool ALink::handleLck_unlocked(uint8_t cobsSeq, uint8_t payload) {
     return false;
 }
 
-// =============================================================================
-// dropLink_unlocked / reset_unlocked — merged. The `count` flag picks
-// between "this is a disconnect" (counts toward discCount, called from
-// err_unlocked, dropLink, onBreak) and "this is a fresh start" (no count,
-// called from begin). v4.0.2's reset_unlocked was missing the
-// `pingSample = 0` line — a latent inconsistency that disappears on merge.
-// =============================================================================
+// Reset all link state, retune to allowedBauds[0]. `count` picks
+// between "this is a disconnect" (bumps discCount, called from
+// err_unlocked, dropLink, onBreak) and "this is a fresh start" (no
+// count, called from begin).
 void ALink::reset_unlocked(bool count) {
     if (count && state == State::OK) discCount++;
     changeState_unlocked(State::SWP);
@@ -668,11 +806,9 @@ void ALink::reset_unlocked(bool count) {
     emptySweeps = 0;
     swpRxBytes = 0;
     lastRxMs = hw.nowMs();
-    // v4.0.0: cobsSeq sender + receiver reset on every drop. This is the
-    // single most important reason a v4.0.0 link survives a desync that
-    // would have wedged v3.x: after re-sweep, both sides restart from
-    // cobsSeq=0, so any stale bytes from the previous session are
-    // immediately rejected as gaps.
+    // cobsSeq sender + receiver reset on every drop. After re-sweep
+    // both sides restart from cobsSeq=0, so stale bytes from the
+    // previous session are immediately rejected as gaps.
     resetSeq_unlocked();
     hw.clearAppBuf();
     hw.setSpd(cfg.allowedBauds[spdI]);
@@ -680,64 +816,53 @@ void ALink::reset_unlocked(bool count) {
     else          hw.startTimer(cfg.pingSamplesPerBaud * cfg.delayMs);
 }
 
-// v4.0.0: UtilFrameRx::Listener callback for validated reliable-mode frames.
-// cobsSeq comes from the first decoded byte. We do gap/stale detection
-// BEFORE pushing payload bytes to the app buffer, so a wire-byte shift
-// never reaches the message layer at all.
+// UtilFrameRx::Listener callback for validated reliable-mode frames.
+// cobsSeq is the first decoded byte; gap/stale detection happens here
+// before any bytes reach the app buffer, so a wire-byte shift can
+// never reach the message layer.
 bool ALink::onPayload(uint8_t cobsSeq, const uint8_t* b, int n) {
     if (state != State::OK) {
-        // Frame received while not in OK (race against a drop in another
-        // task). Per the UtilFrameRx::Listener contract, return true so
-        // feed() stops handing the rest of this event to the parser — the
-        // rest of the bytes belong to the stale session, not us.
+        // Frame received while not in OK (race against a drop in
+        // another task). Return true so feed() stops handing the
+        // rest of this event to the parser — those bytes belong to
+        // the stale session.
         Log::getLog().debug(ALINK_TAG,
             "RX cobsSeq=%u  %d payload bytes  DROPPED (state != OK)", (unsigned)cobsSeq, n);
         return true;
     }
 
-    // v4.0.0 gap/stale detection.
+    // v5 ARQ: a missing ACK would have caused the sender to
+    // retransmit, so by the time we see cobsSeq=N the sender's
+    // retransmits have already caught up. A "gap" here means the
+    // retransmit also got lost — the link is in trouble. We log
+    // it (still counts toward gaps/lostMsgs for diagnostics) but
+    // we DON'T drop the link — the next retransmit will catch up.
+    //
+    // A "stale" (backwards-jump) means a duplicate ACK-driven
+    // retransmit arrived after the original was acked. Drop it.
     if (rxSeqSet) {
         uint8_t expected = (uint8_t)(rxSeq + 1);
         if (cobsSeq != expected) {
-            // Distinguish "stale duplicate / out-of-window" from "true gap".
-            // After wraparound at COBS_SEQ_WRAP, a duplicate of rxSeq would
-            // be exactly 0 ahead, so a generic gap/stale split based purely
-            // on arithmetic is ambiguous. Heuristic: if (cobsSeq - rxSeq)
-            // is small (1..MAX_GAP_RESYNC) it was almost certainly a lost
-            // frame (gap). Anything else is treated as a stale frame.
             int diff = (int)cobsSeq - (int)rxSeq;
             if (diff < 0) diff += COBS_SEQ_WRAP;
-            if (diff > 0 && diff <= MAX_GAP_RESYNC) {
-                gaps++;
-                // `diff` is the count of cobsSeqs jumped over. When
-                // diff==1 we lost exactly 1 message (the expected one);
-                // when diff==3 we lost 3 (e.g. expected=2, cobsSeq=5).
-                // `lostMsgs` is the lifetime wire-loss tally the dashboard
-                // shows, separate from `gaps` so a single burst loss
-                // (1 gap event, many missing messages) doesn't look the
-                // same as N independent single-message gaps.
-                lostMsgs += (uint64_t)(diff - 1);
-                Log::getLog().info(ALINK_TAG,
-                    "RX cobsSeq=%u GAP: expected %u, last good=%u  %d payload bytes DROPPED (link stays OK; pipeline self-heals)  +%d lost msg%s (total %llu)",
-                    (unsigned)cobsSeq, (unsigned)expected, (unsigned)rxSeq, n,
-                    (int)(diff - 1), (diff - 1) == 1 ? "" : "s",
-                    (unsigned long long)lostMsgs);
-                // Do NOT advance rxSeq — the gap is real, the next
-                // valid frame is expected+1. (Pong, when it sees a gap, will
-                // keep sending; the next valid cobsSeq is exactly the one
-                // we expected, so the receiver resyncs in one frame.) Link
-                // is OK, so return false — feed() should keep parsing the
-                // tail of the current event.
+            if (diff == 0 || diff > COBS_SEQ_WRAP / 2) {
+                // Duplicate or wraparound. The original was already
+                // acked; this is just a redundant retransmit. Drop
+                // without acking again (the sender already saw our
+                // first ACK and freed the slot).
+                stale++;
+                Log::getLog().debug(ALINK_TAG,
+                    "RX cobsSeq=%u STALE: expected %u, last good=%u  %d bytes DROPPED (duplicate retransmit)",
+                    (unsigned)cobsSeq, (unsigned)expected, (unsigned)rxSeq, n);
                 return false;
             }
-            stale++;
-            Log::getLog().info(ALINK_TAG,
-                "RX cobsSeq=%u STALE: expected %u, last good=%u  %d payload bytes DROPPED (likely previous-session leftover)",
-                (unsigned)cobsSeq, (unsigned)expected, (unsigned)rxSeq, n);
-            // Link is OK, so return false — feed() should keep parsing the
-            // tail of the current event. The stale frame is dropped, not
-            // the rest of the RX event.
-            return false;
+            gaps++;
+            uint64_t skipped = (uint64_t)(diff - 1);
+            lostMsgs += skipped;
+            Log::getLog().warning(ALINK_TAG,
+                "RX cobsSeq=%u GAP: expected %u, last good=%u  %d bytes accepted (gap=%d, +%llu lost)",
+                (unsigned)cobsSeq, (unsigned)expected, (unsigned)rxSeq, n, diff,
+                (unsigned long long)skipped);
         }
     }
     rxSeq = cobsSeq;
@@ -746,31 +871,67 @@ bool ALink::onPayload(uint8_t cobsSeq, const uint8_t* b, int n) {
     int acc = hw.pushAppBuf(b, n);
     rxBytes += acc;
     if (acc < n) {
-        // v4.0.1: app-buffer-full is an APP-LAYER back-pressure condition,
-        // not a wire error. Do NOT count it toward errs (which would
-        // trip errThreshold and drop the link, even though the wire is
-        // fine). Log it as a warning so the dashboard can show that the
-        // app is falling behind the wire, and drop the frame. The next
-        // valid cobsSeq frame will be accepted; cobsSeq gap detection
-        // will mark it as a gap (the dropped frame's seq is missing from
-        // the stream) so the operator can see the count tick up. The
-        // link stays OK -- the protocol guarantees the next valid seq
-        // is expected+1, so a single dropped frame is recoverable.
+        // App-buffer-full — app is falling behind. We can't ACK
+        // a frame we didn't fully deliver (the sender would free
+        // its slot and the next retransmit would be a duplicate).
+        // Hold the ACK: the sender's retransmit will retry, and
+        // when the app catches up the next attempt will deliver
+        // fully and we ACK then.
         Log::getLog().info(ALINK_TAG,
-            "RX cobsSeq=%u app buffer full: wanted %d, accepted %d  "
-            "(app falling behind wire; frame dropped, link stays OK)",
+            "RX cobsSeq=%u app buffer full: wanted %d accepted %d (frame NOT acked, sender will retransmit). "
+            "If this fires on the FIRST frame, check the EspHal boot log for "
+            "xStreamBufferCreate failure (heap too small or streamBufferSize too large).",
             (unsigned)cobsSeq, n, acc);
-        gaps++;   // count it as a gap so the dashboard shows it
-        // Return true so feed() stops handing the rest of this event to
-        // the parser. The wire is fine but the consumer is wedged; draining
-        // the rest of the event would just queue more bytes the consumer
-        // can't read. The next UART event will retry once the app drains.
+        gaps++;
         return true;
     }
+    // ACK the frame so the sender frees its retransmit slot.
+    sendAckFrame_unlocked(cobsSeq);
     Log::getLog().debug(ALINK_TAG,
-        "RX cobsSeq=%u  %d payload bytes  -> app buffer (rxBytes=%llu)",
+        "RX cobsSeq=%u  %d payload bytes  acked (rxBytes=%llu)",
         (unsigned)cobsSeq, n, (unsigned long long)rxBytes);
+    // Hex dump of the first up-to-10 payload bytes, ASCII hex space-separated.
+    // Gated by Log::verbose(): emitted only when level >= VERBOSE, so debug
+    // and below stay clean.
+    if (n > 0) {
+        int hd = n < 10 ? n : 10;
+        char hex[10 * 3 + 1] = {};
+        for (int i = 0; i < hd; i++) {
+            snprintf(hex + i * 3, 4, "%02X ", b[i]);
+        }
+        Log::getLog().verbose(ALINK_TAG,
+            "RX hex first %d: %s", hd, hex);
+    }
     if (errs > 0) errs = 0;
+    return false;
+}
+
+bool ALink::onAck(uint8_t ackedCobsSeq) {
+    if (state != State::OK) return false;
+    if (!ackedPending_[ackedCobsSeq]) {
+        // Duplicate ACK or ACK for a cobsSeq we never sent (shouldn't
+        // happen after a fresh link, but can on wraparound). Drop.
+        Log::getLog().debug(ALINK_TAG,
+            "RX ACK for cobsSeq=%u DROPPED (not in pending map)", (unsigned)ackedCobsSeq);
+        return false;
+    }
+    ackedPending_[ackedCobsSeq] = false;
+    retxCount_[ackedCobsSeq]    = 0;
+    // Look up the base seq for this chunk so the facade can decrement
+    // the right chunks_left counter (or free the slot if the chunk
+    // was the only one). For keepalives, baseSeq_[s] is the keepalive
+    // cobsSeq itself (set by sendCobsFrameAcked_unlocked with
+    // NO_BASE), and the facade ignores those — no cache entry was
+    // created for a keepalive.
+    uint8_t base = baseSeq_[ackedCobsSeq];
+    baseSeq_[ackedCobsSeq] = 0;
+    Log::getLog().verbose(ALINK_TAG,
+        "RX ACK cobsSeq=%u (base=%u)  slot freed", (unsigned)ackedCobsSeq, (unsigned)base);
+    // Notify the facade (AutoLink) so it can free its payload cache
+    // slot. The callback may run user code (malloc/free); it runs
+    // under our lock, which is the same lock the cache uses, so no
+    // extra synchronization needed.
+    if (arqAckCallback_) arqAckCallback_(base, arqCtx_);
     return false;
 }
 
@@ -782,19 +943,10 @@ bool ALink::onFrameError() {
 void ALink::onBreak() {
     hw.lock();
     Log::getLog().info(ALINK_TAG, "BREAK received -> re-sweep");
-    reset_unlocked(true);  // a peer-driven BREAK is a real disconnect
+    reset_unlocked(true);  // peer-driven BREAK is a real disconnect
     hw.unlock();
 }
 
-// =============================================================================
-// onTimer — split into OK / SWP / LCK helpers. The OK path is the
-// watchdog + keepalive; SWP splits into master (sends PING and steps
-// through bauds) and Pong (scores the current baud and advances); LCK
-// is the master sending REQs with a retry cap. The SWP-master branch
-// in v4.0.2 churned lock/unlock 4 times within one call — that made
-// it easy to introduce a state-read race against onRx. v4.0.3 keeps
-// the lock for the whole branch.
-// =============================================================================
 void ALink::onTimer() {
     State s;
     int curSpd;
@@ -820,26 +972,109 @@ void ALink::onTimerOk_unlocked() {
         hw.sendBreak();
         return;
     }
-    if (cfg.reliableMode && (uint32_t)(now - lastTxMs) >= (uint32_t)okTickMs()) {
-        // Keepalive shape: a cobsSeq-bearing 0-payload data frame. The
-        // 0-payload form of sendCobsFrame_unlocked emits the exact same
-        // 5 wire bytes as the hand-rolled encoder we used to inline here
-        // (verified: for any cobsSeq in 0..255, the resulting wire is
-        // [0x00, COBS(cobsSeq|CRC8(cobsSeq)), 0x00] = 5 bytes). Funneling
-        // through the real encoder means the keepalive can never drift
-        // from the data path's wire format.
+    if (cfg.reliableMode && (uint32_t)(now - lastTxMs) >= (uint32_t)(cfg.idleTimeoutMs / 3)) {
+        // Keepalive shape: a cobsSeq-bearing 0-payload data frame.
+        // Funneling through the real encoder means the keepalive can
+        // never drift from the data path's wire format.
+        // Note: the keepalive interval is cfg.idleTimeoutMs / 3
+        // directly, NOT okTickMs() — okTickMs() is the timer tick
+        // rate (driven by ACK_RTO_MS for retransmit scan), which is
+        // much faster than the keepalive interval.
         sendCobsFrame_unlocked(nullptr, 0);
         lastTxMs = now;
+    }
+    // v5 ARQ: notify the facade hook for any expired slot. The
+    // facade (AutoLink) retransmits the cached payload from its
+    // own state. If the facade returns true (= "drop the link"),
+    // we tear down.
+    if (cfg.reliableMode) {
+        for (int s = 0; s < 256; s++) {
+            if (!ackedPending_[s]) continue;
+            uint32_t age = now - sentAtMs_[s];
+            if (age < ACK_RTO_MS) continue;
+            if (retxCount_[s] >= MAX_RETX) {
+                Log::getLog().error(ALINK_TAG,
+                    "cobsSeq=%u exceeded MAX_RETX=%d (lost wire) -> dropping link",
+                    (unsigned)s, (int)MAX_RETX);
+                reset_unlocked(true);
+                hw.unlock();
+                hw.sendBreak();
+                return;
+            }
+            retxCount_[s]++;
+            sentAtMs_[s] = now;
+            // Translate the timed-out chunk to its message's base
+            // cobsSeq. The facade's cache is keyed by base — a
+            // chunk seq lookup would miss and incorrectly drop the
+            // link. baseSeq_[s] == s for keepalives / 1-chunk
+            // messages; the cache handles those the same way.
+            uint8_t base = baseSeq_[s];
+            Log::getLog().warning(ALINK_TAG,
+                "cobsSeq=%u (base=%u) ACK timeout (age=%lu ms, retx #%d) -> retransmit",
+                (unsigned)s, (unsigned)base, (unsigned long)age, retxCount_[s]);
+            // Delegate the actual resend to the facade (AutoLink).
+            // It returns true to drop the link (e.g. cache miss).
+            if (arqRetxCallback_) {
+                if (arqRetxCallback_(base, arqCtx_)) {
+                    reset_unlocked(true);
+                    hw.unlock();
+                    hw.sendBreak();
+                    return;
+                }
+            } else {
+                // No facade: protocol layer can't retransmit on its
+                // own (no payload cache). Log once per link and let
+                // MAX_RETX trip on the next few ticks.
+                Log::getLog().warning(ALINK_TAG,
+                    "cobsSeq=%u ACK timeout but no ARQ facade registered; "
+                    "best-effort mode (will drop on MAX_RETX)", (unsigned)s);
+            }
+            retxNeeded_ = true;
+            break;  // one per timer tick — the facade schedules more
+        }
     }
     hw.startTimer(okTickMs());
 }
 
+int ALink::pendingAcks() const {
+    // Read-only access; the map is updated under the lock from
+    // onAck and onPayload. Not used in the hot path — for tests +
+    // diagnostics only.
+    int n = 0;
+    for (int i = 0; i < 256; i++) if (ackedPending_[i]) n++;
+    return n;
+}
+
+bool ALink::isAcked(uint8_t cobsSeq) const {
+    return !ackedPending_[cobsSeq];
+}
+
+int ALink::popRetransmitSlot() {
+    // Find a cobsSeq whose ACK has expired. Called from the
+    // facade-level timer; the facade must hold hw.lock() because
+    // we touch the same state.
+    uint32_t now = hw.nowMs();
+    for (int s = 0; s < 256; s++) {
+        if (!ackedPending_[s]) continue;
+        if (now - sentAtMs_[s] < ACK_RTO_MS) continue;
+        // Pop: clear the slot so we don't return it again on the
+        // next pop. The caller (facade) is responsible for either
+        // resending (which will re-arm the slot) or giving up.
+        uint8_t seq = (uint8_t)s;
+        ackedPending_[seq] = false;
+        retxCount_[seq]++;  // count this pop as a retransmit attempt
+        sentAtMs_[seq] = now;
+        return seq;
+    }
+    return -1;
+}
+
 void ALink::onTimerSwp_unlocked() {
     if (isMaster) {
-        if (spdI >= (int)cfg.allowedBauds.size()) {
-            // Past the last baud — should have transitioned to LCK already,
-            // but if a re-sweep raced with the end of the baud list, finish
-            // the transition now.
+        if (spdI >= (int)cfg.allowedBaudsCount) {
+            // Past the last baud — should have transitioned to LCK
+            // already, but if a re-sweep raced with the end of the
+            // baud list, finish the transition now.
             changeState_unlocked(State::LCK);
             lckRetries = 0;
             spdI = 0;
@@ -848,13 +1083,9 @@ void ALink::onTimerSwp_unlocked() {
             return;
         }
         if (pingSample == 0) {
-            // v4.0.6: demoted from INFO to DEBUG. Fires on every baud
-            // index transition during the sweep — once per baud at a
-            // 50 ms cadence for a 5-baud sweep, so ~10 lines per
-            // negotiation plus one per re-sweep. The Pong's matching
-            // log "SWP Pong: full sweep done" stays at INFO (one line
-            // per sweep, much rarer); the per-baud "Ping is now testing
-            // baud[N]" is DEBUG territory.
+            // DEBUG: fires on every baud index transition (~10 lines
+            // per negotiation). The matching Pong "full sweep done"
+            // stays at INFO (one line per sweep).
             Log::getLog().debug(ALINK_TAG, "SWP Ping baud[%d]=%lu",
                 spdI, (unsigned long)cfg.allowedBauds[spdI]);
         }
@@ -864,7 +1095,7 @@ void ALink::onTimerSwp_unlocked() {
         if (pingSample + 1 >= samples) {
             pingSample = 0;
             spdI++;
-            if (spdI < (int)cfg.allowedBauds.size()) {
+            if (spdI < (int)cfg.allowedBaudsCount) {
                 hw.setSpd(cfg.allowedBauds[spdI]);
                 hw.startTimer(cfg.delayMs);
             } else {
@@ -882,21 +1113,21 @@ void ALink::onTimerSwp_unlocked() {
     }
 
     // Pong-side SWP: score the current baud, advance, restart from 0
-    // when we wrap, fire the WIRING CHECK if a full sweep heard nothing.
+    // when we wrap, fire WIRING CHECK if a full sweep heard nothing.
     int scored = baudSweep.scoreAt(spdI);
     int needed = baudSweep.minHitsForReliable();
     if (scored < needed) {
         Log::getLog().info(ALINK_TAG,
             "SWP Pong baud[%d]=%lu scored %d/%d (%d raw bytes rx), advancing",
             spdI,
-            (unsigned long)(spdI < (int)cfg.allowedBauds.size()
+            (unsigned long)(spdI < (int)cfg.allowedBaudsCount
                             ? cfg.allowedBauds[spdI] : 0),
             scored, needed, swpRxBytes);
         swpRxBytes = 0;
         spdI++;
-        if (spdI >= (int)cfg.allowedBauds.size()) {
+        if (spdI >= (int)cfg.allowedBaudsCount) {
             bool anyPinged = false;
-            for (int i = 0; i < (int)cfg.allowedBauds.size(); i++) {
+            for (int i = 0; i < (int)cfg.allowedBaudsCount; i++) {
                 if (baudSweep.scoreAt(i) > 0) { anyPinged = true; break; }
             }
             Log::getLog().info(ALINK_TAG,
@@ -934,13 +1165,9 @@ void ALink::onTimerSwp_unlocked() {
 void ALink::onTimerLck_unlocked() {
     sendFrame_unlocked(REQ_CMD);
     lckRetries++;
-    if (lckRetries > (int)cfg.allowedBauds.size() * 2) {
-        // v4.0.6: demoted from INFO to DEBUG. Fires whenever the master
-        // gives up on a sweep and forces a re-sweep. From the operator's
-        // perspective, the visible signal that a re-sweep happened is
-        // the "Locked at N baud" line that immediately precedes this
-        // one, which is already at INFO. The detailed "how many REQs
-        // did we try before giving up" is DEBUG.
+    if (lckRetries > (int)cfg.allowedBaudsCount * 2) {
+        // DEBUG: the visible signal that a re-sweep happened is the
+        // preceding "Locked at N baud" INFO line.
         Log::getLog().debug(ALINK_TAG, "LCK timeout: no peer reply after %d REQs -> re-sweep",
                             lckRetries);
         reset_unlocked(true);
