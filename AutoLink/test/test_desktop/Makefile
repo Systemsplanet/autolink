@@ -38,7 +38,7 @@ TEST_BINS = run_test_crc run_test_cobs run_test_blink run_test_framerx \
             run_test_alink_io run_test_alink_message run_test_alink_negotiation \
             run_test_alink_error run_test_alink_watchdog run_test_alink_cobsseq \
             run_test_alink_arq run_test_alink_web run_loopback_noise \
-            run_test_alink_facade
+            run_test_alink_facade run_test_wiresim_closedloop
 
 LOOPBACK_BIN = run_loopback
 
@@ -135,6 +135,9 @@ run_test_autolink: $(AUTOLINK_SRC) AutoLinkTest.cpp
 
 run_test_alink_facade: $(AUTOLINK_SRC) AutoLinkFacadeTest.cpp
 	$(CXX) $(CXXFLAGS) $(AUTOLINK_SRC) AutoLinkFacadeTest.cpp -o $@
+
+run_test_wiresim_closedloop: $(AUTOLINK_SRC) WireSimClosedLoopTest.cpp
+	$(CXX) $(CXXFLAGS) $(AUTOLINK_SRC) WireSimClosedLoopTest.cpp -o $@
 
 run_test_alink_io: $(LINK_SRC) $(TPROTO)/ALinkIOTest.cpp
 	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/ALinkIOTest.cpp -o $@
