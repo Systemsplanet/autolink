@@ -124,18 +124,25 @@ void test_keepalive_quiet_after_recent_tx() {
 
 void test_lck_timeout() {
  std::cout << "\n=== Test: LCK Timeout Restarts the Sweep ===" << std::endl;
+ // v5.1.40: pumpClock drives each timer tick. cfg.delayMs=50;
+ // allowedBaudsCount=2 -> LCK retry threshold = 4.
  AutoLinkConfig cfg;
  cfg.allowedBauds[0] = 9600; cfg.allowedBauds[1] = 115200; cfg.allowedBaudsCount = 2; cfg.pingSamplesPerBaud = 1;
  MockHal mHal; // no peer: REQs go nowhere
  ALink ping(mHal, true, cfg);
  ping.begin();
- ping.onTimer(); // PING@9600
- ping.onTimer(); // PING@115200 -> LCK
+ mHal.pumpClock(50); // PING@9600 -> SWP tick 1
+ assert(ping.getState() == State::SWP);
+ mHal.pumpClock(50); // PING@115200 -> SWP tick 2 -> LCK
  assert(ping.getState() == State::LCK);
 
- for (int i = 0; i < 4; i++) ping.onTimer();
+ // 4 ticks in LCK (each at cfg.delayMs=50) — threshold = 2*2 = 4
+ // retries. The 4th still in LCK, the 5th triggers re-sweep.
+ for (int i = 0; i < 4; i++) {
+   mHal.pumpClock(50);
+ }
  assert(ping.getState() == State::LCK);
- ping.onTimer();
+ mHal.pumpClock(50); // 5th tick -> Drop -> SWP
  assert(ping.getState() == State::SWP);
  assert(ping.getCurrentSpdIndex() == 0);
  std::cout << "PASS" << std::endl;
