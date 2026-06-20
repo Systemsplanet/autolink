@@ -4,6 +4,55 @@ All releases, most recent first.
 
 ---
 
+## v5.1.37
+
+**Five ARQ facade bugs found and fixed. Behavioral tests added.**
+
+User audit (2026-06-19) of the v5.1.36 facade ARQ cache layer identified five distinct defects, each of which can strand cache slots and stall the link. Combined with the v5.1.36 cache-full gate (the safety net added to prevent wire bytes from going out without cache entries), these defects form a **self-deadlock**: drops leak cache slots, slots fill the cache, the gate latches, no more sends work.
+
+**Bug 1: Facade cache never cleared on link drop.** v5.1.35's fix cleared the *protocol* ARQ maps (`ackedPending_[]`, `retxCount_[]`, `sentAtMs_[]`, `baseSeq_[]`) inside `ALink::reset_unlocked`, but the *facade* cache (`pending_[32]`, `pendingCount_`, `seqToPending_[256]` in `AutoLink.h`) was untouched. The new session restarts from cobsSeq=0, never reuses the old session's high cobsSeqs, so `arqCache_freeBySeq` (called from the ACK hook) never finds the old slots to free them. `pendingCount_` stayed at whatever the previous session had. After 2-3 drops it saturated at the v5.1.36 gate (32) and `sendMsg` returned false forever.
+
+**Fix:** new `LinkResetCallback` hook on `ALink` that `reset_unlocked` fires after the protocol ARQ maps are cleared. `AutoLink` registers a trampoline that calls a new `arqCache_clearAll()`, which frees every `pending_[i].buf`, zeros `pendingCount_`, and memsets `seqToPending_` to -1. Both protocol and facade layers now clear on every drop, in lockstep.
+
+**Bug 2: `peekTxSeq()` race.** `AutoLink::sendMsg` read `link->peekTxSeq()` (lock-free) BEFORE `link->sendMsg()` (which takes the link lock). Between the two calls, the timer task could fire `sendCobsFrame_unlocked(nullptr, 0)` for the keepalive (advancing `txSeq` by 1), or an `onRx`-driven frame could advance it. The cache ended up keyed under a seq the wire never carried. The slot never got ACKed, `chunks_left` never hit 0, slot leaked. Three independent bugs (1, 2, 3) all converge on `pendingCount_ == 32`, all stall the link.
+
+**Fix:** new `ALink::sendMsgEx(b, len, &outBaseSeq)` returns the base cobsSeq the protocol stamped on the wire header, atomically under the link lock. The facade uses this returned seq for `arqCache_put`, so cache key and wire seq are the same value at the same instant. The old `peekTxSeq()+sendMsg()` pattern is gone.
+
+**Bug 3: `retx_resend` buffer leak.** `arqCache_takeRetxBuffer` transferred ownership of the malloc'd payload buffer to the caller. `retx_resend` then called `sendMsg(buf, len)` which memcpys the payload into a NEW cache slot — but `retx_resend` never `free()`d the buffer it was given. Every retransmit leaked `len` bytes. After `MAX_RETX=5` retransmits with 1024-byte messages, up to 160 KB of heap gone per dropped link.
+
+**Fix:** `retx_resend` now calls `free((void*)buf)` after `sendMsg` returns. The bytes have been memcpyd into the new cache slot synchronously under the lock, so the source buffer is unreachable from any data structure by the time the free fires.
+
+**Bug 4: Zero margin at WINDOW==ARQ_CACHE_SLOTS=32.** A single mis-keyed / leaked slot dropped effective capacity to 31, then 30, then 29... a slow ratchet to the gate. With no margin for races / leaks / unacked retries, any transient state would saturate the cache.
+
+**Fix:** `ARQ_CACHE_SLOTS = 48` (1.5x WINDOW=32). +16 KB extra heap at maxMsg=1024. WINDOW stays 32 (UtilPing's app-side pacing).
+
+**Bug 5: app-buffer-full bumps `gaps` (wire-quality counter).** When the receiver's app buffer was full, the protocol held the ACK (so the sender would retransmit) and also did `gaps++`. `gaps` is a wire-quality signal — something is wrong with the bytes on the wire. App-buffer-full is flow control — the receiver can't keep up, but the wire is fine. Counting one as the other caused the receiver's `errThreshold` to trip on a perfectly good wire, which dropped the link right when the receiver needed to slow down. The opening-burst scenario (Ping's first WINDOW messages all arriving before Pong can drain its app buffer) was the most common trigger.
+
+**Fix:** the app-buffer-full branch in `ALink::onPayload` now logs at INFO and returns, but does NOT bump `gaps` and does NOT call `err_unlocked()`. Wire-quality counters stay untouched. The ACK is still held (so the sender retransmits when the receiver catches up), but the receiver doesn't drop the link.
+
+**Tests added (six new, plus four pre-existing strengthened):**
+
+In `AutoLinkFacadeTest.cpp`:
+
+6. `test_facade_link_reset_clears_cache` — the **killer** test. Fills the cache to 24 slots, fires `linkResetHookTrampoline` (which is what `ALink::reset_unlocked` does in production), asserts the cache is empty. Pre-v5.1.37 the cache stays at 24 and after enough drops the gate latches. **Toggle-verified: reverts to FAIL.**
+7. `test_facade_repeated_drops_do_not_latch_gate` — fills cache to 20, drops, fills, drops, fills, drops, 5 cycles. Asserts cache returns to 0 after each drop. **Toggle-verified: reverts to FAIL** (cache ratchets up, gate latches).
+8. `test_facade_retx_resend_frees_taken_buffer` — takes a payload out of the cache (transferring ownership), calls `retx_resend`, source-greps for `free((void*)buf)` AFTER the `sendMsg` call. **Toggle-verified: reverts to FAIL** (no free = leak).
+9. `test_facade_sendmsg_uses_sendmsgex_not_peek` — source-greps `AutoLink::sendMsg` for the call to `link->sendMsgEx` (atomic seq+send under one lock) AND asserts `link->peekTxSeq` is NOT present in the body. **Toggle-verified: reverts to FAIL** (old pattern = TOCTOU).
+10. `test_facade_app_buffer_full_does_not_bump_gaps` — finds the app-buffer-full branch in `ALink::onPayload`, asserts no `gaps++` and no `err_unlocked` in active code inside the branch. **Toggle-verified: reverts to FAIL** (revert = wire-quality counter is bumped on flow control).
+11. `test_facade_arq_cache_slots_exceeds_window` — compile-time check that `ARQ_CACHE_SLOTS > WINDOW` (margin invariant). **Toggle-verified: reverts to FAIL** (zero margin = any leak saturates the cache).
+
+Plus, the pre-existing tests in `AutoLinkFacadeTest.cpp` were strengthened to use `AutoLink::ARQ_CACHE_SLOTS_PUBLIC` (a new public alias of the private `ARQ_CACHE_SLOTS` constant) instead of hard-coding 32. The pre-existing tests now track the cap correctly.
+
+**Disclosed limitations:**
+
+- Bug 2 (TOCTOU) and Bug 5 (wire-quality vs flow-control) are fundamentally runtime behaviors that need concurrent timer tasks and a real app buffer to fully exercise. Tests 9 and 10 are structural pins by necessity — they verify the *call site* is correct, not the *runtime behavior* under thread contention. A future change that introduces a TOCTOU in a different code path (e.g., a new helper that reads txSeq lock-free) would NOT be caught by Test 9. The fix is structural, not behavioral.
+- Bug 3 (the leak) is a malloc-trace issue at its core. Test 8 only pins the *presence* of the `free()` call, not whether it actually runs at the right time. A future change that frees the wrong buffer (e.g., double-free, free-before-use) would not be caught.
+- I cannot run the code on hardware (no ESP32 in this environment). The fixes are host + cross-compile verified. The actual "wire bytes emitted with no cache entry" scenario can only be triggered on real hardware with a real UART.
+
+All 18 C++ suites + 1 facade suite (11 tests) + 97 dashboard JS tests + 10 s loopback + 5 s loopback-noise regression all PASS. Arduino `verify_build.ino` compiles clean (45 KB RAM, 1007 KB flash). No protocol or wire-format change. v5.1.36 → v5.1.37.
+
+---
+
 ## v5.1.36
 
 **Facade regression tests + AGENTS.md discipline fix.**
