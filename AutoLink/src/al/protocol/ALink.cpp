@@ -6,6 +6,7 @@
 // through the injected ILink so this file compiles and runs on the host
 // for unit testing.
 #include "al/protocol/ALink.h"
+#include "al/protocol/LinkDecision.h"
 #include "al/util/Log.h"
 #include <cstdio>      // snprintf (RX hex dump)
 
@@ -539,9 +540,25 @@ bool ALink::sendMsgEx(const uint8_t* b, int len, uint8_t* outBaseSeq) {
         if (outBaseSeq) *outBaseSeq = 0;
         return false;
     }
+    // v5.1.39 (one-owner design): cache gate. Check the facade
+    // cache for room BEFORE stamping any cobsSeq. If the cache
+    // is full, we refuse to stamp (returns false; no wire bytes
+    // go out, no seqs consumed, no cache slot allocated). The
+    // facade then stops pumping new bytes until ACKs free a
+    // slot. The gate runs under the link lock, so the cache
+    // count and the protocol's seq state cannot diverge.
+    if (arqCacheHasRoomCallback_ && !arqCacheHasRoomCallback_(arqCtx_)) {
+        hw.unlock();
+        Log::log().warning(ALINK_TAG,
+            "sendMsgEx rejected: ARQ cache full, back-pressure. %d bytes dropped.",
+            len);
+        if (outBaseSeq) *outBaseSeq = 0;
+        return false;
+    }
 
     bool ok = true;
     uint8_t baseSeq = 0;
+    int     chunkCount = 0;
     if (cfg.reliableMode) {
         // Stamp the base seq ONCE under the lock and return it to
         // the caller. All subsequent chunks inherit the same base.
@@ -556,6 +573,16 @@ bool ALink::sendMsgEx(const uint8_t* b, int len, uint8_t* outBaseSeq) {
             txBytes += chunk;
             lastTxMs = hw.nowMs();
             offset += chunk;
+        }
+        chunkCount = 1 + (len + MAX_CHUNK - 1) / MAX_CHUNK;  // header + payload chunks
+        // v5.1.39: cache insert UNDER THE LOCK, immediately after
+        // stamping the last chunk. Seq-stamp + cache-insert +
+        // drop-clear are one atomic step. (Pre-v5.1.39: the
+        // facade did the insert outside the lock, which had two
+        // races: cache-insert vs another sender, and cache-clear
+        // vs cache-insert.)
+        if (arqCacheInsertCallback_ && chunkCount > 0) {
+            arqCacheInsertCallback_(baseSeq, b, len, (uint8_t)chunkCount, arqCtx_);
         }
     } else {
         int sent = hw.tx(b, len);
@@ -934,6 +961,12 @@ void ALink::reset_unlocked(bool count) {
     // (arqCacheClearAll) only touches the facade's own arrays,
     // which have no lock of their own today.
     if (linkResetCallback_) linkResetCallback_(arqCtx_);
+    // v5.1.39: also fire the new unified cache-clear hook (same
+    // signature, same under-lock semantics). The v5.1.37 facade
+    // wires arqCacheClearAllCallback_ = arqCacheClearAllTrampoline
+    // so this is the cache-clearing path. The legacy hook is kept
+    // for back-compat.
+    if (arqCacheClearAllCallback_) arqCacheClearAllCallback_(arqCtx_);
 }
 
 // UtilFrameRx::Listener callback for validated reliable-mode frames.
@@ -951,71 +984,55 @@ bool ALink::onPayload(uint8_t cobsSeq, const uint8_t* b, int n) {
         return true;
     }
 
-    // v5 ARQ: a missing ACK would have caused the sender to
-    // retransmit, so by the time we see cobsSeq=N the sender's
-    // retransmits have already caught up. A "gap" here means the
-    // retransmit also got lost — the link is in trouble. We log
-    // it (still counts toward gaps/lostMsgs for diagnostics).
-    //
-    // v5.1.28 (auto-baud fallback): a gap also bumps errs so the
-    // error threshold trips and triggers a drop+re-sweep at a
-    // lower baud. Without this, gaps accumulate silently and the
-    // application layer (PingPong) breaks the link manually,
-    // bypassing the protocol's baud-sweep recovery. The original
-    // code didn't bump errs because it assumed the next retransmit
-    // would catch up — but if the retransmit ALSO got lost (wire
-    // noise), we need to actually try a slower baud.
-    //
-    // A "stale" (backwards-jump) means a duplicate ACK-driven
-    // retransmit arrived after the original was acked. Drop it.
-    if (rxSeqSet) {
+    // v5.1.40: classify via the pure LinkDecision::classifyGap.
+    // The function returns GapClass (Stale / Gap / Forward) and
+    // the forward distance; this method handles the I/O side
+    // effects (counting, logging, threshold drop) based on the
+    // decision. The pure function is table-tested in
+    // LinkDecisionTest.cpp.
+    int diff = 0;
+    GapClass cls = classifyGap(cobsSeq, rxSeq, rxSeqSet, &diff);
+    if (cls == GapClass::Stale) {
+        stale++;
+        Log::log().debug(ALINK_TAG,
+            "RX cobsSeq=%u STALE: expected %u, last good=%u  %d bytes DROPPED (duplicate retransmit)",
+            (unsigned)cobsSeq, (unsigned)((uint8_t)(rxSeq + 1)),
+            (unsigned)rxSeq, n);
+        return false;
+    }
+    if (cls == GapClass::Gap) {
         uint8_t expected = (uint8_t)(rxSeq + 1);
-        if (cobsSeq != expected) {
-            int diff = (int)cobsSeq - (int)rxSeq;
-            if (diff < 0) diff += COBS_SEQ_WRAP;
-            if (diff == 0 || diff > COBS_SEQ_WRAP / 2) {
-                // Duplicate or wraparound. The original was already
-                // acked; this is just a redundant retransmit. Drop
-                // without acking again (the sender already saw our
-                // first ACK and freed the slot).
-                stale++;
-                Log::log().debug(ALINK_TAG,
-                    "RX cobsSeq=%u STALE: expected %u, last good=%u  %d bytes DROPPED (duplicate retransmit)",
-                    (unsigned)cobsSeq, (unsigned)expected, (unsigned)rxSeq, n);
-                return false;
-            }
-            gaps++;
-            uint64_t skipped = (uint64_t)(diff - 1);
-            lostMsgs += skipped;
-            // Bump errs so the threshold eventually trips if the
-            // link stays lossy. Use err_unlocked() to also handle the
-            // case where one gap already pushes us over the edge.
-            if (err_unlocked()) {
-                // Threshold tripped; sender retransmits will be
-                // ignored until the link re-sweeps to a lower baud.
-                // Log it explicitly so the operator sees the cause.
-                Log::log().warning(ALINK_TAG,
-                    "Error threshold tripped by gap (errs=%d > threshold=%d) -> dropping link for re-sweep at lower baud. "
-                    "gap=%d, +%llu lost this frame, cumulative gaps=%llu",
-                    errs, cfg.errThreshold, diff, (unsigned long long)skipped,
-                    (unsigned long long)gaps);
-                reset_unlocked(true);
-                hw.unlock();
-                hw.sendBreak();
-                return false;
-            }
+        gaps++;
+        uint64_t skipped = (uint64_t)(diff - 1);
+        lostMsgs += skipped;
+        if (err_unlocked()) {
             Log::log().warning(ALINK_TAG,
-                "RX cobsSeq=%u GAP: expected %u, last good=%u  %d bytes accepted (gap=%d, +%llu lost)",
-                (unsigned)cobsSeq, (unsigned)expected, (unsigned)rxSeq, n, diff,
-                (unsigned long long)skipped);
+                "Error threshold tripped by gap (errs=%d > threshold=%d) -> dropping link for re-sweep at lower baud. "
+                "gap=%d, +%llu lost this frame, cumulative gaps=%llu",
+                errs, cfg.errThreshold, diff, (unsigned long long)skipped,
+                (unsigned long long)gaps);
+            reset_unlocked(true);
+            hw.unlock();
+            hw.sendBreak();
+            return false;
         }
+        Log::log().warning(ALINK_TAG,
+            "RX cobsSeq=%u GAP: expected %u, last good=%u  %d bytes accepted (gap=%d, +%llu lost)",
+            (unsigned)cobsSeq, (unsigned)expected, (unsigned)rxSeq, n, diff,
+            (unsigned long long)skipped);
     }
     rxSeq = cobsSeq;
     rxSeqSet = true;
 
+    // v5.1.40: decide via the pure LinkDecision::decideAppBuf.
+    // The function takes (accepted, incoming) and returns Accept /
+    // HoldAck based on whether the push was partial. The push
+    // itself is I/O so we do it here; the decision is whether
+    // to hold the ACK if not all bytes fit.
     int acc = hw.pushAppBuf(b, n);
     rxBytes += acc;
-    if (acc < n) {
+    AppBufAction appAction = decideAppBuf(acc, n);
+    if (appAction == AppBufAction::HoldAck || acc < n) {
         // App-buffer-full — app is falling behind. We can't ACK
         // a frame we didn't fully deliver (the sender would free
         // its slot and the next retransmit would be a duplicate).
@@ -1152,40 +1169,51 @@ void ALink::onTimer() {
 void ALink::onTimerOk_unlocked() {
     if (cfg.idleTimeoutMs <= 0) return;
     uint32_t now = hw.nowMs();
-    // v5.1.31: facade-driven link pause. Skip both the idle-drop
-    // check AND the keepalive emission so the operator can inspect
-    // the link without tearing it down. The peer side has its own
-    // pause flag (independently set by its facade).
+    // v5.1.40: idle-watchdog decision is pure.
+    // decideIdleWatchdog(ageMs, idleTimeoutMs) returns Hold | Drop.
+    // v5.1.31: linkPaused suppresses idle-drop AND keepalive.
     if (linkPaused_) return;
-    if ((uint32_t)(now - lastRxMs) > (uint32_t)cfg.idleTimeoutMs) {
-        Log::log().info(ALINK_TAG, "Idle for %u ms (limit %d) -> dropping link",
-                           (unsigned)(now - lastRxMs), cfg.idleTimeoutMs);
-        reset_unlocked(true);
-        hw.unlock();
-        hw.sendBreak();
-        return;
+    {
+        uint32_t rxAge = now - lastRxMs;
+        IdleAction idleAct = decideIdleWatchdog(rxAge, cfg.idleTimeoutMs);
+        if (idleAct == IdleAction::Drop) {
+            Log::log().info(ALINK_TAG, "Idle for %u ms (limit %d) -> dropping link",
+                               (unsigned)rxAge, cfg.idleTimeoutMs);
+            reset_unlocked(true);
+            hw.unlock();
+            hw.sendBreak();
+            return;
+        }
     }
-    if (cfg.reliableMode && (uint32_t)(now - lastTxMs) >= (uint32_t)(cfg.idleTimeoutMs / 3)) {
-        // Keepalive shape: a cobsSeq-bearing 0-payload data frame.
-        // Funneling through the real encoder means the keepalive can
-        // never drift from the data path's wire format.
-        // Note: the keepalive interval is cfg.idleTimeoutMs / 3
-        // directly, NOT okTickMs() — okTickMs() is the timer tick
-        // rate (driven by ACK_RTO_MS for retransmit scan), which is
-        // much faster than the keepalive interval.
-        sendCobsFrame_unlocked(nullptr, 0);
-        lastTxMs = now;
+    // v5.1.40: keepalive decision is pure. Returns Hold | Emit
+    // based on (txAge, idleTimeoutMs/3, linkPaused). The shape
+    // is a cobsSeq-bearing 0-payload data frame so the receiver's
+    // gap detection sees traffic even when the app has nothing
+    // to send. Funneling through the real encoder means the
+    // keepalive can never drift from the data path's wire format.
+    if (cfg.reliableMode) {
+        KeepaliveAction kaAct = decideKeepalive(now - lastTxMs,
+                                                cfg.idleTimeoutMs,
+                                                false /* linkPaused already returned */);
+        if (kaAct == KeepaliveAction::Emit) {
+            sendCobsFrame_unlocked(nullptr, 0);
+            lastTxMs = now;
+        }
     }
-    // v5 ARQ: notify the facade hook for any expired slot. The
-    // facade (AutoLink) retransmits the cached payload from its
-    // own state. If the facade returns true (= "drop the link"),
-    // we tear down.
+    // v5.1.40: ARQ retransmit decision is pure. For each pending
+    // slot, decideArqSlot(ageMs, retxCount, ackRtoMs, maxRetx)
+    // returns Hold | Retx | Drop. The protocol applies the side
+    // effects (increment retxCount, send BREAK on Drop) based on
+    // the decision. The pure function is table-tested in
+    // LinkDecisionTest.cpp.
     if (cfg.reliableMode) {
         for (int s = 0; s < 256; s++) {
             if (!ackedPending_[s]) continue;
             uint32_t age = now - sentAtMs_[s];
-            if (age < ACK_RTO_MS) continue;
-            if (retxCount_[s] >= MAX_RETX) {
+            ArqAction arqAct = decideArqSlot(age, retxCount_[s],
+                                             ACK_RTO_MS, MAX_RETX);
+            if (arqAct == ArqAction::Hold) continue;
+            if (arqAct == ArqAction::Drop) {
                 Log::log().error(ALINK_TAG,
                     "cobsSeq=%u exceeded MAX_RETX=%d (lost wire) -> dropping link",
                     (unsigned)s, (int)MAX_RETX);
@@ -1194,6 +1222,7 @@ void ALink::onTimerOk_unlocked() {
                 hw.sendBreak();
                 return;
             }
+            // arqAct == ArqAction::Retx
             retxCount_[s]++;
             sentAtMs_[s] = now;
             // Translate the timed-out chunk to its message's base
@@ -1266,7 +1295,18 @@ int ALink::popRetransmitSlot() {
 
 void ALink::onTimerSwp_unlocked() {
     if (isMaster) {
-        if (spdI >= (int)cfg.allowedBaudsCount) {
+        // v5.1.40: baud-sweep tick decision is pure. decideSwpTick
+        // returns SendPingSame | SendPingAdvance | EnterLck based
+        // on (spdI, baudCount, pingSample, samplesPerBaud). The
+        // caller applies the side effects (advance spdI/pingSample,
+        // change state, set baud). The pure function is table-tested
+        // in LinkDecisionTest.cpp.
+        int samples = baudSweep.samplesPerBaud();
+        if (samples < 1) samples = 1;
+        bool lckExhausted = false;
+        SwpAction swpAct = decideSwpTick(spdI, (int)cfg.allowedBaudsCount,
+                                         pingSample, samples, lckExhausted);
+        if (swpAct == SwpAction::EnterLck) {
             // Past the last baud — should have transitioned to LCK
             // already, but if a re-sweep raced with the end of the
             // baud list, finish the transition now.
@@ -1277,17 +1317,12 @@ void ALink::onTimerSwp_unlocked() {
             if (isMaster) hw.startTimer(cfg.delayMs);
             return;
         }
-        if (pingSample == 0) {
-            // DEBUG: fires on every baud index transition (~10 lines
-            // per negotiation). The matching Pong "full sweep done"
-            // stays at INFO (one line per sweep).
+        if (pingSample == 0 && swpAct != SwpAction::RestartSweep) {
             Log::log().debug(ALINK_TAG, "SWP Ping baud[%d]=%lu",
                 spdI, (unsigned long)cfg.allowedBauds[spdI]);
         }
         sendFrame_unlocked(PING_CMD);
-        int samples = baudSweep.samplesPerBaud();
-        if (samples < 1) samples = 1;
-        if (pingSample + 1 >= samples) {
+        if (swpAct == SwpAction::SendPingAdvance) {
             pingSample = 0;
             spdI++;
             if (spdI < (int)cfg.allowedBaudsCount) {
@@ -1358,19 +1393,24 @@ void ALink::onTimerSwp_unlocked() {
 }
 
 void ALink::onTimerLck_unlocked() {
-    sendFrame_unlocked(REQ_CMD);
+    // v5.1.40: LCK retry decision is pure. decideLckTick returns
+    // SendReq | DropAndResweep based on (postIncrementRetries,
+    // maxRetries). The caller increments FIRST so the count
+    // reflects "this attempt completed", then asks the decision
+    // function whether the limit has been exceeded.
+    int maxRetries = (int)cfg.allowedBaudsCount * 2;
     lckRetries++;
-    if (lckRetries > (int)cfg.allowedBaudsCount * 2) {
-        // DEBUG: the visible signal that a re-sweep happened is the
-        // preceding "Locked at N baud" INFO line.
+    LckAction lckAct = decideLckTick(lckRetries, maxRetries);
+    if (lckAct == LckAction::SendReq) {
+        sendFrame_unlocked(REQ_CMD);
+        hw.startTimer(cfg.delayMs);
+    } else {
         Log::log().debug(ALINK_TAG, "LCK timeout: no peer reply after %d REQs -> re-sweep",
                             lckRetries);
         reset_unlocked(true);
         hw.unlock();
         hw.sendBreak();
-        return;
     }
-    hw.startTimer(cfg.delayMs);
 }
 
 } // namespace autolink
