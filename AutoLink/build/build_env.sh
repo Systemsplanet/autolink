@@ -8,7 +8,7 @@
 # is a no-op.
 #
 # After this script runs, the verify_build sketch can be compiled
-# with ./build/verify_build.sh.
+# with ./build/verify_build.sh. (v5.1.40: sketch moved to build/.)
 
 set -e
 
@@ -57,6 +57,6 @@ echo "  $ESP32_FQBN"
 echo ""
 echo "  arduino-cli compile --fqbn $ESP32_FQBN \\"
 echo "    --library $PWD \\"
-echo "    verify_build/verify_build.ino"
+echo "    build/verify_build.ino"
 echo ""
 echo "Or use the wrapper: ./build/verify_build.sh"
