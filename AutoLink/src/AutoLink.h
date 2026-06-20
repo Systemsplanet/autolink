@@ -82,7 +82,7 @@ public:
 namespace autolink {
 
 // Keep in sync with library.properties.
-#define AUTOLINK_VERSION "5.1.33"
+#define AUTOLINK_VERSION "5.1.34"
 
 class AutoLink : public Stream {
 private:
