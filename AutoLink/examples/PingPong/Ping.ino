@@ -1,12 +1,11 @@
-// Ping.ino — AutoLink ping node (v4.0.7).
+// Ping.ino — AutoLink ping node.
 //
 // Sends random-length messages; Pong (Pong.ino) echoes each one back.
 // Pair two ESP32 boards with TX<->RX crossed and shared GND.
 //
-// v4.0.7: unified entry point. Both Ping.ino and Pong.ino are byte-
-// identical apart from the PingPong::PING / PingPong::PONG enum
-// value. To switch a board from Ping to Pong, change the enum and
-// re-flash; no other source change needed.
+// To switch a board from Ping to Pong, change PingPong::PING to
+// PingPong::PONG and re-flash. The two .ino files are otherwise
+// identical.
 
 #include <pingpong/PingPong.h>
 using namespace autolink;
