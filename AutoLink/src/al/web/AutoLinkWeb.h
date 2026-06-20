@@ -66,6 +66,19 @@ public:
         fillModeReader_ = r; fillModeWriter_ = w;
     }
 
+    // Message-pause hook (v5.1.29): Ping registers a reader that the
+    // /stats snapshot calls once per second to read the current
+    // paused state. The dashboard reads it from /stats and reflects it
+    // in the Pause/Resume button. POST /pausemsg?p=1|0 calls the
+    // writer hook to flip the device-side state. Previously the
+    // Pause button was purely cosmetic (toggled a JS variable that
+    // only affected log polling) — Ping kept blasting bytes regardless.
+    using MsgPausedReader = bool (*)();
+    using MsgPausedWriter = void (*)(bool);
+    void setMsgPauseHook(MsgPausedReader r, MsgPausedWriter w) {
+        msgPausedReader_ = r; msgPausedWriter_ = w;
+    }
+
     // Attempt WiFi connection and start the HTTP server.
     // Logs the SSID and the *length* of the password — never the password itself.
     // Blocks in setup() for up to ~12 s while connecting; returns immediately
@@ -80,7 +93,10 @@ private:
     // ---- tunables ----
     static constexpr int         RING_CAP       = 200;    // log ring capacity (entries)
     static constexpr int         LINE_CAP       = 180;    // max bytes per log line (incl. NUL)
-    static constexpr uint32_t    WIFI_TIMEOUT_MS = 12000; // max ms to wait for WiFi
+    static constexpr uint32_t    WIFI_TIMEOUT_MS    = 12000; // max ms to wait per WiFi attempt
+    static constexpr uint32_t    WIFI_RETRY_BACKOFF_MS = 5000; // backoff between failed attempts
+    static constexpr int         WIFI_RETRY_MAX_ATTEMPTS = 0;   // 0 = retry forever; >0 = cap
+    static constexpr uint32_t    WIFI_RETRY_LOG_INTERVAL_MS = 30000; // log progress once per 30 s
     static constexpr const char* TAG            = "ALinkWeb";
 
     // ---- internal types ----
@@ -109,6 +125,12 @@ private:
     // When null, the mode field is 0 (sequential default) and /mode 404s.
     FillModeReader     fillModeReader_ = nullptr;
     FillModeWriter     fillModeWriter_ = nullptr;
+
+    // Optional hooks for message-pause (set via setMsgPauseHook).
+    // When null, the dashboard treats Pause as JS-only (cosmetic) and
+    // /pausemsg returns 404. When set, the device actually pauses.
+    MsgPausedReader    msgPausedReader_ = nullptr;
+    MsgPausedWriter    msgPausedWriter_ = nullptr;
     uint64_t           prevTx_    = 0;
     uint64_t           prevRx_    = 0;
     SemaphoreHandle_t  snapMtx_   = nullptr;
@@ -135,6 +157,7 @@ private:
     static esp_err_t handleReset(httpd_req_t* req); // POST /reset — calls resetStats()+resetErrors()
     static esp_err_t handleLevel(httpd_req_t* req); // POST /level?lv=N — set log level (0=Error,1=Info,2=Debug)
     static esp_err_t handleMode (httpd_req_t* req); // POST /mode?m=seq|rand — fill mode (Ping only)
+    static esp_err_t handleMsgPause(httpd_req_t* req); // POST /pausemsg?p=1|0 — message pause (Ping only)
     static esp_err_t handleReboot(httpd_req_t* req); // POST /reboot — esp_restart()
 };
 
