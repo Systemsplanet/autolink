@@ -150,11 +150,22 @@ static int run_loopback(int seconds, bool verbose, int mode, bool reliable) {
         if (deltaMs < 0) deltaMs = 0;
         if (deltaMs > 100) deltaMs = 100;  // clamp big gaps
 
-        // Advance each link's clock by deltaMs. One call per outer
-        // iteration is enough for the link state machine to make
-        // progress; the pipe moves data synchronously after.
-        ping.onTimer();
-        pong.onTimer();
+        // v5.1.40: pumpClock drives the link state machine from
+        // the simulated clock (no more manual onTimer). The
+        // delta comes from the wall clock but is fed to pumpClock,
+        // which advances the link's MockHal.now and fires any due
+        // onTimer automatically.
+        // Skip the manual onTimer() pair (pumpClock already fired).
+        // We do still need to manually fire each side's onTimer
+        // AFTER pumpClock if we want extra ticks beyond what the
+        // deadline triggers — but for steady-state, pumpClock +
+        // pipe_now is sufficient.
+        {
+          uint32_t pre = (uint32_t)deltaMs;
+          // Convert ms to ms (deltaMs is already in ms from chrono).
+          g_pingHal->pumpClock(pre);
+          g_pongHal->pumpClock(pre);
+        }
         pipe_now();
 
         // Once both sides are in OK, have Ping send a message every
