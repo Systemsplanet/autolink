@@ -83,7 +83,7 @@ public:
 namespace autolink {
 
 // Keep in sync with library.properties.
-#define AUTOLINK_VERSION "5.1.38"
+#define AUTOLINK_VERSION "5.1.41"
 
 class AutoLink : public Stream {
 private:
@@ -117,63 +117,53 @@ private:
     // v5 ARQ: payload cache. send() copies the payload here keyed by
     // the cobsSeq ALink assigned to the message's HEADER chunk, so
     // the cache hooks can resend the exact same bytes on retransmit.
-    // 32 slots * (cfg.maxMsg + ~16 B overhead) ≈ 32 KB at maxMsg=1024
-    // — modest for the reliability guarantee.
+    // v5.1.39 (one-owner design): the ARQ cache is keyed directly
+    // on the protocol's cobsSeq (256 entries, one per possible seq).
+    // The cache stores payload bytes for header entries; payload
+    // chunk entries are not populated. On a chunk ACK, the protocol
+    // translates chunk->base via baseSeq_[chunk] and calls
+    // arqCache_freeBySeq(base). All operations are under the
+    // protocol's link lock.
     //
-    // A multi-chunk message shares one cache slot (one send() call =
-    // one slot, regardless of how many wire chunks it became). The
-    // protocol tracks per-chunk ACK state; the slot is freed only
-    // when ALL chunks of the message have been ACKed (chunks_left
-    // reaches 0). On any chunk's retransmit, the hook re-sends the
-    // WHOLE message from offset 0 under a new cobsSeq — the peer's
-    // cobsSeq gap logic then re-syncs.
+    // Memory: 256 entries * (~16 B) ≈ 4 KB. Plus malloc'd payloads
+    // for headers only (up to ARQ_CACHE_CAP at a time, sized by
+    // cfg.maxMsg).
     struct Pending {
-        uint8_t  seq = 0;         // base cobsSeq this message was sent under
-        uint8_t* buf = nullptr;   // heap-allocated copy of the payload
-        int      len = 0;
-        uint8_t  chunks_left = 0; // chunks still waiting for ACK (header + payload)
-        bool     in_use = false;
+        uint8_t* buf = nullptr;        // payload bytes (header entries only)
+        int      len = 0;              // payload length (header entries only)
+        uint8_t  chunks_left = 0;      // chunks still waiting for ACK
+        uint8_t  chunks_total = 0;     // total chunks in the message
+        bool     in_use = false;       // true = this cobsSeq has a cache entry
     };
-    // v5.1.37: ARQ_CACHE_SLOTS = 48 (1.5x WINDOW). The cache needs
-    // headroom over the link's in-flight window because: (a) on
-    // link drop + re-sweep, the new session restarts from cobsSeq=0
-    // and the old session's slots can persist briefly before the
-    // reset hook fires; (b) the cache takes a beat to receive the
-    // first round of ACKs from the new session; (c) one or two
-    // mis-keyed / leaked slots are tolerable but two or three with
-    // zero margin ratchets the cache to full and the gate latches.
-    // 32 -> 48 = +50% headroom, ~16 KB extra heap at maxMsg=1024.
-    // WINDOW stays 32 (UtilPing's app-side pacing).
-    static constexpr int ARQ_CACHE_SLOTS = 48;
+    static constexpr int ARQ_CACHE_SLOTS = 256;  // one per cobsSeq
     Pending pending_[ARQ_CACHE_SLOTS];
-    int     pendingCount_ = 0;
-    int8_t  seqToPending_[256];  // base cobsSeq -> pending[] index, -1 if none
-    void    arqCache_put(uint8_t baseSeq, const uint8_t* b, int len, uint8_t chunkCount);
-    int8_t  arqCache_findBySeq(uint8_t baseSeq);
-    void    arqCache_freeBySeq(uint8_t baseSeq);
-    bool    arqCache_retx(uint8_t baseSeq);
-    // Take the payload out of the cache for retransmission and free
-    // the slot. (v5.1.14: split out of arqCache_retx so the host
-    // test can pin the fix without driving sendMsg.)
-    void    arqCache_takeRetxBuffer(uint8_t baseSeq, uint8_t** bufOut, int* lenOut);
-    // Re-send a previously-cached payload.
-    void    retx_resend(const uint8_t* buf, int len);
-    // v5.1.37: free every pending payload, zero pendingCount_, and
-    // memset seqToPending_ to -1. Called from the link-reset hook
-    // (ALink::reset_unlocked -> linkResetCallback_). Without this,
-    // a link drop orphaned the cache: old session's cobsSeqs were
+    int     pendingCount_ = 0;     // count of in_use entries
+    // v5.1.39: gate constant. WINDOW=32 messages * ~6 chunks =
+    // ~192 cobsSeqs in flight max; cap of 240 leaves margin.
+    static constexpr int ARQ_CACHE_CAP = 240;
+    // v5.1.39: cache API. All under the protocol's link lock.
+    bool   arqCache_hasRoom();                                  // gate
+    void   arqCache_insert_unlocked(uint8_t baseSeq, const uint8_t* payload, int payloadLen, uint8_t chunkCount);
+    int8_t arqCache_findBySeq(uint8_t baseSeq);
+    void   arqCache_freeBySeq(uint8_t baseSeq);
+    bool   arqCache_retx(uint8_t baseSeq);
+    void   arqCache_takeRetxBuffer(uint8_t baseSeq, uint8_t** bufOut, int* lenOut);
+    void   retx_resend(const uint8_t* buf, int len);
+    // v5.1.39: clear all cache entries. Called from
+    // ALink::reset_unlocked (via arqCacheClearAllCallback_).
+    void   arqCache_clearAll();
     // never reclaimed by arqCache_freeBySeq (the new session
     // reuses low seqs first, doesn't sweep back through the old
     // high range), pendingCount_ never returned to 0, and the
     // v5.1.36 cache-full gate latched on the very next sendMsg.
     // This is the facade half of the v5.1.37 "drop clears both
     // layers" fix. Protocol half lives in ALink::reset_unlocked.
-    void    arqCache_clearAll();
-    // v5.1.37: C-linkage trampoline fired by ALink::reset_unlocked
-    // after it has cleared its own ARQ state. Calls
-    // arqCache_clearAll() on the facade. ctx is the AutoLink*.
-    // Public so the host test can drive the link-reset path
-    // directly (without UART) and pin the cache-clear behavior.
+    // v5.1.39: C-linkage trampoline fired by ALink::reset_unlocked
+    // (via arqCacheClearAllCallback_) after the protocol has
+    // cleared its own ARQ state. Calls arqCache_clearAll() on the
+    // facade. ctx is the AutoLink*. Public so the host test can
+    // drive the link-reset path directly (without UART) and pin
+    // the cache-clear behavior.
     static void linkResetHookTrampoline(void* ctx);
 
     // v5 ARQ trampolines. The protocol layer takes plain C function
@@ -181,6 +171,10 @@ private:
     // AutoLink. Defined in AutoLink.cpp.
     static bool arqAckHookTrampoline(uint8_t ackedSeq, void* ctx);
     static bool arqRetxHookTrampoline(uint8_t retxSeq, void* ctx);
+    // v5.1.39: cache trampolines (gate, insert, clearAll).
+    static bool arqCacheHasRoomTrampoline(void* ctx);
+    static void arqCacheInsertTrampoline(uint8_t baseSeq, const uint8_t* payload, int payloadLen, uint8_t chunkCount, void* ctx);
+    static void arqCacheClearAllTrampoline(void* ctx);
 
 public:
     // Cache accessors for the host test (v5.1.14). These let the
@@ -214,7 +208,10 @@ public:
     // production callers go through send() / sendMsg() / the hook
     // trampolines.
     void test_arqCache_put(uint8_t baseSeq, const uint8_t* b, int len, uint8_t chunkCount)
-        { arqCache_put(baseSeq, b, len, chunkCount); }
+        { arqCache_insert_unlocked(baseSeq, b, len, chunkCount); }
+    // v5.1.39: test hooks for the gate and freeBySeq.
+    bool test_arqCache_hasRoom() { return arqCache_hasRoom(); }
+    void test_arqCache_freeBySeq(uint8_t s) { arqCache_freeBySeq(s); }
     bool test_arqCache_retx(uint8_t baseSeq) { return arqCache_retx(baseSeq); }
     void test_arqCache_takeRetxBuffer(uint8_t baseSeq, uint8_t** bufOut, int* lenOut)
         { arqCache_takeRetxBuffer(baseSeq, bufOut, lenOut); }
@@ -242,7 +239,6 @@ public:
         blinkHal.bind(&blinker);
 #endif
 #ifdef ARDUINO
-        memset(seqToPending_, -1, sizeof(seqToPending_));
 
         size_t need = 2 * 16 * (cfg.maxMsg + MSG_HDR);
         if (cfg.streamBufferSize < need) cfg.streamBufferSize = need;
@@ -259,7 +255,6 @@ public:
         // latches.
         link->setLinkResetHook(&linkResetHookTrampoline, this);
 #else
-        memset(seqToPending_, -1, sizeof(seqToPending_));
         // Mirror the ARDUINO-side auto-sizing so getStreamBufferSize
         // returns the same value on host. (Disclosed v5.1.14.)
         size_t need = 2 * 16 * (cfg.maxMsg + 6);
@@ -276,8 +271,18 @@ public:
         // that need to be released in ~EspHal().
         hal = ILinkPtr(std::make_unique<EspHal>(u_num, rx_pin, tx_pin, cfg).release());
         link = std::make_unique<ALink>(*hal, isMasterNode, cfg);
-        link->setArqHooks(&arqAckHookTrampoline, &arqRetxHookTrampoline, this);
-        link->setLinkResetHook(&linkResetHookTrampoline, this);
+        // v5.1.39: unified ARQ cache hooks. The gate check (hasRoom)
+        // and the cache insert happen UNDER THE LINK LOCK in
+        // sendMsgEx; the cache clear happens UNDER THE LINK LOCK
+        // in reset_unlocked. ack and retx still fire from the
+        // protocol layer; ack clears the matching cache slot,
+        // retx triggers a retransmit.
+        link->setArqCacheHooks(&arqAckHookTrampoline,
+                               &arqRetxHookTrampoline,
+                               &arqCacheHasRoomTrampoline,
+                               &arqCacheInsertTrampoline,
+                               &arqCacheClearAllTrampoline,
+                               this);
 #endif
     }
 
@@ -314,7 +319,6 @@ public:
     // be misused on real hardware (the test's MockHal is not a
     // real ILink).
     AutoLink(ILink* hal_in, bool isMasterNode, AutoLinkConfig cfg = AutoLinkConfig()) {
-        memset(seqToPending_, -1, sizeof(seqToPending_));
         // Mirror the ARDUINO-side auto-sizing so getStreamBufferSize
         // returns the same value on host. (Disclosed v5.1.14.)
         size_t need = 2 * 16 * (cfg.maxMsg + 6);
@@ -327,19 +331,26 @@ public:
         hal = ILinkPtr(hal_in);
         link = std::make_unique<ALink>(*hal, isMasterNode, cfg);
         // v5 ARQ: register cache hooks with the protocol layer.
-        link->setArqHooks(&arqAckHookTrampoline, &arqRetxHookTrampoline, this);
-        // v5.1.37: register the link-reset hook so ALink::reset_unlocked
-        // can also clear the facade's payload cache. Without this, a
-        // link drop orphans the cache and the v5.1.36 cache-full gate
-        // latches.
-        link->setLinkResetHook(&linkResetHookTrampoline, this);
+        // v5.1.39: unified ARQ cache hooks (same as production).
+        link->setArqCacheHooks(&arqAckHookTrampoline,
+                               &arqRetxHookTrampoline,
+                               &arqCacheHasRoomTrampoline,
+                               &arqCacheInsertTrampoline,
+                               &arqCacheClearAllTrampoline,
+                               this);
     }
 #endif
 
+    // v5.1.40: drive begin() on host too. ALink::begin() schedules
+    // the SWP timer (and on master, sends the initial BREAK), which
+    // is the entry point for all time-dependent behavior. Without
+    // calling begin() on host, MockHal::startTimer is never called,
+    // the timer is never armed, and the host test can't drive the
+    // SWP/OK/LCK state machine via clock injection. On host the
+    // EspHal stub's begin() is a no-op (no UART to start), so this
+    // is safe.
     void begin() {
-#ifdef ARDUINO
-        hal->begin();
-#endif
+        link->begin();
     }
 
     void blinkWait(int n, int onMs = 60, int offMs = 60, long delayMs = 0) {
@@ -398,39 +409,19 @@ public:
     void flush() override { link->flush(); }
     int read(uint8_t* b, int max_len) { return link->read(b, max_len); }
 
+    // v5.1.39 (one-owner design): sendMsg is a thin wrapper
+    // around link->sendMsgEx. The protocol now owns the gate
+    // check (hasRoom callback) AND the cache insert (insert
+    // callback), both UNDER THE LINK LOCK. The facade no longer
+    // touches seqs, the seqToPending_[] translation, or the
+    // cache's pendingCount_ -- those are all sequenced by the
+    // same mutex as the protocol's seq stamps. The pre-v5.1.39
+    // "put-outside-lock race" and "cache gate latches because
+    // the facade's count drifted from the protocol's" bug
+    // classes are eliminated by construction.
     bool sendMsg(const uint8_t* b, int len) {
         if (len <= 0) return link->sendMsg(b, len);
-        // v5.1.35/5.1.36/5.1.37: stall before sending wire bytes if
-        // the ARQ cache is full. The cache is sized to give margin
-        // over the link's WINDOW (see ARQ_CACHE_SLOTS), but a burst
-        // that fills the cache still must wait for ACKs to free
-        // slots before pumping more bytes. We refuse to send here,
-        // which propagates as sendMsg=false to the caller
-        // (Ping::loop), which stops pumping new bytes. The next loop
-        // tick will retry once ACKs have freed slots.
-        if (pendingCount_ >= ARQ_CACHE_SLOTS) {
-            Log::log().warning("AutoLink",
-                "ARQ cache full (%d pending); sendMsg stalling until ACKs free a slot. "
-                "This is back-pressure, not an error.",
-                pendingCount_);
-            return false;
-        }
-        // v5.1.37: sendMsgEx returns the base cobsSeq the protocol
-        // stamped on the wire, atomically under the link lock. The
-        // old peekTxSeq()+sendMsg() pair had a race: a keepalive
-        // (sendCobsFrame_unlocked(nullptr,0) on the timer task) or
-        // an onRx-driven frame could advance txSeq between the peek
-        // and the actual send, so the cache ended up keyed under a
-        // seq the wire never carried. The slot would never get
-        // ACKed, chunks_left never reached 0, slot leaked,
-        // pendingCount_ crept to ARQ_CACHE_SLOTS, gate latched.
-        uint8_t seq = 0;
-        bool ok = link->sendMsgEx(b, len, &seq);
-        if (ok) {
-            int payloadChunks = (len + MAX_CHUNK - 1) / MAX_CHUNK;
-            arqCache_put(seq, b, len, (uint8_t)(1 + payloadChunks));
-        }
-        return ok;
+        return link->sendMsgEx(b, len, nullptr);
     }
     int  recvMsg(uint8_t* b, int max_len) {
         return link->recvMsg(b, max_len);
