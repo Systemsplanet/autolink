@@ -82,7 +82,7 @@ public:
 namespace autolink {
 
 // Keep in sync with library.properties.
-#define AUTOLINK_VERSION "5.1.34"
+#define AUTOLINK_VERSION "5.1.36"
 
 class AutoLink : public Stream {
 private:
@@ -113,7 +113,8 @@ private:
         uint8_t  chunks_left = 0; // chunks still waiting for ACK (header + payload)
         bool     in_use = false;
     };
-    Pending pending_[32];
+    static constexpr int ARQ_CACHE_SLOTS = 32; // matches WINDOW; see sendMsg()
+    Pending pending_[ARQ_CACHE_SLOTS];
     int     pendingCount_ = 0;
     int8_t  seqToPending_[256];  // base cobsSeq -> pending[] index, -1 if none
     void    arqCache_put(uint8_t baseSeq, const uint8_t* b, int len, uint8_t chunkCount);
@@ -272,6 +273,24 @@ public:
 
     bool sendMsg(const uint8_t* b, int len) {
         if (len <= 0) return link->sendMsg(b, len);
+        // v5.1.35/5.1.36: stall before sending wire bytes if the ARQ cache
+        // is full. The cache is sized to the link's WINDOW (32 slots)
+        // but each message can occupy 2-6 cobsSeq slots in the wire
+        // path (header + payload chunks). On a Ping unpause burst
+        // the cache would overflow after WINDOW messages, but the
+        // wire would happily keep transmitting — guaranteeing a
+        // future link drop when those frames need retransmit (the
+        // cache lookup returns -1, the protocol gives up). We
+        // refuse to send here, which propagates as sendMsg=false to
+        // the caller (Ping::loop), which stops pumping new bytes.
+        // The next loop tick will retry once ACKs have freed slots.
+        if (pendingCount_ >= ARQ_CACHE_SLOTS) {
+            Log::log().warning("AutoLink",
+                "ARQ cache full (%d pending); sendMsg stalling until ACKs free a slot. "
+                "This is back-pressure, not an error.",
+                pendingCount_);
+            return false;
+        }
         uint8_t seq = link->peekTxSeq();
         bool ok = link->sendMsg(b, len);
         if (ok) {
