@@ -195,6 +195,15 @@ console.log('[autolink] starting up…');
 // poll reconciles in case anything diverges.
 var logPaused=false,msgPaused=true,logFullOpen=false,lastSeq=0,fails=0,busy=false,currentLvl=null;
 var currentMode=null;
+// v5.1.33: device role as seen by the dashboard. Null = unknown
+// (before first /stats). Drives the ping-only controls' visibility
+// at the JS level so we never show a Pause/Start button that will
+// only flicker when clicked. CSS hides the same elements via
+// body[data-role="pong"] but that requires the first /stats poll
+// to land; before then, the button is briefly visible AND clickable.
+// Now JS hides them immediately on Pong reveal, AND ignores clicks
+// while role is null (the click handler is a no-op).
+var deviceRole=null;
 
 function fallbackCopy(text,b){
   var ta=document.createElement('textarea');
@@ -354,34 +363,36 @@ function togglePause(){
   ['pbtn','pbtn2'].forEach(function(id){var b=document.getElementById(id);if(b)b.textContent=lbl;});
   console.log('[autolink] button: log scroll '+(logPaused?'paused':'resumed'));
 }
-// v5.1.29: toggleMsgPause now hits the device (POST /pausemsg) AND
-// updates the local JS state. Previously the button only flipped a
-// JS variable that affected log polling; Ping kept blasting bytes
-// regardless. Now the operator's button click is honored by the
-// firmware: Ping starts paused at boot and waits for /pausemsg?p=0
-// before sending its first byte. The button label also reconciles
-// with /stats.msgPaused on every poll so the UI reflects the device's
-// actual state (handles refresh mid-session, race on boot, etc.).
+// v5.1.29: toggleMsgPause hits the device (POST /pausemsg) AND
+// updates the local JS state. v5.1.33: the local flip is no longer
+// optimistic-then-revert — that caused a visible 100 ms flicker
+// ("Pause" briefly showing on Pong before reverting to "Start"
+// when /pausemsg returned 404). Now the button is bound only when
+// deviceRole === 'Ping'; on Pong the click is a no-op, and the
+// element is hidden by JS as soon as the role is known. The CSS
+// rule (body[data-role="pong"] .ping-only{display:none}) is the
+// belt-and-suspenders second line of defense.
 async function toggleMsgPause(){
-  // Optimistic UI flip — the device round-trip is async.
+  // v5.1.33: ignore clicks until we know the device is Ping. If
+  // the click somehow fires (CSS not yet applied, race on page
+  // load), this guard prevents the visible Pause→Start flicker.
+  if(deviceRole!=='Ping'){
+    console.log('[autolink] toggleMsgPause ignored — device role is '+deviceRole+' (not Ping)');
+    return;
+  }
   msgPaused=!msgPaused;
   applyMsgPauseLabel();
   console.log('[autolink] button: message pause -> '+msgPaused+' (sending /pausemsg)');
   try{
     var r=await tfetch('/pausemsg?p='+(msgPaused?'1':'0'),{method:'POST'},5000);
     if(!r.ok){
-      // 404 = Pong side (no hook). Revert local state so the UI
-      // doesn't lie about a state the device doesn't support.
-      if(r.status===404){
-        msgPaused=!msgPaused;
-        applyMsgPauseLabel();
-        console.log('[autolink] /pausemsg 404 — this device does not support device-side pause (Pong?)');
-      } else {
-        console.warn('[autolink] /pausemsg returned '+r.status+' — local UI shows optimistic state');
-      }
+      // No optimistic-flip-and-revert anymore: if /pausemsg fails
+      // for any reason, log it but don't touch msgPaused. The next
+      // /stats poll will reconcile.
+      console.warn('[autolink] /pausemsg returned '+r.status+' — local UI shows last-known state until /stats reconciles');
     }
   } catch(e){
-    console.warn('[autolink] /pausemsg fetch failed: '+(e&&e.message?e.message:e)+' — local UI shows optimistic state');
+    console.warn('[autolink] /pausemsg fetch failed: '+(e&&e.message?e.message:e)+' — local UI shows last-known state until /stats reconciles');
   }
 }
 function applyMsgPauseLabel(){
@@ -528,9 +539,18 @@ async function poll(){
     // Element IDs are tagged with the class .ping-only and toggled
     // by the `data-role` attribute on the body.
     if(d.role==='Ping'){
+      deviceRole='Ping';
       document.body.setAttribute('data-role','ping');
     }else if(d.role==='Pong'){
+      deviceRole='Pong';
       document.body.setAttribute('data-role','pong');
+      // v5.1.33: hide ping-only elements immediately via JS so the
+      // Pause/Start button disappears the moment we know it's Pong,
+      // not on the next CSS re-layout. Belt-and-suspenders with the
+      // CSS rule (body[data-role="pong"] .ping-only{display:none}).
+      document.querySelectorAll('.ping-only').forEach(function(el){
+        el.style.display='none';
+      });
     }
     // Reconcile the level radio to whatever the device is currently at.
     if(d.lvl!==undefined&&d.lvl!==null&&String(d.lvl)!==currentLvl){
