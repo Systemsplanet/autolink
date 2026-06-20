@@ -20,7 +20,7 @@ for context.**
   tests do NOT compile `AutoLinkWeb.cpp`** — they only cover
   `AutoLinkWebCore.cpp`. Any change to the Arduino-only glue file
   needs an actual cross-compile to verify.
-- `verify_build/verify_build.ino` — minimal Arduino sketch that
+- `build/verify_build/verify_build.ino` — minimal Arduino sketch that
   exercises every public `AutoLink` / `AutoLinkWeb` API. Use it
   to verify an actual ESP32 build before declaring anything done.
 - `test/test_desktop/loopback_test.cpp` — host-side loopback that
@@ -326,6 +326,107 @@ for context.**
     `WireSimClosedLoopTest.cpp`. Don't put such tests in
     `AutoLinkFacadeTest.cpp` — those test the cache in isolation;
     the closed loop is the missing dimension.
+
+19c. **Time and scheduling are injectable; idle-timeout, ACK RTO,
+    and SWP/LCK stall are sub-ms deterministic host tests.** Pre-
+    v5.1.40 had three time-dependent paths unreachable on host:
+    idle watchdog (`cfg.idleTimeoutMs`), ACK retransmit timeout
+    (`ACK_RTO_MS`), and SWP/LCK stall retries. Either you waited
+    real wall-clock time (not feasible) or you called `onTimer()`
+    unconditionally (which doesn't faithfully simulate "5 s of
+    idle"). v5.1.40 adds `MockHal::pumpClock(deltaMs)` —
+    advances the simulated clock AND fires `onTimer()` only when
+    the protocol's scheduled deadline has elapsed. Same
+    chokepoint in production: `EspHal::startTimer(ms)` schedules
+    a FreeRTOS timer that calls `link->onTimer()` when it fires.
+    Both paths are deterministic in their respective contexts.
+    `MockHal::runFor(targetMs)` is a convenience that loops
+    `pumpClock` until total elapsed. **Any new time-dependent
+    behavior MUST be reachable via `pumpClock`/`runFor`** — if
+    you add a wall-clock wait or a `while(!deadline)` poll
+    without going through the timer scheduling API, the host test
+    suite will silently miss it. Companion rule: **`ALink::begin()`
+    MUST be called from `AutoLink::begin()` on host too** (was
+    gated to ARDUINO pre-v5.1.40). Without it, `MockHal::startTimer`
+    is never called, no timer is armed, and host tests can't
+    drive the state machine. The change is safe on host because
+    `EspHal::begin()` is a no-op there.
+    
+    The three deterministic clock tests live in
+    `ClockInjectionTest.cpp` (added v5.1.40): idle watchdog
+    drops link after `cfg.idleTimeoutMs` of simulated silence;
+    ACK timeout at `ACK_RTO_MS` triggers retransmit on a
+    one-way wire; SWP/LCK stall forces `sendBreak()` after
+    `allowedBaudsCount * 2 * cfg.delayMs`. Toggle-verified:
+    reverting `pumpClock` to a no-op fails test 1.
+
+19d. **Pure decision logic separated from I/O, table-tested.**
+    Protocol state decisions are pure free functions returning
+    enums (no state, no I/O, no thread, no log). Side effects
+    (counter bumps, log calls, state mutations, hardware calls)
+    live in the caller. The decision function is table-tested
+    exhaustively with no hardware and no mocks. The I/O caller
+    is the existing ALink test coverage.
+
+    Pattern (see `src/al/protocol/LinkDecision.h`, added
+    v5.1.41):
+
+    ```cpp
+    enum class ArqAction { Hold, Retx, Drop };
+    inline ArqAction decideArqSlot(uint32_t ageMs, uint8_t retxCount,
+                                   uint32_t ackRtoMs, uint8_t maxRetx);
+    ```
+
+    Seven decisions in v5.1.41: `classifyGap` (gap/stale/
+    forward), `decideArqSlot` (ARQ hold/retx/drop), `decideSwpTick`
+    (sweep same/advance/lck/restart), `decideLckTick`
+    (retry/drop), `decideIdleWatchdog` (hold/drop),
+    `decideKeepalive` (hold/emit), `decideAppBuf` (accept/holdack).
+
+    Toggle-verified: renaming any of the 7 decision functions
+    causes `LinkDecisionTest` to fail to compile. Reverting
+    `ALink.cpp` to inline decisions does NOT break
+    `LinkDecisionTest` (test pins the function, not the
+    caller). The `_unlocked` suffix on the caller is doing the
+    job a type should do — a pure function that can't touch the
+    lock can't race.
+
+19b. **One owner for in-flight state: the protocol owns the seq
+    stamps; the facade owns payload storage, sequenced by the same
+    mutex.** Pre-v5.1.39 had a two-layer split: the protocol
+    tracked `ackedPending_[s]`, `retxCount_[s]`, `sentAtMs_[s]`,
+    `baseSeq_[s]`; the facade tracked `pending_[48]`,
+    `pendingCount_`, and a `seqToPending_[256]` translation. The
+    layers were sequenced by different locks (the protocol's
+    link lock vs the facade's implicit single-threaded access).
+    This produced a class of races the user identified: gate
+    latches because the facade's count drifted from the
+    protocol's stamped seqs; cache-insert races seq-stamp;
+    drop-clear races cache-insert.
+
+    v5.1.39 collapses the split: the protocol owns ALL
+    seq-stamping (gate check, cobsSeq stamping, cache-insert
+    callback, drop-clear callback — all under `hw.lock()`). The
+    facade owns payload bytes, but only via function-pointer
+    callbacks (`ArqCacheHasRoomCallback`,
+    `ArqCacheInsertCallback`, `ArqCacheClearAllCallback`) that
+    fire INSIDE the protocol's lock. The cache is keyed directly
+    on `cobsSeq` (`pending_[256]`, one per seq), so there's no
+    translation table and no race on lookup.
+
+    **Any new cache state in the facade MUST be one of: (a)
+    read-only from the protocol's perspective, (b) mutated only
+    via a callback the protocol invokes under its lock, or (c)
+    protected by a lock of its own (avoid this — keep one
+    lock). Never add a new field to `pending_[]` that the
+    protocol also tracks — that recreates the two-layer split.**
+    The `chunks_total` field added in v5.1.39 is set by the
+    protocol via the insert callback and read by the retx
+    callback — both under the protocol's lock, so it's safe.
+    Any future per-seq cache metadata must follow the same
+    pattern. The `AutoLink::sendMsg` is now a 2-line wrapper
+    around `link->sendMsgEx`; it does NOT touch the cache
+    directly. Don't add cache logic to `sendMsg`.
 
 ## Gotchas (things that bit me, do not re-discover)
 
