@@ -285,7 +285,9 @@ void test_message_small_size_boundary() {
  ALink a(mHal, true, cfg);
  ALink b(sHal, false, cfg);
  while (a.getState() != State::OK || b.getState() != State::OK) {
- a.onTimer(); b.onTimer(); pipe_data(mHal, sHal);
+ // v5.1.40: pumpClock drives each SWP/LCK tick
+    mHal.pumpClock(50); sHal.pumpClock(50);
+    pipe_data(mHal, sHal);
  }
 
  for (int sz = 1; sz <= 6; sz++) {
@@ -334,7 +336,9 @@ void test_message_explicit_size_sweep() {
  ALink b(sHal, false, cfg);
  // Negotiate to OK
  while (a.getState() != State::OK || b.getState() != State::OK) {
- a.onTimer(); b.onTimer(); pipe_data(mHal, sHal);
+ // v5.1.40: pumpClock drives each SWP/LCK tick
+    mHal.pumpClock(50); sHal.pumpClock(50);
+    pipe_data(mHal, sHal);
  }
  b.flushRx();
 
@@ -384,7 +388,9 @@ void test_app_buffer_null_simulates_disconnect() {
  ALink a(mHal, true, cfg);
  ALink b(sHal, false, cfg);
  while (a.getState() != State::OK || b.getState() != State::OK) {
- a.onTimer(); b.onTimer(); pipe_data(mHal, sHal);
+ // v5.1.40: pumpClock drives each SWP/LCK tick
+    mHal.pumpClock(50); sHal.pumpClock(50);
+    pipe_data(mHal, sHal);
  }
  b.flushRx();
 
@@ -427,7 +433,9 @@ void test_corrupt_msg_header_does_not_clear_buffer() {
  ALink a(mHal, true, cfg);
  ALink b(sHal, false, cfg);
  while (a.getState() != State::OK || b.getState() != State::OK) {
- a.onTimer(); b.onTimer(); pipe_data(mHal, sHal);
+ // v5.1.40: pumpClock drives each SWP/LCK tick
+    mHal.pumpClock(50); sHal.pumpClock(50);
+    pipe_data(mHal, sHal);
  }
  b.flushRx();
 
@@ -489,7 +497,9 @@ void test_send_rejections_log_errors() {
  ALink a(mHal, true, cfg);
  ALink b(sHal, false, cfg);
  while (a.getState() != State::OK || b.getState() != State::OK) {
- a.onTimer(); b.onTimer(); pipe_data(mHal, sHal);
+ // v5.1.40: pumpClock drives each SWP/LCK tick
+    mHal.pumpClock(50); sHal.pumpClock(50);
+    pipe_data(mHal, sHal);
  }
 
  assert(a.write((const uint8_t*)"x", 0) == 0);
@@ -530,7 +540,9 @@ void test_corrupt_msg_header_oversize_l_resyncs() {
  ALink a(mHal, true, cfg);
  ALink b(sHal, false, cfg);
  while (a.getState() != State::OK || b.getState() != State::OK) {
- a.onTimer(); b.onTimer(); pipe_data(mHal, sHal);
+ // v5.1.40: pumpClock drives each SWP/LCK tick
+    mHal.pumpClock(50); sHal.pumpClock(50);
+    pipe_data(mHal, sHal);
  }
  b.flushRx();
 
@@ -576,7 +588,9 @@ void test_corrupt_msg_header_resync_drops_bytes() {
  ALink a(mHal, true, cfg);
  ALink b(sHal, false, cfg);
  while (a.getState() != State::OK || b.getState() != State::OK) {
- a.onTimer(); b.onTimer(); pipe_data(mHal, sHal);
+ // v5.1.40: pumpClock drives each SWP/LCK tick
+    mHal.pumpClock(50); sHal.pumpClock(50);
+    pipe_data(mHal, sHal);
  }
  b.flushRx();
 
@@ -619,7 +633,9 @@ void test_recvMsg_buffer_too_small() {
  ALink a(mHal, true, cfg);
  ALink b(sHal, false, cfg);
  while (a.getState() != State::OK || b.getState() != State::OK) {
- a.onTimer(); b.onTimer(); pipe_data(mHal, sHal);
+ // v5.1.40: pumpClock drives each SWP/LCK tick
+    mHal.pumpClock(50); sHal.pumpClock(50);
+    pipe_data(mHal, sHal);
  }
  b.flushRx();
  uint8_t m1[64];
@@ -652,7 +668,9 @@ void test_corrupt_msg_header_no_resync_clears_buffer() {
  ALink a(mHal, true, cfg);
  ALink b(sHal, false, cfg);
  while (a.getState() != State::OK || b.getState() != State::OK) {
- a.onTimer(); b.onTimer(); pipe_data(mHal, sHal);
+ // v5.1.40: pumpClock drives each SWP/LCK tick
+    mHal.pumpClock(50); sHal.pumpClock(50);
+    pipe_data(mHal, sHal);
  }
  b.flushRx();
 
@@ -693,7 +711,9 @@ void test_corrupt_payload_byte_crc_reject() {
  ALink a(mHal, true, cfg);
  ALink b(sHal, false, cfg);
  while (a.getState() != State::OK || b.getState() != State::OK) {
- a.onTimer(); b.onTimer(); pipe_data(mHal, sHal);
+ // v5.1.40: pumpClock drives each SWP/LCK tick
+    mHal.pumpClock(50); sHal.pumpClock(50);
+    pipe_data(mHal, sHal);
  }
 
  // Use a non-corrupting control: send a clean message and confirm
@@ -759,7 +779,9 @@ void test_zero_byte_send_silent_noop() {
  ALink a(mHal, true, cfg);
  ALink b(sHal, false, cfg);
  while (a.getState() != State::OK || b.getState() != State::OK) {
- a.onTimer(); b.onTimer(); pipe_data(mHal, sHal);
+ // v5.1.40: pumpClock drives each SWP/LCK tick
+    mHal.pumpClock(50); sHal.pumpClock(50);
+    pipe_data(mHal, sHal);
  }
  b.flushRx();
  size_t txBefore = mHal.txBuf.size();
@@ -791,7 +813,9 @@ void test_resetDiag_zeros_cobsseq_counters() {
  ALink a(mHal, true, cfg);
  ALink b(sHal, false, cfg);
  while (a.getState() != State::OK || b.getState() != State::OK) {
- a.onTimer(); b.onTimer(); pipe_data(mHal, sHal);
+ // v5.1.40: pumpClock drives each SWP/LCK tick
+    mHal.pumpClock(50); sHal.pumpClock(50);
+    pipe_data(mHal, sHal);
  }
  b.flushRx();
  // Call resetDiag() while the link is OK and no real gaps have
