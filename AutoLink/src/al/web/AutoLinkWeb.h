@@ -79,11 +79,21 @@ public:
         msgPausedReader_ = r; msgPausedWriter_ = w;
     }
 
-    // Attempt WiFi connection and start the HTTP server.
+    // v5.1.32: begin() now returns immediately. WiFi connect runs
+    // in a background FreeRTOS task (WiFiBg) with up to
+    // WIFI_BG_TIMEOUT_MS (default 10 s) to associate. If it fails,
+    // we log a clear error and give up; isUp() stays false and the
+    // sketch keeps running so the operator can use the Serial
+    // monitor to debug. Previously begin() blocked setup() for up
+    // to 12 s per WiFi attempt (and forever with the retry loop),
+    // which stalled the SWP handshake's onTimer progression and
+    // caused UART RX bytes to be dropped during WiFi burst
+    // activity — making the link handshake look broken.
+    //
     // Logs the SSID and the *length* of the password — never the password itself.
-    // Blocks in setup() for up to ~12 s while connecting; returns immediately
-    // on success or failure.
-    // Returns true when the server is up; false if WiFi failed (server disabled).
+    // Returns true once the background task is launched. Check
+    // isUp() to know when the HTTP server is actually accepting
+    // connections.
     bool begin(const char* ssid, const char* password, uint16_t port = 8765);
 
     bool   isUp() const { return enabled_; }
@@ -93,10 +103,14 @@ private:
     // ---- tunables ----
     static constexpr int         RING_CAP       = 200;    // log ring capacity (entries)
     static constexpr int         LINE_CAP       = 180;    // max bytes per log line (incl. NUL)
-    static constexpr uint32_t    WIFI_TIMEOUT_MS    = 12000; // max ms to wait per WiFi attempt
-    static constexpr uint32_t    WIFI_RETRY_BACKOFF_MS = 5000; // backoff between failed attempts
-    static constexpr int         WIFI_RETRY_MAX_ATTEMPTS = 0;   // 0 = retry forever; >0 = cap
-    static constexpr uint32_t    WIFI_RETRY_LOG_INTERVAL_MS = 30000; // log progress once per 30 s
+    // v5.1.32: WiFi is now run in a background task that returns
+    // after one bounded attempt — no setup() blocking, no SWP stall.
+    // WIFI_BG_TIMEOUT_MS = 10 s is enough for a normal AP associate
+    // (typically <2 s on a healthy link). If the AP is unreachable
+    // the task gives up cleanly; the rest of the sketch runs.
+    static constexpr uint32_t    WIFI_BG_TIMEOUT_MS = 10000;  // total ms the bg task will wait
+    static constexpr uint32_t    WIFI_BG_TICK_MS    = 250;    // poll interval inside the bg task
+    static constexpr uint32_t    WIFI_TIMEOUT_MS    = 12000; // (legacy) blocking retry — unused in v5.1.32
     static constexpr const char* TAG            = "ALinkWeb";
 
     // ---- internal types ----
@@ -118,6 +132,12 @@ private:
     uint16_t           port_      = 8765;
     bool               enabled_   = false;
     bool               ntpSynced_ = false; // true once SNTP wall-clock is valid
+
+    // v5.1.32: WiFi bg task needs these to outlive begin()'s stack
+    // frame. Heap-allocated strings to keep the strings out of the
+    // Arduino main task's stack during the long SWP handshake.
+    char*              ssid_      = nullptr;
+    char*              pass_      = nullptr;
 
     Snapshot           snap_      = {};
 
@@ -142,6 +162,18 @@ private:
     SemaphoreHandle_t  logMtx_    = nullptr;
 
     httpd_handle_t     server_    = nullptr;
+
+    // v5.1.32: WiFi background task. Runs once on begin(), gives
+    // up after WIFI_BG_TIMEOUT_MS, never blocks setup(). The task
+    // deletes itself when done.
+    TaskHandle_t       wifiTask_  = nullptr;
+    static void        wifiTaskThunk_(void* arg);
+
+    // After WiFi connects (inside the bg task), allocate the log
+    // ring, stats timer, HTTP server. Same code as the old blocking
+    // version, factored out. Returns true on success, false if any
+    // resource alloc fails (cleanup happens inside).
+    bool setupHttpAndLogging_();
 
     // 1 Hz stats snapshot (esp_timer task).
     static void statTimerCb(void* arg);
