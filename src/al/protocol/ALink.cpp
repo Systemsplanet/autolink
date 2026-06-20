@@ -208,7 +208,14 @@ void ALink::sendCobsFrame_unlocked(const uint8_t* b, int n) {
         Log::log().debug(ALINK_TAG, "TX cobsSeq=%u  %d payload bytes  %d wire bytes",
             (unsigned)txSeq, n, (int)frameLen);
     }
-    txSeq = (uint8_t)(txSeq + 1);
+    // v5.1.45: skip 0xFF on the wire. ACK_TYPE = 0xFF is the
+    // reserved single-byte discriminator (see UtilFrameRx.h);
+    // a data frame stamped cobsSeq=0xFF would be misread by the
+    // receiver as an ACK and silently dropped. Wrap from 0xFE
+    // straight to 0x00. Effective counter range is 0..254 (255
+    // slots), matching LD_SEQ_WRAP and the receiver's expected-
+    // seq math in LinkDecision.h::classifyGap.
+    txSeq = (txSeq == COBS_SEQ_MAX) ? 0 : (uint8_t)(txSeq + 1);
 }
 
 void ALink::sendCobsFrame(const uint8_t* b, int n) {
