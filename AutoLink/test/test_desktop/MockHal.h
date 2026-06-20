@@ -25,7 +25,15 @@ public:
 
  int sendBreakCalls = 0;
  int timerStartCalls = 0;
+ int timerFiredCalls = 0;
  std::vector<uint32_t> spdHistory;
+ // v5.1.40 (injectable clock): track when the next timer should
+ // fire. startTimer(ms) sets this to now+ms. pumpClock() checks
+ // if now >= nextTimerAtMs and calls link->onTimer() if so.
+ // Makes "Pong drops after 5s idle", "ACK times out at 100ms",
+ // and "sweep stalls, BREAK forced" sub-ms deterministic host
+ // tests instead of needing real wall-clock waits.
+ uint32_t nextTimerAtMs = UINT32_MAX;
 
  // Optional peer pointer used by the asymmetric-recovery tests. On real
  // hardware, sendBreak() puts a break on the TX wire and the *other* ESP32
@@ -68,8 +76,38 @@ public:
  return n; // mock always accepts all bytes
  }
  void flushTx() override {}
- void startTimer(int ms) override { timerStartCalls++; timerActive = true; lastTimerMs = ms; }
- void stopTimer() override { timerActive = false; }
+ void startTimer(int ms) override {
+   timerStartCalls++; timerActive = true; lastTimerMs = ms;
+   uint32_t deadline = now + (uint32_t)ms;
+   nextTimerAtMs = deadline;
+ }
+ void stopTimer() override { timerActive = false; nextTimerAtMs = UINT32_MAX; }
+ // v5.1.40: deterministic clock pump. Advances `now` by deltaMs,
+ // and if the deadline has elapsed, fires onTimer() (which may
+ // re-schedule, looping until no timers are due). This is the
+ // chokepoint that lets host tests simulate "5s of idle" in
+ // microseconds of real time without FreeRTOS scheduling.
+ void pumpClock(uint32_t deltaMs) {
+   now += deltaMs;
+   // Loop: a fired onTimer may set up another timer (e.g. from
+   // OK->SWP transition re-starts the baud-sweep timer). Keep
+   // firing until no timer is due. Bound to avoid an infinite
+   // loop if the timer re-arms at <= now (degenerate case).
+   int safety = 0;
+   while (nextTimerAtMs != UINT32_MAX && now >= nextTimerAtMs && safety++ < 16) {
+     timerFiredCalls++;
+     if (link) link->onTimer();
+   }
+ }
+ // Helper: pump until total elapsed >= targetMs.
+ void runFor(uint32_t targetMs) {
+   uint32_t end = now + targetMs;
+   while (now < end) {
+     uint32_t chunk = end - now;
+     if (chunk > 100) chunk = 100;
+     pumpClock(chunk);
+   }
+ }
  void delayMs(int) override {}
  void clearTx() { txBuf.clear(); }
 
