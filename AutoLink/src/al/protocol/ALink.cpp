@@ -842,8 +842,16 @@ bool ALink::onPayload(uint8_t cobsSeq, const uint8_t* b, int n) {
     // retransmit, so by the time we see cobsSeq=N the sender's
     // retransmits have already caught up. A "gap" here means the
     // retransmit also got lost — the link is in trouble. We log
-    // it (still counts toward gaps/lostMsgs for diagnostics) but
-    // we DON'T drop the link — the next retransmit will catch up.
+    // it (still counts toward gaps/lostMsgs for diagnostics).
+    //
+    // v5.1.28 (auto-baud fallback): a gap also bumps errs so the
+    // error threshold trips and triggers a drop+re-sweep at a
+    // lower baud. Without this, gaps accumulate silently and the
+    // application layer (PingPong) breaks the link manually,
+    // bypassing the protocol's baud-sweep recovery. The original
+    // code didn't bump errs because it assumed the next retransmit
+    // would catch up — but if the retransmit ALSO got lost (wire
+    // noise), we need to actually try a slower baud.
     //
     // A "stale" (backwards-jump) means a duplicate ACK-driven
     // retransmit arrived after the original was acked. Drop it.
@@ -866,6 +874,23 @@ bool ALink::onPayload(uint8_t cobsSeq, const uint8_t* b, int n) {
             gaps++;
             uint64_t skipped = (uint64_t)(diff - 1);
             lostMsgs += skipped;
+            // Bump errs so the threshold eventually trips if the
+            // link stays lossy. Use err_unlocked() to also handle the
+            // case where one gap already pushes us over the edge.
+            if (err_unlocked()) {
+                // Threshold tripped; sender retransmits will be
+                // ignored until the link re-sweeps to a lower baud.
+                // Log it explicitly so the operator sees the cause.
+                Log::log().warning(ALINK_TAG,
+                    "Error threshold tripped by gap (errs=%d > threshold=%d) -> dropping link for re-sweep at lower baud. "
+                    "gap=%d, +%llu lost this frame, cumulative gaps=%llu",
+                    errs, cfg.errThreshold, diff, (unsigned long long)skipped,
+                    (unsigned long long)gaps);
+                reset_unlocked(true);
+                hw.unlock();
+                hw.sendBreak();
+                return false;
+            }
             Log::log().warning(ALINK_TAG,
                 "RX cobsSeq=%u GAP: expected %u, last good=%u  %d bytes accepted (gap=%d, +%llu lost)",
                 (unsigned)cobsSeq, (unsigned)expected, (unsigned)rxSeq, n, diff,
