@@ -360,6 +360,52 @@ for context.**
     `allowedBaudsCount * 2 * cfg.delayMs`. Toggle-verified:
     reverting `pumpClock` to a no-op fails test 1.
 
+19e. **Cheap invariant checks in the host debug build.** After
+    every public facade call that mutates internal state, assert
+    the cross-checks that would have caught the leaks
+    immediately: counts match reality (e.g. `pendingCount_ ==
+    count(in_use slots)`), pointers match state (e.g. no
+    `in_use=true` with null buf), partial-update invariants (e.g.
+    `chunks_left <= chunks_total`). Compile them out on device
+    via `#ifdef AUTOLINK_HOST_TEST`. These are the assertions
+    that turn "fails silently after 3 drops" into "aborts the
+    test on the drop that broke the invariant."
+
+    Pattern (see `src/AutoLink.cpp`, added v5.1.42):
+
+    ```cpp
+    #ifdef AUTOLINK_HOST_TEST
+    void AutoLink::assertCacheInvariants() const {
+        int inUse = 0;
+        for (int i = 0; i < ARQ_CACHE_SLOTS; i++) {
+            const Pending& p = pending_[i];
+            if (!p.in_use) {
+                assert(p.buf == nullptr && "in_use=false but buf != nullptr");
+                ...
+                continue;
+            }
+            inUse++;
+            assert(p.buf != nullptr && "in_use=true but buf == nullptr");
+            ...
+        }
+        assert(inUse == pendingCount_);
+        ...
+    }
+    #else
+    inline void AutoLink::assertCacheInvariants() const {}
+    #endif
+    ```
+
+    Call after every mutation: `insert`, `freeBySeq`,
+    `takeRetxBuffer`, `clearAll`. Cost on host is ~256 byte
+    comparisons per check; on production (ESP32) zero.
+
+    Toggle-verified: commenting out `pendingCount_++` in
+    `arqCache_insert_unlocked` aborts the first facade test on
+    the very first insert with the count-mismatch assert. The
+    assert catches the bug at the line that broke the invariant,
+    not at the line where the broken state was finally observed.
+
 19d. **Pure decision logic separated from I/O, table-tested.**
     Protocol state decisions are pure free functions returning
     enums (no state, no I/O, no thread, no log). Side effects
