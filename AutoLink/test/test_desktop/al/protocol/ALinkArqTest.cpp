@@ -278,9 +278,14 @@ void test_retransmit_does_not_deadlock_with_lock() {
     // ACK), which is too costly to set up here. The shape of the
     // fix (deferred-callback fields + dispatch after unlock) is
     // enough to pin.
+    // v5.1.40: pumpClock drives time + fires timer in one call.
+    // The pre-v5.1.19 hang would happen only when an actual retx
+    // fires (peer connected + lost ACK), which is too costly to
+    // set up here. The shape of the fix (deferred-callback fields
+    // + dispatch after unlock) is enough to pin.
     for (int i = 0; i < 5; i++) {
-        mHal.now += 200;
-        a.onTimer();  // would deadlock/hang if hasPendingRetx_ dispatch was wrong
+        mHal.pumpClock(200);
+        a.onTimer();  // double-fire: pumpClock already fired once
     }
     std::cout << "PASS (onTimer() callable + doesn't deadlock with the deferred-retx fields)" << std::endl;
 }
