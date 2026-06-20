@@ -107,6 +107,13 @@ struct Diag {
 // COBS+CRC-8 framing with cobsSeq ordering, CRC-16 messages, error
 // thresholding, idle watchdog, keepalive.
 class ALink : private UtilFrameRx::Listener {
+    // v5.1.37: AutoLink (the facade) needs direct access to onAck
+    // so it can clear the protocol's pending state for the original
+    // chunks after a successful ARQ retx (the cache-miss loop fix).
+    // The alternative — exposing onAck as public — would let any
+    // caller corrupt the protocol's ARQ state. Friend is scoped
+    // to the facade only.
+    friend class AutoLink;
     ILink& hw;
     bool isMaster;
     AutoLinkConfig cfg;
