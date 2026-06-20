@@ -4,6 +4,27 @@ All releases, most recent first.
 
 ---
 
+## v5.1.30
+
+**UI rename: Ping's message-pause button is now "Pause / Start".**
+
+User feedback (2026-06-19): "Resume" implied the device had been sending and was now resuming. With v5.1.29, Ping boots paused and waits — so the natural verb is **Start** ("begin sending"), not Resume. Renamed the in-app label and the initial JS state so the button matches the device's actual state on page load:
+
+- Initial button label: **▶ Start** (matches `paused_=true` at boot).
+- JS `msgPaused` initial value: `true` (was `false`). Reconciliation with `/stats.msgPaused` on every poll still wins if they disagree.
+- Click Start → POST `/pausemsg?p=0` → button flips to **▪▪ Pause**.
+- Click Pause → POST `/pausemsg?p=1` → button flips back to **▶ Start**.
+
+Log-scroll pause (the separate button at the bottom of the log overlay) keeps the "Pause / Resume" labels — Resume is correct there because log scrolling is a stream that was actively scrolling before the click.
+
+**Disclosed:** the JS initial state changed. Any out-of-tree dashboard code that read `msgPaused` directly expecting `false` should be updated.
+
+**Tests:** all 17 C++ suites + 83 JS dashboard tests + 10 s loopback + 5 s loopback-noise regression all PASS. Arduino `verify_build.ino` compiles clean.
+
+No protocol or wire-format change. v5.1.29 → v5.1.30.
+
+---
+
 ## v5.1.29
 
 **Bug fix: Ping now boots paused; Resume button actually stops the device from sending.**
