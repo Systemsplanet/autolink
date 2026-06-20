@@ -83,7 +83,7 @@ public:
 namespace autolink {
 
 // Keep in sync with library.properties.
-#define AUTOLINK_VERSION "5.1.39"
+#define AUTOLINK_VERSION "5.1.40"
 
 class AutoLink : public Stream {
 private:
@@ -341,10 +341,16 @@ public:
     }
 #endif
 
+    // v5.1.40: drive begin() on host too. ALink::begin() schedules
+    // the SWP timer (and on master, sends the initial BREAK), which
+    // is the entry point for all time-dependent behavior. Without
+    // calling begin() on host, MockHal::startTimer is never called,
+    // the timer is never armed, and the host test can't drive the
+    // SWP/OK/LCK state machine via clock injection. On host the
+    // EspHal stub's begin() is a no-op (no UART to start), so this
+    // is safe.
     void begin() {
-#ifdef ARDUINO
-        hal->begin();
-#endif
+        link->begin();
     }
 
     void blinkWait(int n, int onMs = 60, int offMs = 60, long delayMs = 0) {
