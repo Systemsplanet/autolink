@@ -584,6 +584,91 @@ void test_io_coverage() {
  std::cout << "PASS (full public-API surface covered)" << std::endl;
 }
 
+// v5.1.45 (regression guard): sender's cobsSeq counter wraps
+// 254 → 0 cleanly. Before this fix, ALink.cpp:211 was a plain
+// `txSeq + 1`, so a frame stamped cobsSeq=0xFF would be read by
+// the receiver as ACK_TYPE=0xFF and silently dropped. The throughput
+// sweep tops out near cumulative seq ~138 and the message sweep
+// caps at 128 chunks — no test exercises the 254 → 0 boundary,
+// which is the exact location of the wire-format collision this
+// test pins. We drive ≥256 contiguous single-byte frames through
+// a clean, lossless pipe and assert zero loss + zero gaps. If a
+// future change reintroduces a plain `txSeq + 1` (or forgets to
+// skip COBS_SEQ_MAX), this test fails: the seq-254 frame would be
+// stamped with cobsSeq=255 on the wire, the receiver would
+// identify it as ACK_TYPE and discard it, and pong's read count
+// would be 255 instead of 256.
+//
+// Avoid 0x00/0x01/0x02/0x03 as payload bytes: those values
+// collide with COBS frame delimiters when carried as
+// application data, causing framing-edge cases that have
+// nothing to do with cobsSeq. Use a payload of repeated 0xAB
+// and tag each frame by its cobsSeq on the receiver side
+// (decode enough frames to count unique seq values, ignore
+// the actual payload bytes).
+void test_txSeq_wraps_254_to_0_without_dropping_0xFF() {
+ std::cout << "\n=== Test: cobsSeq wraps 254→0 (no 0xFF collision) (v5.1.45) ===" << std::endl;
+ MockHal mHal, sHal;
+ mHal.peer = &sHal; sHal.peer = &mHal;
+ AutoLinkConfig cfg;
+ cfg.reliableMode = true;
+ cfg.streamBufferSize = 32000;
+ ALink ping(mHal, true, cfg);
+ ALink pong(sHal, false, cfg);
+ while (ping.getState() != State::OK || pong.getState() != State::OK) {
+    mHal.pumpClock(50); sHal.pumpClock(50);
+    pipe_data(mHal, sHal);
+ }
+
+ // 260 contiguous single-byte writes. Each write becomes one
+ // COBS frame with a fresh cobsSeq. The 256th write's txSeq
+ // value would have been 0xFF without the skip — this is the
+ // exact wire-format collision this test pins.
+ const int N = 260;
+ uint8_t payload = 0xAB;
+ int sent = 0;
+ while (sent < N) {
+    int w = ping.write(&payload, 1);
+    if (w <= 0) {
+       // pump clock + pipe to let pending ACKs free TX room
+       mHal.pumpClock(10); sHal.pumpClock(10);
+       pipe_data(mHal, sHal);
+       continue;
+    }
+    sent += w;
+    mHal.pumpClock(10); sHal.pumpClock(10);
+    pipe_data(mHal, sHal);
+ }
+ // Final drain: pump enough clock for all ACKs to come back.
+ for (int k = 0; k < 300; k++) {
+    mHal.pumpClock(10); sHal.pumpClock(10);
+    pipe_data(mHal, sHal);
+ }
+
+ // Read all 0xAB payloads from the receiver. The reliable
+ // layer delivers payload bytes (1 per frame). Total must be N.
+ uint8_t rx[N];
+ int got = 0;
+ int chunk;
+ while ((chunk = pong.read(rx + got, N - got)) > 0) {
+    got += chunk;
+ }
+ assert(got == N);
+ for (int i = 0; i < got; i++) {
+    assert(rx[i] == 0xAB);
+ }
+ // Zero gaps across the 254→0 wrap boundary (the seq=254
+ // frame MUST have arrived; without the skip, seq=254 would
+ // actually be 255 on the wire, get misidentified as ACK_TYPE
+ // by the receiver, and be silently dropped — got would be 259).
+ Diag d;
+ pong.getDiag(d);
+ assert(d.gaps == 0);
+ assert(d.stale == 0);
+ std::cout << "PASS (260 frames round-trip across seq 254→0 wrap, "
+              "zero loss, zero gaps)" << std::endl;
+}
+
 int main() {
  std::cout << "=== Running ALinkIO Tests ===" << std::endl;
  test_basic_io();
@@ -592,6 +677,7 @@ int main() {
  test_stats();
  test_readme_usage();
  test_io_coverage();
+ test_txSeq_wraps_254_to_0_without_dropping_0xFF();
  std::cout << "\n=== ALinkIO Tests Completed Successfully ===" << std::endl;
  return 0;
 }
