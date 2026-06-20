@@ -12,6 +12,10 @@
 // out, so calling them would crash) — host tests for AutoLink just
 // verify the type compiles and constructs.
 #include "AutoLink.h"
+#ifdef AUTOLINK_HOST_TEST
+#include <cassert>
+#include <iostream>
+#endif
 
 namespace autolink {
 
@@ -102,6 +106,7 @@ void AutoLink::arqCache_insert_unlocked(uint8_t baseSeq, const uint8_t* payload,
     pending_[baseSeq].chunks_total = chunkCount;  // v5.1.39: total at send time (for retx cleanup)
     pending_[baseSeq].in_use       = true;
     pendingCount_++;
+    assertCacheInvariants();
 }
 
 int8_t AutoLink::arqCache_findBySeq(uint8_t seq) {
@@ -209,8 +214,10 @@ void AutoLink::arqCache_takeRetxBuffer(uint8_t seq, uint8_t** bufOut, int* lenOu
     pending_[idx].buf          = nullptr;
     pending_[idx].len          = 0;
     pending_[idx].chunks_total = 0;
+    pending_[idx].chunks_left  = 0;
     pending_[idx].in_use       = false;
     if (pendingCount_ > 0) pendingCount_--;
+    assertCacheInvariants();
 }
 
 // Re-send a previously-cached payload. (v5.1.37: fix for buffer
@@ -262,6 +269,60 @@ void AutoLink::arqCache_clearAll() {
     Log::log().info("AutoLink",
         "ARQ cache cleared (link reset): %d slot(s) freed", ARQ_CACHE_SLOTS);
 }
+
+// v5.1.42: host-only invariant checks on the ARQ cache.
+// Compiled out on device via AUTOLINK_HOST_TEST.
+//
+// These are the cross-checks that would have caught every leak
+// bug in v5.1.37 (cache orphaned, peekTxSeq race, retx buffer
+// leak, zero margin). The cost on host is ~256 byte comparisons
+// per check; on a hot path (sendMsg), it runs once per send.
+// On production (ESP32) it's compiled out, so zero cost.
+//
+// Invariants:
+//   - pendingCount_ == count of in_use slots
+//   - in_use=true implies buf != nullptr (no leak by insert)
+//   - in_use=true implies chunks_total > 0 (insert set it)
+//   - chunks_left <= chunks_total always
+//   - in_use=true implies chunks_left may be nonzero (retx
+//     tally); only chunks_left==0 forces in_use=false (all ACKed
+//     → freed)
+//   - pendingCount_ <= ARQ_CACHE_SLOTS (array bound; the
+//     ARQ_CACHE_CAP gate is enforced by arqCache_hasRoom, not by
+//     the cache itself)
+// v5.1.42: production build gets the empty inline body (zero
+// cost). Host build gets the full assertion check. The function
+// is always declared so call sites compile in both contexts.
+#ifndef AUTOLINK_HOST_TEST
+inline void AutoLink::assertCacheInvariants() const {}
+#endif
+#ifdef AUTOLINK_HOST_TEST
+void AutoLink::assertCacheInvariants() const {
+    int inUse = 0;
+    for (int i = 0; i < ARQ_CACHE_SLOTS; i++) {
+        const Pending& p = pending_[i];
+        if (!p.in_use) {
+            assert(p.buf == nullptr && "in_use=false but buf != nullptr");
+            assert(p.len == 0);
+            assert(p.chunks_left == 0);
+            assert(p.chunks_total == 0);
+            continue;
+        }
+        inUse++;
+        assert(p.buf != nullptr && "in_use=true but buf == nullptr");
+        assert(p.chunks_left <= p.chunks_total &&
+               "chunks_left > chunks_total — ACK was double-counted");
+        assert(p.chunks_total > 0 &&
+               "in_use=true but chunks_total == 0 — insert forgot to set");
+    }
+    assert(inUse == pendingCount_ &&
+           "pendingCount_ does not match in_use slot count — "
+           "free/insert forgot to update the counter");
+    assert(pendingCount_ >= 0);
+    assert(pendingCount_ <= ARQ_CACHE_SLOTS &&
+           "pendingCount_ exceeds the array size");
+}
+#endif  // AUTOLINK_HOST_TEST
 
 // C-linkage trampoline that ALink::reset_unlocked calls to notify
 // the facade that the link has been reset. ctx is the AutoLink*
