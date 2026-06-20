@@ -131,7 +131,16 @@ public:
 } // namespace autolink
 
 #include <Arduino.h>
+// Arduino core (especially ArduinoDroid / older cores) doesn't ship
+// esp_timer.h. Use a no-op shim on those builds — async callbacks
+// won't fire, but blocking blinkWait() (delay in a loop) still works.
+// Define AUTOLINK_USE_ESP_TIMER before including to force the real
+// ESP-IDF path.
+#if defined(ARDUINO) && !defined(ESP_IDF_VERSION) && !defined(AUTOLINK_USE_ESP_TIMER)
+#include "UtilBlinkEspTimerShim.h"
+#else
 #include "esp_timer.h"
+#endif
 
 namespace autolink {
 
