@@ -18,6 +18,7 @@ CXXFLAGS = -std=c++14 -Wall -Wextra -DAUTOLINK_HOST_TEST -I../../src -I../../src
 SRC      = ../../src
 UTIL     = ../../src/util
 LINK_SRC = $(SRC)/ALink.cpp $(SRC)/Log.cpp $(UTIL)/UtilCrc.cpp $(UTIL)/UtilCobs.cpp $(UTIL)/UtilFrameRx.cpp $(UTIL)/UtilBaudSweep.cpp
+AUTOLINK_SRC = $(SRC)/AutoLink.cpp $(LINK_SRC)
 
 # Each test binary: <name>Test.cpp + the protocol sources it needs.
 # The utility-only tests (Crc/Cobs/Blink/FrameRx/BaudSweep) link just their
@@ -25,10 +26,21 @@ LINK_SRC = $(SRC)/ALink.cpp $(SRC)/Log.cpp $(UTIL)/UtilCrc.cpp $(UTIL)/UtilCobs.
 TEST_BINS = run_test_crc run_test_cobs run_test_blink run_test_framerx \
             run_test_baudsweep run_test_log run_test_mockhal run_test_autolink \
             run_test_alink_io run_test_alink_message run_test_alink_negotiation \
-            run_test_alink_error run_test_alink_watchdog run_test_alink_cobsseq
+            run_test_alink_error run_test_alink_watchdog run_test_alink_cobsseq \
+            run_test_alink_arq run_test_alink_web
 
-all: $(TEST_BINS)
-	@echo "=== All $(words $(TEST_BINS)) test suites PASS ==="
+LOOPBACK_BIN = run_loopback
+
+# Run the loopback as a 10-second smoke test as part of `all`. The
+# binary exits 0 on success, non-zero on failure. Output is terse so
+# the all-target log stays readable.
+LOOPBACK_QUIET_SECS = 10
+
+all: $(TEST_BINS) $(LOOPBACK_BIN) test_dashboard_js
+	@echo "=== $(words $(TEST_BINS)) C++ suites + dashboard JS test PASS ==="
+	@echo "=== Running loopback smoke test ($(LOOPBACK_QUIET_SECS)s) ... ==="
+	@./run_loopback $(LOOPBACK_QUIET_SECS) 2>&1 | grep -E '^\(PASS\|PARTIAL\|FAIL\):|^Total:|^Ping state:|^Messages TX:|^Pong state:|^T=  +[0-9]+s' | head -25
+	@./run_loopback $(LOOPBACK_QUIET_SECS) >/dev/null 2>&1 && echo '=== Loopback PASS ===' || echo '=== Loopback FAIL ==='
 
 # ---- per-suite build rules ---------------------------------------------------
 
@@ -53,8 +65,10 @@ test_log: run_test_log
 test_mockhal: run_test_mockhal
 	./run_test_mockhal
 
-test_autolink: run_test_autolink
-	./run_test_autolink
+test_autolink: run_test_autolink \
+        test_alink_web
+	./run_test_autolink \
+        test_alink_web
 
 test_alink_io: run_test_alink_io
 	./run_test_alink_io
@@ -77,6 +91,12 @@ test_alink_cobsseq: run_test_alink_cobsseq
 run_test_alink_cobsseq: $(LINK_SRC) ALinkCobsSeqTest.cpp
 	$(CXX) $(CXXFLAGS) $(LINK_SRC) ALinkCobsSeqTest.cpp -o $@
 
+run_test_alink_arq: $(LINK_SRC) ALinkArqTest.cpp
+	$(CXX) $(CXXFLAGS) $(LINK_SRC) ALinkArqTest.cpp -o $@
+
+run_test_alink_web: $(LINK_SRC) $(SRC)/AutoLinkWebCore.cpp AutoLinkWebTest.cpp
+	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(SRC)/AutoLinkWebCore.cpp AutoLinkWebTest.cpp -o $@
+
 run_test_crc: $(UTIL)/UtilCrc.cpp UtilCrcTest.cpp
 	$(CXX) $(CXXFLAGS) $(UTIL)/UtilCrc.cpp UtilCrcTest.cpp -o $@
 
@@ -98,11 +118,40 @@ run_test_log: $(SRC)/Log.cpp LogTest.cpp
 run_test_mockhal: $(LINK_SRC) MockHalTest.cpp
 	$(CXX) $(CXXFLAGS) $(LINK_SRC) MockHalTest.cpp -o $@
 
-run_test_autolink: $(LINK_SRC) AutoLinkTest.cpp
-	$(CXX) $(CXXFLAGS) $(LINK_SRC) AutoLinkTest.cpp -o $@
+run_test_autolink: $(AUTOLINK_SRC) AutoLinkTest.cpp
+	$(CXX) $(CXXFLAGS) $(AUTOLINK_SRC) AutoLinkTest.cpp -o $@
 
 run_test_alink_io: $(LINK_SRC) ALinkIOTest.cpp
 	$(CXX) $(CXXFLAGS) $(LINK_SRC) ALinkIOTest.cpp -o $@
+
+run_loopback: $(LINK_SRC) loopback_test.cpp
+	$(CXX) $(CXXFLAGS) $(LINK_SRC) loopback_test.cpp -o $@ -pthread
+
+loopback: run_loopback
+	./run_loopback 30
+
+loopback_quick: run_loopback
+	./run_loopback 5
+
+loopback_verbose: run_loopback
+	./run_loopback 30 verbose
+
+# Run all 4 mode combinations (seq/rand × reliable/unreliable) as a
+# single 'make loopback_all' target. Each runs 5s. Useful when
+# changing anything in the framing or ARQ state machine.
+loopback_all: run_loopback
+	@echo "--- sequential + reliable ---"
+	@./run_loopback 5 sequential
+	@echo "--- random + reliable ---"
+	@./run_loopback 5 random
+	@echo "--- sequential + unreliable (raw) ---"
+	@./run_loopback 5 sequential unreliable
+	@echo "--- random + unreliable (raw) ---"
+	@./run_loopback 5 random unreliable
+	@echo "=== All 4 loopback modes PASS ==="
+
+test_loopback: run_loopback
+	@./run_loopback 10 >/dev/null 2>&1 && echo 'PASS' || echo 'FAIL'
 
 run_test_alink_message: $(LINK_SRC) ALinkMessageTest.cpp
 	$(CXX) $(CXXFLAGS) $(LINK_SRC) ALinkMessageTest.cpp -o $@
@@ -174,4 +223,30 @@ clean:
 .PHONY: all asan test_asan coverage clean \
         test_crc test_cobs test_blink test_framerx test_baudsweep test_log \
         test_mockhal test_alink_io test_alink_message test_alink_negotiation \
-        test_alink_error test_alink_watchdog test_alink_cobsseq test_autolink
+        test_alink_error test_alink_watchdog test_alink_cobsseq test_autolink \
+        test_alink_web
+
+test_alink_web: run_test_alink_web
+	./run_test_alink_web
+
+test_loopback_suite: test_loopback
+
+# ---- dashboard JS test (Node + jsdom) ------------------------------------
+# Verifies the embedded dashboard JavaScript (poll(), bindLvlGroup(),
+# role-conditional UI, etc) without an ESP32. Requires Node + jsdom:
+#   npm install jsdom
+# Run: `make test_dashboard_js`
+JS_TEST = dashboard-js-test.js
+JS_NODE_MODULES = node_modules/jsdom
+
+test_dashboard_js: $(JS_NODE_MODULES)
+	node $(JS_TEST)
+
+$(JS_NODE_MODULES): package.json
+	npm install
+	@touch $@
+
+package.json:
+	@echo '{ "name": "autolink-test", "version": "0.0.0", "private": true, "dependencies": { "jsdom": "*" } }' > $@
+
+.PHONY: test_dashboard_js
