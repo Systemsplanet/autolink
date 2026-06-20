@@ -11,7 +11,7 @@ for context.**
 
 - `src/` — library code (compiled into a static archive for the
   ESP32 Arduino build; also compiled per-file for the host tests).
-  Subdirectories (`util/`, `pingpong/`) hold headers and a few
+  Subdirectories (`util/`, `web/`) hold headers and a few
   sources. Both `arduino-cli --library` and the spec-compliant
   builders (ArduinoDroid, Arduino IDE 1.8/2.x, PlatformIO) recurse
   into them.
@@ -133,6 +133,115 @@ for context.**
     suite is necessary but not sufficient. Cross-compile the
     sketch before declaring done.
 
+14. **Never include temporary build artifacts in the zip.** No
+    `.bak` files, no `*.o`, no `run_test_*` / `run_loopback`
+    binaries, no `compile_commands.json`, no `*.gcno` / `*.gcda`
+    coverage artifacts, no `node_modules/` or `package-lock.json`
+    unless they're load-bearing. The zip is the library the user
+    installs — it should contain ONLY the library sources, headers,
+    examples, docs, and `library.properties`. Before zipping,
+    scan the candidate list and remove anything that isn't
+    source-or-doc.
+
+    Quick filter for the zip:
+    ```
+    # Anything that looks like a build artifact:
+    *.bak  *.o  *.gcno  *.gcda  compile_commands.json
+    run_test_*  run_loopback  run_test_alink_*
+    node_modules  package-lock.json
+    ```
+    Keep: `.cpp .h .ino .md .properties .txt` and the build
+    scripts under `build/`. Lesson learned the hard way in
+    v5.1.14: an `AutoLinkTest.cpp.bak` was left behind from
+    manual editing and shipped in the zip.
+
+15. **Install arduino-cli if it's not installed.** Before running
+    `./build/verify_build.sh`, check `command -v arduino-cli`. If
+    it returns nothing, run `./build/build_env.sh` to install
+    arduino-cli 1.5.1 + esp32:esp32@3.3.5. The script is idempotent
+    — if arduino-cli is already on PATH and the ESP32 core is
+    installed, it no-ops. Don't skip this and then claim "I can't
+    verify on Arduino" — the env build is fast (~30s on a fresh
+    machine) and the cross-compile is the only check that catches
+    Arduino-only header paths, `#ifdef ARDUINO` typos, and library
+    layout breaks. Lesson learned the hard way in v5.1.15/5.1.16:
+    I shipped zips with stale `../AutoLinkWeb.h` paths in
+    `src/pingpong/` (now flattened into `src/`) and called the host suite "green" without
+    noticing the Arduino-side compile would fail. The path was
+    caught by a user error message, not by my own test pass.
+
+    **Prefer rule 17's wrapper** for any direct arduino-cli call so
+    the install is auto-handled.
+
+16. **Smoke-compile a user sketch with every public include.** After
+    `./build/verify_build.sh` passes (rule 4), run the smoke
+    compile described in the "Arduino library `src/` layout" gotcha
+    below — a single .ino that includes every public header the
+    user is expected to type. Catches include-path / subdir /
+    quoting bugs that `verify_build.sh` (which uses
+    `-DAUTOLINK_HOST_TEST`-style direct includes) does not.
+    v5.1.18 shipped with the include path broken for the PingPong
+    example; a user `sketch_jun17b.ino` on 2026-06-19 tripped over
+    it. The smoke compile takes ~30s and would have caught it.
+
+17. **Always run arduino-cli through `bash build/arduino-cli-cmd.sh`.**
+    Never call bare `arduino-cli` from a recipe, Makefile, shell
+    script, or AGENTS.md note. The wrapper (`build/arduino-cli-cmd.sh`)
+    does three things bare arduino-cli does not:
+
+    1. **Installs on demand.** If `command -v arduino-cli` returns
+       nothing, the wrapper delegates to `build/build_env.sh` which
+       downloads arduino-cli 1.5.1 + the esp32:esp32@3.3.5 core.
+       No more "arduino-cli not found, run build_env.sh first"
+       failures on a fresh machine.
+    2. **No-args path prints the version.** `bash
+       build/arduino-cli-cmd.sh` with no args prints `arduino-cli
+       version` — useful as a one-line "is the env ready?" check in
+       CI logs, README, or AGENTS.md recipes.
+    3. **Single entry point.** If arduino-cli's download URL changes
+       again, only `build/build_env.sh` (called by the wrapper)
+       needs updating. Every other recipe stays stable.
+
+    Usage:
+    ```bash
+    bash build/arduino-cli-cmd.sh                                  # version
+    bash build/arduino-cli-cmd.sh compile --fqbn esp32:esp32:firebeetle32 \
+        --library . --warnings none /tmp/Smoke                     # compile
+    bash build/arduino-cli-cmd.sh lib install SomeLib@1.0.0         # install lib
+    ```
+
+    Forbidden: calling `arduino-cli` directly, hard-coding the path
+    to `/usr/local/bin/arduino-cli`, or assuming arduino-cli is on
+    PATH. Use the wrapper everywhere.
+
+18. **Test files mirror the source package they exercise.** The rule
+    for `test/test_desktop/`:
+
+    * `test/test_desktop/al/<pkg>/<Test>.cpp` — tests a specific
+      `src/al/<pkg>/` package. This is where most tests live.
+      `al/protocol/ALink*Test.cpp`, `al/util/UtilCrcTest.cpp`,
+      `al/web/AutoLinkWebTest.cpp`, `al/protocol/loopback_test.cpp`
+      (protocol-integration test), all match this rule.
+    * `test/test_desktop/<File>.cpp` — reserved for tests that
+      exercise something at the **top level** of `src/` (the public
+      surface) OR shared test infrastructure. Currently:
+      - `AutoLinkTest.cpp` — exercises `src/AutoLink.{h,cpp}`
+        (the public facade). Stays at top because there's no
+        `al/autolink/` package for it (same rule as `src/AutoLink.h`
+        being at `src/`, not under `al/`).
+      - `MockHalTest.cpp` + `MockHal.h` — shared **test infra**
+        used by protocol, util, AND web tests. Moving it under
+        any one package would create a back-reference from the
+        others. Stays at top.
+      - `Makefile`, `coverage_merge.sh`, `dashboard-js-test.js`,
+        `package*.json`, `node_modules/` — build / packaging infra,
+        not test files.
+    * When in doubt: ask "which `src/` file does this test exercise?"
+      If it's `src/al/<pkg>/X.cpp`, the test belongs in
+      `test/test_desktop/al/<pkg>/`. If it's `src/X.cpp` (public
+      surface), the test stays at top. If it exercises shared infra
+      like `MockHal.h`, it stays at top.
+
 ## Gotchas (things that bit me, do not re-discover)
 
 ### `portYIELD()` location
@@ -164,6 +273,59 @@ subdirectories).
 
 This is a real gotcha because every example on the internet
 shows `--libraries`. It's wrong for this case.
+
+### Arduino library `src/` layout — subdirs OK, flat shims required
+
+The Arduino Library Spec 1.5 allows subdirs of `src/` and says
+they should be searchable for include resolution. Arduino IDE 2.x
+implements this. arduino-cli 1.5.1 (used by ArduinoDroid) does
+NOT — it adds `src/` to the include path but does not recurse.
+
+The library layout that works under both:
+
+```
+src/
+  AutoLink.h                 # flat, user-facing
+  PingPong.h                 # FLAT SHIM that #includes "pingpong/PingPong.h"
+  util/                      # internal helpers, used by library .cpp files
+    Log.h
+    UtilPing.h
+    ...
+  web/                       # internal helpers, used by library .cpp files
+    AutoLinkWeb.h
+    ...
+  pingpong/                  # canonical home of the PingPong example headers
+    PingPong.h
+```
+
+User sketches include from the **flat** names:
+```cpp
+#include "AutoLink.h"     // works under both arduino-cli and IDE 2.x
+#include "PingPong.h"     // works under both
+```
+NOT the subdir names — `<pingpong/PingPong.h>` only resolves
+under Arduino IDE 2.x.
+
+Library .cpp files include via the subdir when needed:
+```cpp
+// in src/PingPong.h (the flat shim):
+#include "pingpong/PingPong.h"   // relative to the shim's location
+```
+This works under both because relative-path include from inside
+the library's own source tree resolves naturally.
+
+**The smoke-compile rule (rule 16):** before zipping, compile a
+one-file sketch with every public include the user is expected
+to type. The flat syntax MUST compile under arduino-cli.
+```bash
+mkdir -p /tmp/Smoke && cat > /tmp/Smoke/Smoke.ino <<'EOF'
+#include "AutoLink.h"
+#include "PingPong.h"
+void setup(){} void loop(){}
+EOF
+bash build/arduino-cli-cmd.sh compile --fqbn esp32:esp32:firebeetle32 \
+    --warnings none /tmp/Smoke
+```
 
 ### `AutoLinkWeb.cpp` is not covered by the host tests
 
