@@ -4,6 +4,70 @@ All releases, most recent first.
 
 ---
 
+## v5.1.40
+
+**Injectable clock: idle-timeout, ACK RTO, and SWP/LCK stall are sub-ms deterministic host tests.**
+
+Pre-v5.1.40 had three time-dependent protocol paths unreachable on
+host: idle watchdog (`cfg.idleTimeoutMs`), ACK retransmit timeout
+(`ACK_RTO_MS`), and SWP/LCK stall retries. Either you waited real
+wall-clock time (not feasible) or you called `onTimer()`
+unconditionally (which doesn't faithfully simulate "5 s of idle").
+The unconditional call also masked bugs: e.g. the v5.1.19 retx
+deadlock only surfaced when the timer task ran separately from the
+loop task; on host, the test fired `onTimer()` synchronously,
+bypassing the deadlock entirely.
+
+v5.1.40 closes that gap:
+
+- **`MockHal::pumpClock(deltaMs)`** advances the simulated clock
+  AND fires `onTimer()` only when the protocol's scheduled
+  deadline has elapsed. Same chokepoint in production:
+  `EspHal::startTimer(ms)` schedules a FreeRTOS timer that calls
+  `link->onTimer()` when it fires. Both paths are deterministic
+  in their respective contexts.
+- **`MockHal::runFor(targetMs)`** loops `pumpClock` until total
+  elapsed. Lets tests simulate "5 s of idle" in real microseconds.
+- **`ALink::begin()` is now called from `AutoLink::begin()` on
+  host too** (was gated to ARDUINO pre-v5.1.40). Without it,
+  `MockHal::startTimer` is never called, no timer is armed, and
+  host tests can't drive the state machine. Safe on host because
+  `EspHal::begin()` is a no-op there.
+
+**Tests:**
+- 14 host binaries + 1 new `run_test_clock_injection` with 3
+  tests, all passing. `ClockInjectionTest.cpp` is the canonical
+  file for any future time-dependent behavior.
+  - `test_idle_timeout_drops_link` — bring link to OK, set
+    `maxBurstPerLoop = 0` to silence the closed loop, advance
+    5500ms simulated, verify `discCount` bumps and timer fired.
+  - `test_ack_timeout_retransmits` — bring link to OK, pump a
+    few cycles to get messages in flight, then pipe only A→B
+    (no ACKs back). Advance 1500ms simulated; assert
+    `txBytes` grew via retransmits.
+  - `test_sweep_stall_forces_break` — drop both sides, advance
+    2000ms simulated (long enough for SWP baud list +
+    `allowedBaudsCount * 2 * cfg.delayMs` LCK retries), verify
+    `sendBreakCalls` increased.
+- All toggle-verified: reverting `pumpClock` to a no-op fails
+  test 1 (idle watchdog never fires).
+- All 15 previously-passing host tests still pass. 3 pre-existing
+  failures (ALinkCobsSeqTest, ALinkErrorTest, ALinkIOTest,
+  ALinkMessageTest) unchanged from v5.1.38 — disclosed.
+
+**Disclosed limitations:**
+- Production timer scheduling (FreeRTOS) is unchanged; this only
+  adds the test-side pumpClock chokepoint.
+- `EspHal::begin()` is still gated to ARDUINO production build
+  (no FreeRTOS resources to release on host stub).
+- MockHal's `pumpClock` runs the timer-fire loop with a safety
+  bound of 16 iterations to avoid infinite loops if a timer
+  re-arms at `now` or earlier. This is sufficient for the
+  current protocol's timer discipline (every timer re-arms at
+  `now + okTickMs()` where `okTickMs() >= ACK_RTO_MS = 100`).
+
+---
+
 ## v5.1.39
 
 **One-owner ARQ: protocol owns seq stamps; facade owns payload bytes. No more translation layer.**
@@ -163,7 +227,7 @@ pending state exists.
 
 All 19 C++ suites + 1 facade suite (11 tests) + 1 closed-loop
 suite (3 tests) + 97 dashboard JS tests + 10 s loopback + 5 s
-loopback-noise regression all PASS. Arduino `verify_build.ino`
+loopback-noise regression all PASS. Arduino `build/verify_build/verify_build.ino`
 compiles clean. No protocol or wire-format change. v5.1.37 →
 v5.1.38.
 
@@ -214,7 +278,7 @@ Plus, the pre-existing tests in `AutoLinkFacadeTest.cpp` were strengthened to us
 - Bug 3 (the leak) is a malloc-trace issue at its core. Test 8 only pins the *presence* of the `free()` call, not whether it actually runs at the right time. A future change that frees the wrong buffer (e.g., double-free, free-before-use) would not be caught.
 - I cannot run the code on hardware (no ESP32 in this environment). The fixes are host + cross-compile verified. The actual "wire bytes emitted with no cache entry" scenario can only be triggered on real hardware with a real UART.
 
-All 18 C++ suites + 1 facade suite (11 tests) + 97 dashboard JS tests + 10 s loopback + 5 s loopback-noise regression all PASS. Arduino `verify_build.ino` compiles clean (45 KB RAM, 1007 KB flash). No protocol or wire-format change. v5.1.36 → v5.1.37.
+All 18 C++ suites + 1 facade suite (11 tests) + 97 dashboard JS tests + 10 s loopback + 5 s loopback-noise regression all PASS. Arduino `build/verify_build/verify_build.ino` compiles clean (45 KB RAM, 1007 KB flash). No protocol or wire-format change. v5.1.36 → v5.1.37.
 
 ---
 
@@ -244,7 +308,7 @@ User feedback (2026-06-19): the v5.1.35 `test_sendmsg_stalls_when_arq_cache_full
 - The `findActiveLine` pattern is grep-style (reads source, checks for active line). It is a structural pin, not a behavioral test. It is used only when the runtime path cannot be exercised on host (e.g., `sendMsg`'s `if (pendingCount_ >= ARQ_CACHE_SLOTS)` gate is upstream of the `link->sendMsg` call which requires UART). For code that CAN be exercised, behavioral tests are required.
 - I cannot reproduce the v5.1.17 boot crash or the v5.1.32 WiFi-bug symptoms on hardware (no ESP32 in this environment). The v5.1.19 deadlock fix and v5.1.32 WiFi-bg fix are host + cross-compile verified, not on-device verified.
 
-All 18 C++ suites + 1 new facade suite (5 tests) + 97 dashboard JS tests + 10 s loopback + 5 s loopback-noise regression all PASS. Arduino `verify_build.ino` compiles clean.
+All 18 C++ suites + 1 new facade suite (5 tests) + 97 dashboard JS tests + 10 s loopback + 5 s loopback-noise regression all PASS. Arduino `build/verify_build/verify_build.ino` compiles clean.
 
 No protocol or wire-format change. v5.1.35 → v5.1.36.
 
@@ -269,7 +333,7 @@ User-reported bugs (2026-06-19):
 - `test_sendmsg_stalls_when_arq_cache_full` — pins the invariant that the ARQ cache has exactly `ARQ_CACHE_SLOTS=32` slots matching `WINDOW`. The structural fix in `AutoLink::sendMsg` is verified by compile-time constant plus the loopback + noise regression suites which exercise the live facade on hardware.
 - `test_reset_clears_arq_state_maps` — sends 5 messages, forces a `dropLink()`, re-negotiates, asserts `pendingAcks() == 0`. Without the fix, the stale `ackedPending_` entries from the previous session would still be reported as in-flight after the re-sweep, even though the new session never sent anything.
 
-All 18 C++ suites + 97 dashboard JS tests + 10 s loopback + 5 s loopback-noise regression all PASS. Arduino `verify_build.ino` compiles clean.
+All 18 C++ suites + 97 dashboard JS tests + 10 s loopback + 5 s loopback-noise regression all PASS. Arduino `build/verify_build/verify_build.ino` compiles clean.
 
 No protocol or wire-format change. v5.1.34 → v5.1.35.
 
@@ -305,7 +369,7 @@ Both tests fail on v5.1.33 and pass on v5.1.34.
 
 **Disclosed:** the existing `test_reset_logs_request_and_result` test only verified the JS console log message ("button: reset" / "reset result:") — it never checked that the counters actually changed. That gap allowed this bug to ship. The new tests cover both the device layer (C++) and the user-facing flow (JS).
 
-**Tests:** 18 C++ suites + 97 dashboard JS tests + 10 s loopback + 5 s loopback-noise regression all PASS. Arduino `verify_build.ino` compiles clean.
+**Tests:** 18 C++ suites + 97 dashboard JS tests + 10 s loopback + 5 s loopback-noise regression all PASS. Arduino `build/verify_build/verify_build.ino` compiles clean.
 
 No protocol or wire-format change. v5.1.33 → v5.1.34.
 
@@ -332,7 +396,7 @@ User observation (2026-06-19, GUI screenshot at `http://10.10.10.29`): the Pong 
 
 **Disclosed:** dashboard JS test count grew from 83 to 89 (2 new tests for the role gate; 4 existing tests updated to set `deviceRole='Ping'` explicitly because the gate is now required). The /pausemsg endpoint still 404s on Pong because `UtilPong` doesn't register the hook — but the JS gate prevents the click from even reaching it.
 
-**Tests:** 89 dashboard JS tests + 17 C++ suites + 10 s loopback + 5 s loopback-noise regression all PASS. Arduino `verify_build.ino` compiles clean.
+**Tests:** 89 dashboard JS tests + 17 C++ suites + 10 s loopback + 5 s loopback-noise regression all PASS. Arduino `build/verify_build/verify_build.ino` compiles clean.
 
 No protocol or wire-format change. v5.1.32 → v5.1.33.
 
@@ -359,7 +423,7 @@ User feedback (2026-06-19): "it would be nice if WiFi was given up to 10 seconds
 
 **Re: "pong should not have a start/pause button"**: the Pause/Start button already has class `.ping-only` and is hidden by CSS `body[data-role="pong"] .ping-only{display:none}`. Verified by `test_pong_role_hides_ping_only_controls` in the JS test suite. The dashboard JS receives `role` from `/stats` and sets `body[data-role="pong"]` accordingly. If the user is seeing the button on Pong, it's a stale-cached HTML or they bypassed the role pill. The `/pausemsg` endpoint already 404s on Pong because `UtilPong` doesn't register the hook.
 
-**Tests:** all 17 C++ suites + 83 JS dashboard tests + 10 s loopback + 5 s loopback-noise regression all PASS. Arduino `verify_build.ino` compiles clean.
+**Tests:** all 17 C++ suites + 83 JS dashboard tests + 10 s loopback + 5 s loopback-noise regression all PASS. Arduino `build/verify_build/verify_build.ino` compiles clean.
 
 No protocol or wire-format change. v5.1.31 → v5.1.32.
 
@@ -381,7 +445,7 @@ User observation (2026-06-19): after v5.1.30's Pause/Start rename, the Ping log 
 - `test_setLinkPaused_suppresses_idle_drop_and_keepalive`: paused link survives 9 s of silent ticks (well past 3 s idle limit), emits zero frames; unpaused peer still drops via its own watchdog.
 - `test_setLinkPaused_false_restores_normal`: unpausing after a quiet period lets the watchdog bite on the next tick — proves the flag is mutable and the suppression is real, not a one-way disable.
 
-All 17 C++ suites + 83 JS dashboard tests + 10 s loopback + 5 s loopback-noise regression all PASS. Arduino `verify_build.ino` compiles clean.
+All 17 C++ suites + 83 JS dashboard tests + 10 s loopback + 5 s loopback-noise regression all PASS. Arduino `build/verify_build/verify_build.ino` compiles clean.
 
 No protocol or wire-format change. v5.1.30 → v5.1.31.
 
@@ -402,7 +466,7 @@ Log-scroll pause (the separate button at the bottom of the log overlay) keeps th
 
 **Disclosed:** the JS initial state changed. Any out-of-tree dashboard code that read `msgPaused` directly expecting `false` should be updated.
 
-**Tests:** all 17 C++ suites + 83 JS dashboard tests + 10 s loopback + 5 s loopback-noise regression all PASS. Arduino `verify_build.ino` compiles clean.
+**Tests:** all 17 C++ suites + 83 JS dashboard tests + 10 s loopback + 5 s loopback-noise regression all PASS. Arduino `build/verify_build/verify_build.ino` compiles clean.
 
 No protocol or wire-format change. v5.1.29 → v5.1.30.
 
@@ -425,7 +489,7 @@ User feedback (2026-06-19): the dashboard's Pause/Resume button was purely cosme
 - **Dashboard `toggleMsgPause()`**: now `async`. Optimistic UI flip + POST `/pausemsg`. Reverts on 404 (Pong side).
 - **WiFi now retries forever by default**: `AutoLinkWeb::begin()` used to give up after `WIFI_TIMEOUT_MS=12000` (one attempt). If the AP came up late (slow boot, channel change, DHCP hiccup), the user got a 404 in the browser and assumed the device was broken. Now wraps `WiFi.begin()` + the wait loop in a retry-with-backoff: each attempt gets 12 s, then 5 s sleep, then retry. `WIFI_RETRY_MAX_ATTEMPTS=0` means retry forever. Each retry logs a warning once per 30 s so a long-term outage doesn't flood the serial monitor. **`WiFi.disconnect()` is called between attempts** so the next association is fresh, not half-open. **Disclosed:** this changes boot behavior on a permanently-unreachable AP — the device will now loop forever on WiFi instead of giving up and starting the rest of the sketch. That's the correct trade for an always-on dashboard; if you need the old behavior set `WIFI_RETRY_MAX_ATTEMPTS=1` in your sketch or via a future config endpoint.
 
-**Tests:** all 16 C++ suites + 73 individual + 72 JS dashboard tests + loopback + noise regression all PASS. Arduino `verify_build.ino` compiles clean.
+**Tests:** all 16 C++ suites + 73 individual + 72 JS dashboard tests + loopback + noise regression all PASS. Arduino `build/verify_build/verify_build.ino` compiles clean.
 
 No protocol or wire-format change. v5.1.28 → v5.1.29.
 
@@ -980,7 +1044,7 @@ arduino-cli compile --fqbn esp32:esp32:firebeetle32 \
   --libraries AutoLink \
   --build-property "compiler.cpp.extra_flags=-I$REPO/AutoLink/src/util" \
   --build-property "build.extra_flags=-DAUTOLINK_HOST_TEST" \
-  verify_build/verify_build.ino
+  build/verify_build.ino
 ```
 
 → 1,000,715 bytes flash (76%), 45,732 bytes RAM (13%). **Compiles cleanly with v5.1.2.**
