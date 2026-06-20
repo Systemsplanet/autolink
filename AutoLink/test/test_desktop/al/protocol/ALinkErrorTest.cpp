@@ -141,7 +141,7 @@ void test_error_counter_during_swp() {
  assert(s0.discCount == 1);
 
  for (int i = 0; i < 3; i++) {
- ping.onTimer();
+ mHal.pumpClock(50); ping.onTimer();
  if (!mHal.txBuf.empty()) pipe_data(mHal, sHal);
  }
  ping.getStats(s0);
@@ -181,7 +181,7 @@ void test_error_counter_link_failures() {
  negotiate_to_ok(ping, pong, mHal, sHal);
 
  mHal.now = cfg.idleTimeoutMs + 50;
- ping.onTimer();
+ mHal.pumpClock(50); ping.onTimer();
  assert(ping.getState() == State::SWP);
 
  Stats s1;
@@ -221,7 +221,11 @@ void test_error_counter_link_failures() {
  ping.getStats(s);
  assert(s.discCount == 1);
 
- for (int i = 0; i < 100; i++) ping.onTimer();
+ // v5.1.40: pumpClock drives each tick at cfg.delayMs=50.
+ for (int i = 0; i < 100; i++) {
+   mHal.pumpClock(50);
+   mHal.pumpClock(50); ping.onTimer();
+ }
  Stats s2;
  ping.getStats(s2);
  assert(s2.discCount == 1);
@@ -239,16 +243,16 @@ void test_error_counter_link_failures() {
  negotiate_to_ok(ping, pong, mHal, sHal);
 
  mHal.now = cfg.idleTimeoutMs + 50;
- ping.onTimer();
+ mHal.pumpClock(50); ping.onTimer();
  assert(ping.getState() == State::SWP);
 
  for (int i = 0; i < 20; i++) ping.err();
  for (int i = 0; i < 5; i++) ping.err();
 
  // Pong "comes back": finish the re-sweep and re-lock.
- ping.onTimer(); pipe_data(mHal, sHal);
- ping.onTimer(); pipe_data(mHal, sHal);
- ping.onTimer(); pipe_data(mHal, sHal);
+ mHal.pumpClock(50); ping.onTimer(); pipe_data(mHal, sHal);
+ mHal.pumpClock(50); ping.onTimer(); pipe_data(mHal, sHal);
+ mHal.pumpClock(50); ping.onTimer(); pipe_data(mHal, sHal);
  pipe_data(sHal, mHal);
 
  Stats s;
@@ -273,7 +277,11 @@ void test_error_counter_link_failures() {
  ping.getStats(s);
  assert(s.discCount == 1);
 
- for (int i = 0; i < 200; i++) ping.onTimer();
+ // v5.1.40: pumpClock drives each tick at cfg.delayMs=50.
+ for (int i = 0; i < 200; i++) {
+   mHal.pumpClock(50);
+   mHal.pumpClock(50); ping.onTimer();
+ }
  ping.getStats(s);
  assert(s.discCount == 1);
  }
