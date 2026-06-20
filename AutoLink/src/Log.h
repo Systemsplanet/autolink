@@ -2,31 +2,21 @@
 #include <stdarg.h>
 #include <stddef.h>
 
-// --------------------------------------------------------------------------
-// Log — leveled singleton logger for the AutoLink stack: ESP_LOG* on device,
-// stdout on host builds.
-//
-// Usage:
-//   Log& LOG = Log::getLog();        // singleton
-//   LOG.setLevel(Log::DEBUG);
-//   LOG.error("class", "fatal %d", code);
-//   LOG.info ("class", "ready");
-//   LOG.debug("class", "value %s", "x");
-//   LOG.setLevel(Log::ERROR);         
-//
-// Level order: ERROR < INFO < DEBUG 
-//
-//   ERROR — error only
-//   INFO  — error + info
-//   DEBUG — error + info + debug
-
-// --------------------------------------------------------------------------
-
+// Log — leveled singleton logger.
+// On ESP_PLATFORM: routes to ESP_LOGE/W/I/D/V. On host: stdout.
 namespace autolink {
 
 class Log {
 public:
-    enum Level { ERROR = 0, INFO = 1, DEBUG = 2};
+    // Emit rule: level_for_msg <= current_level.
+    enum Level {
+        NONE    = 0,
+        ERROR   = 1,
+        WARNING = 2,
+        INFO    = 3,
+        DEBUG   = 4,
+        VERBOSE = 5
+    };
 
     static Log& getLog() {
         static Log inst;
@@ -36,41 +26,56 @@ public:
     void  setLevel(Level lv) { lvl = lv; }
     Level getLevel() const   { return lvl; }
 
+    bool wouldEmit(Level lvl_for_msg) const {
+        return lvl_for_msg <= lvl;
+    }
+
     void error(const char* tag, const char* fmt, ...) const {
+        if (lvl < ERROR) return;
         va_list ap; va_start(ap, fmt);
         emit("E", tag, fmt, ap);
         va_end(ap);
     }
 
+    void warning(const char* tag, const char* fmt, ...) const {
+        if (lvl < WARNING) return;
+        va_list ap; va_start(ap, fmt);
+        emit("W", tag, fmt, ap);
+        va_end(ap);
+    }
+
     void info(const char* tag, const char* fmt, ...) const {
-        if (lvl == ERROR) return;
+        if (lvl < INFO) return;
         va_list ap; va_start(ap, fmt);
         emit("I", tag, fmt, ap);
         va_end(ap);
     }
 
     void debug(const char* tag, const char* fmt, ...) const {
-        if (lvl == INFO || lvl == ERROR) return;
+        if (lvl < DEBUG) return;
         va_list ap; va_start(ap, fmt);
         emit("D", tag, fmt, ap);
         va_end(ap);
     }
 
-    // ---- Optional output sink ----
-    // A single callback registered once (e.g. by AutoLinkWeb) to receive
-    // every formatted log line after the normal ESP_LOG / stdout output.
-    // Must be fast and non-blocking: it runs in whatever task calls emit().
-    // setSink() is safe to call from setup() before UART tasks start.
+    void verbose(const char* tag, const char* fmt, ...) const {
+        if (lvl < VERBOSE) return;
+        va_list ap; va_start(ap, fmt);
+        emit("V", tag, fmt, ap);
+        va_end(ap);
+    }
+
+    // Sink is called from emit() on every formatted line, in the
+    // caller's task. Must be fast — non-blocking only.
     using LogSink = void(*)(char sev, const char* tag, const char* msg, void* ctx);
     void setSink(LogSink fn, void* ctx = nullptr);
     void clearSink();
 
 private:
     Level lvl = ERROR;
-
-    // Mutable so emit() (const) can call the sink without a const_cast.
-    mutable LogSink  sink_fn_  = nullptr;
-    mutable void*    sink_ctx_ = nullptr;
+    // Mutable so emit() can call the sink without a const_cast.
+    mutable LogSink sink_fn_  = nullptr;
+    mutable void*   sink_ctx_ = nullptr;
 
     Log() {}
     Log(const Log&)            = delete;
