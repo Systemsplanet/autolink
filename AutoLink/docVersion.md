@@ -4,6 +4,47 @@ All releases, most recent first.
 
 ---
 
+## v5.1.29
+
+**Bug fix: Ping now boots paused; Resume button actually stops the device from sending.**
+
+User feedback (2026-06-19): the dashboard's Pause/Resume button was purely cosmetic — it only flipped a JS variable that affected log polling. Ping's send loop didn't see it, so Ping blasted bytes from the moment the link came up, regardless of what the operator clicked. Two failures observed:
+
+1. Ping started sending before the user had a chance to look at the dashboard.
+2. The Resume button didn't restart sending after a manual pause (the underlying state never changed on the device side).
+
+**Fix:**
+
+- **Device-side pause state**: `UtilPing::paused_` defaults to `true` at boot. The send loop returns before pumping bytes when `paused_`. Only `/pausemsg?p=0` (or equivalent direct call) flips it false.
+- **New HTTP endpoint** `POST /pausemsg?p=1|0`. Returns 404 if no hook is registered (Pong side). Calls `msgPausedWriter_` which is wired in `UtilPing::installWebHooks()` to `UtilPing::setPaused()`.
+- **`/stats` exposes `msgPaused`**: the dashboard now reconciles the button label with the device's actual state on every poll. Refresh-after-pause, race on boot, and tab-switch all converge correctly.
+- **Dashboard `toggleMsgPause()`**: now `async`. Optimistic UI flip + POST `/pausemsg`. Reverts on 404 (Pong side).
+- **WiFi now retries forever by default**: `AutoLinkWeb::begin()` used to give up after `WIFI_TIMEOUT_MS=12000` (one attempt). If the AP came up late (slow boot, channel change, DHCP hiccup), the user got a 404 in the browser and assumed the device was broken. Now wraps `WiFi.begin()` + the wait loop in a retry-with-backoff: each attempt gets 12 s, then 5 s sleep, then retry. `WIFI_RETRY_MAX_ATTEMPTS=0` means retry forever. Each retry logs a warning once per 30 s so a long-term outage doesn't flood the serial monitor. **`WiFi.disconnect()` is called between attempts** so the next association is fresh, not half-open. **Disclosed:** this changes boot behavior on a permanently-unreachable AP — the device will now loop forever on WiFi instead of giving up and starting the rest of the sketch. That's the correct trade for an always-on dashboard; if you need the old behavior set `WIFI_RETRY_MAX_ATTEMPTS=1` in your sketch or via a future config endpoint.
+
+**Tests:** all 16 C++ suites + 73 individual + 72 JS dashboard tests + loopback + noise regression all PASS. Arduino `verify_build.ino` compiles clean.
+
+No protocol or wire-format change. v5.1.28 → v5.1.29.
+
+---
+
+## v5.1.28
+
+**Bug fix: gap events now count toward the error threshold so the link auto-falls-back to a slower baud.**
+
+User observation (2026-06-19): the SWP baud-sweep protocol was supposed to find the highest reliable baud and stay there. But in real hardware logs the protocol was happy at 115200 (peer answered SWP cleanly) and then the link got noisy: `RX cobsSeq=N GAP: ... +1 lost`, frame errors climbing slowly, `recv rejected (CRC/desync)` from the application layer, then `BREAK sent — forcing re-sweep`. The application layer (PingPong) was breaking the link manually because the protocol's recovery (`errs` threshold at 20) wasn't tripping fast enough — gaps accumulated but didn't count.
+
+**Root cause:** `ALink::onPayload` had a comment that said "we DON'T drop the link — the next retransmit will catch up." That assumption fails when the next retransmit ALSO gets lost (wire noise). The protocol kept the link up at a baud it couldn't sustain.
+
+**Fix:** a gap event now calls `err_unlocked()` to bump the error counter. When `errs > cfg.errThreshold`, the link drops and re-sweeps at the next baud in `cfg.allowedBauds[]`. This makes the baud-sweep protocol self-healing: the user sees fewer `disc=N` increments because the link finds its sustainable baud automatically instead of being manually broken by the application layer.
+
+**Disclosed:** this changes the wire behavior on lossy links. Before: gap events logged but link stays up (one noisy link instead of N re-sweeps). After: gap events trigger threshold-based drops. For lossy wires the net throughput may be lower (more re-sweeps) but the link will actually be reliable. For clean wires (the common case), the change is invisible — gaps are rare enough not to trip the threshold.
+
+**Tests:** all 16 C++ suites + 73 individual + 72 JS dashboard tests + loopback all PASS. New regression test `run_loopback_noise` injects 30% frame-drop noise into the mock wire and asserts the protocol actually recovers (baud fallback or disconnect+recover). Confirmed by toggling the fix on/off: with the fix the test passes (Pong disconnects once), without it the test fails (no recovery). Arduino verify_build.ino compiles clean.
+
+No protocol or wire-format change at the byte level. v5.1.27 → v5.1.28.
+
+---
+
 ## v5.1.27
 
 **Move the "test files mirror source packages" rule from `docVersion.md` into AGENTS.md rule 18.**
