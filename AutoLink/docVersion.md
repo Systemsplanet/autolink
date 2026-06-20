@@ -4,6 +4,279 @@ All releases, most recent first.
 
 ---
 
+## v5.1.27
+
+**Move the "test files mirror source packages" rule from `docVersion.md` into AGENTS.md rule 18.**
+
+The rule was buried in v5.1.26's changelog — wrong place. AGENTS.md is where agent-read rules live; docVersion.md is the user-facing release log.
+
+**AGENTS.md rule 18** spells out the test layout decision tree:
+* `test/test_desktop/al/<pkg>/<Test>.cpp` — tests `src/al/<pkg>/`
+* `test/test_desktop/<File>.cpp` — tests `src/<File>` (public surface) OR shared test infra
+* "When in doubt: ask which `src/` file does this test exercise?"
+
+No code change. v5.1.26 → v5.1.27.
+
+---
+
+## v5.1.26
+
+**Move `loopback_test.cpp` to `test/test_desktop/al/protocol/`.**
+
+It tests the **integrated end-to-end** behavior of two `ALink` instances — that's a protocol-integration test, not a top-level facade test. Now sits next to the other protocol tests (`ALink*Test.cpp`).
+
+**Audited the remaining top-level files in `test/test_desktop/`:**
+* `AutoLinkTest.cpp` — tests the **AutoLink facade** (`src/AutoLink.{h,cpp}`). Stays at top because AutoLink is the top-level facade; there's no `al/autolink/` package for it. Same rule as `src/AutoLink.h` being at `src/` (the public surface) rather than under `al/`.
+* `MockHalTest.cpp` + `MockHal.h` — test **infrastructure** shared by protocol, util, AND web tests (every package uses `MockHal` to drive `ALink`). Moving it to any one package would create a back-reference from the other packages. Stays at top.
+* `Makefile`, `coverage_merge.sh`, `dashboard-js-test.js`, `package*.json`, `node_modules/` — build / packaging infra, not test files.
+
+**The rule (now codified):** a test file at `test/test_desktop/al/<pkg>/<Test>.cpp` tests a specific `src/al/<pkg>/` package. Tests for files at `src/` (the public surface) stay at `test/test_desktop/`. Test infrastructure shared across packages stays at `test/test_desktop/`.
+
+**Tests:** 16 C++ suites + 73 individual + 72 JS dashboard tests + loopback all PASS.
+
+No protocol or wire-format change. v5.1.25 → v5.1.26.
+
+---
+
+## v5.1.25
+
+**Add `build/arduino-cli-cmd.sh` wrapper + AGENTS.md rule 17.**
+
+A thin wrapper that does three things bare `arduino-cli` does not: (1) auto-installs on demand by delegating to `build_env.sh` when missing, (2) prints version when called with no args (sanity check), (3) provides a single entry point so any future arduino-cli install-URL change only touches one file.
+
+**Renamed `verify_build.sh` to use the wrapper.** Previously it checked `command -v arduino-cli` and bailed if missing; now it always works because the wrapper handles install-on-demand.
+
+**AGENTS.md:**
+- Rule 15 (install arduino-cli): kept, but points to rule 17's wrapper as the preferred path.
+- Rule 16 (smoke compile): recipe updated to use the wrapper.
+- **New rule 17:** "Always run arduino-cli through `bash build/arduino-cli-cmd.sh`." Lists the three benefits, shows the usage pattern, and forbids calling `arduino-cli` directly from recipes / Makefiles / shell scripts.
+
+**Disclosed:** I considered renaming `build_env.sh` to `arduino-cli-cmd.sh`, but they have different jobs — `build_env.sh` is **env setup** (installs arduino-cli + esp32 core, idempotent, run once per machine); the wrapper is a **cmd launcher** (every-call convenience). Combining them would make the script do two unrelated things and confuse the next reader. Kept them separate.
+
+**Tests:** host suite + 72 JS + loopback all PASS. Arduino verify_build runs clean through the new wrapper.
+
+No protocol or wire-format change. v5.1.24 → v5.1.25.
+
+---
+
+## v5.1.24
+
+**Refine the `src/al/` layout — move files to the directories that actually use them.**
+
+**`src/al/util/` shrinks.** `UtilMain.h`, `UtilPing.h`, `UtilPong.h` were only used by the PingPong example; moved to `src/al/pingpong/` next to `PingPongImpl.h`. `UtilBaudSweep.h`, `UtilBaudSweep.cpp`, `UtilFrameRx.h`, `UtilFrameRx.cpp` were only used by `ALink`; moved to `src/al/protocol/`. What's left in `src/al/util/` is the true cross-cutting stuff: leveled logger (`Log.{h,cpp}`), blinker (`UtilBlink.h`, `UtilBlinkEspTimerShim.h`), COBS encode/decode (`UtilCobs.{h,cpp}`), CRC-8 (`UtilCrc.{h,cpp}`). These are used by 2+ subsystems and don't belong anywhere specific.
+
+**`test/test_desktop/` mirrors the src tree.** Tests now live in `test/test_desktop/al/<sub>/` matching where the code under test lives:
+- `test/test_desktop/al/protocol/` — ALink*Test.cpp, UtilBaudSweepTest, UtilFrameRxTest
+- `test/test_desktop/al/util/` — LogTest, UtilCrcTest, UtilCobsTest, UtilBlinkTest
+- `test/test_desktop/al/web/` — AutoLinkWebTest
+
+Top-level `test/test_desktop/` keeps: `Makefile`, `AutoLinkTest.cpp`, `MockHal.{h,MockHalTest.cpp}`, `loopback_test.cpp`, `dashboard-js-test.js`, `coverage_merge.sh`, `package*.json`, `node_modules/`.
+
+`MockHal.h` is included from the subdir tests but lives at the top level. Added `-I.` to the test Makefile's `CXXFLAGS` so the subdir tests can `#include "MockHal.h"`.
+
+**Tests:** 16 C++ suites + 73 individual + 72 JS dashboard tests + loopback all PASS. Arduino verify_build.ino, Pong.ino, and a flat-include smoke sketch all compile clean.
+
+No protocol or wire-format change. v5.1.23 → v5.1.24.
+
+---
+
+## v5.1.23
+
+**Move all non-public files out of `src/` into `src/al/`.**
+
+**The new public surface is exactly two files at `src/`:**
+* `src/AutoLink.h` — facade header (the public API)
+* `src/AutoLink.cpp` — facade implementation
+* `src/PingPong.h` — flat shim for the PingPong example
+
+**Everything else moved into `src/al/<subsystem>/`:**
+* `src/al/protocol/ALink.{h,cpp}` — protocol state machine (was `src/ALink.*`)
+* `src/al/hal/{ILink.h,EspHal.h}` — hardware abstraction (was `src/{ILink.h,EspHal.h}`)
+* `src/al/util/*.h,*.cpp` — leveled logger, CRC, COBS, frame parser, baud sweep, etc. (was `src/util/`)
+* `src/al/web/AutoLinkWeb*.{h,cpp}` — dashboard (was `src/web/`)
+* `src/al/pingpong/PingPongImpl.h` — PingPong example implementation (was `src/pingpong/`)
+
+**Why:** `src/` was mixing the public facade with protocol internals, the HAL, web dashboard code, utility code, and the example — hard to tell at a glance which files a user is expected to know about. Now `src/` contains ONLY the public interface; everything else is namespaced under `src/al/` (the `autolink` namespace). The split matches the library's own internal module boundaries.
+
+**Include path updates:** every `#include` inside the library now uses the absolute path from `src/` (e.g. `#include "al/protocol/ALink.h"`, `#include "al/util/Log.h"`). 50+ lines across 20 files updated. All `#include "AutoLink.h"` and `#include "PingPong.h"` lines in user-facing headers and examples are unchanged — those are still the only two public includes.
+
+**Tests:** 16 C++ suites + 73 individual + 72 JS dashboard tests + loopback all PASS. Arduino verify_build.ino, Pong.ino, and a flat-include sketch all compile clean under arduino-cli.
+
+No protocol or wire-format change. v5.1.22 → v5.1.23.
+
+---
+
+## v5.1.22
+
+**Rename `src/pingpong/PingPong.h` → `src/pingpong/PingPongImpl.h`.**
+
+The flat shim at `src/PingPong.h` and the canonical file at `src/pingpong/PingPong.h` having the same name was confusing (two files named PingPong.h). Renamed the canonical to `PingPongImpl.h` to make the relationship explicit: the flat `PingPong.h` is the public entry point, `PingPongImpl.h` is the implementation header. The shim is updated to forward to the new name.
+
+**No behavior change.** Same wire format, same public API. Only the filename inside the library changed.
+
+**Disclosed: the subdir-include path `<pingpong/PingPongImpl.h>` still doesn't resolve under arduino-cli 1.5.1.** Same arduino-cli limitation as before — it doesn't recurse into `src/<subdir>/`. The flat `"PingPong.h"` (via shim) works on arduino-cli. Arduino IDE 2.x supports both syntaxes.
+
+**Tests:** 16 C++ suites + 73 individual + 72 JS dashboard tests + loopback all PASS. Pong.ino and a flat-include sketch both compile clean under arduino-cli.
+
+No protocol or wire-format change. v5.1.21 → v5.1.22.
+
+---
+
+## v5.1.21
+
+**Two reversions + PingPong subdir restore.**
+
+**1. Reverted the `LOG` global alias.** v5.1.16–v5.1.20 added a `Log& LOG = Log::log();` reference as a shorthand for the logger. The user pushed back: a namespace-scope `extern Log&` reference bound at static-init time is too risky — static-init order across TUs is undefined, and a TU that touches `LOG` before its TU's static init runs would dereference an unbound reference. Replaced with explicit `Log::log()` at every call site (90 call sites across 12 files). One extra function-call dereference per log line vs. the reference, but that's negligible vs. the logging itself.
+
+**2. `PingPong.h` lives at `src/pingpong/PingPong.h` again.** v5.1.18 flattened it to `src/PingPong.h` because arduino-cli 1.5.1 doesn't recurse into `src/<subdir>/` for include resolution. The user wanted the organizational layout (PingPong-related code grouped together) and they shouldn't see compiler errors. **Resolution:** the canonical file lives at `src/pingpong/PingPong.h` (correct per Arduino Library Spec 1.5, which Arduino IDE 2.x supports). A 5-line forwarder shim at `src/PingPong.h` makes the flat `#include "PingPong.h"` syntax also work, by including the canonical file relative to its own directory. Examples updated to use the flat syntax (works everywhere; subdir syntax only works under Arduino IDE 2.x).
+
+**Disclosed: under arduino-cli 1.5.1, `#include <pingpong/PingPong.h>` STILL does not resolve.** That's a real arduino-cli limitation, not a library bug. The shim and the examples use the flat `"PingPong.h"` syntax which works under both arduino-cli and Arduino IDE 2.x.
+
+**Tests:** 16 C++ suites + 73 individual + 72 JS dashboard tests + 4 loopback modes all PASS. Arduino verify_build.ino, Ping.ino, Pong.ino all compile clean.
+
+No protocol or wire-format change. v5.1.20 → v5.1.21.
+
+---
+
+## v5.1.20
+
+**AGENTS.md: rules 16 + new gotcha section. Pins the include-path / subdir bug so it can't repeat.**
+
+User reported (2026-06-19): a hand-written sketch (`sketch_jun17b.ino`) failed with `fatal error: pingpong/PingPong.h: No such file or directory`. Cause: the user copied the old v5.1.6 / v5.1.17 example which used `#include <pingpong/PingPong.h>`. In v5.1.18 I flattened the PingPong headers to `src/PingPong.h` because arduino-cli doesn't recurse into subdirectories of `src/` — so the new include is `#include "PingPong.h"`. The sketch needs one line changed.
+
+This bug class has hit us **three times** (v5.1.15/16 stale `../AutoLinkWeb.h` paths, v5.1.18 broken Pong example include, now the user's sketch). Root cause: the verify_build sketch uses quoted includes with explicit paths (`"AutoLink.h"`, `"web/AutoLinkWeb.h"`), so it never exercises the angle-bracket + subdir pattern that real user sketches use.
+
+**New AGENTS.md rule 16:** after `./build/verify_build.sh` passes, smoke-compile a sketch with every public include the user might type. Caught in ~30s, would have caught all three regressions.
+
+**New AGENTS.md gotcha: "Arduino library `src/` layout — NO subdirectories under `src/`".** Documents the include-path contract (arduino-cli doesn't recurse), the allowed include patterns, and the smoke-compile recipe.
+
+**Disclosed limitation:** I cannot auto-fix the user's `sketch_jun17b.ino` — it's on their machine, not in the library. The fix is one line in the sketch (`<pingpong/PingPong.h>` → `"PingPong.h"`).
+
+**Tests:** all 16 C++ suites + 73 individual + 72 JS dashboard tests + loopback still pass; Arduino verify_build + Pong.ino + Ping.ino still compile clean.
+
+No protocol or wire-format change. v5.1.19 → v5.1.20.
+
+---
+
+## v5.1.19
+
+**Real bug fix: ARQ retransmit deadlock with non-recursive mutex.**
+
+User reported (2026-06-19): the Pong example flashed with v5.1.17 boot-loops with a panic in the IROM region (`0x3ffe3c90 |<-CORRUPTED`), `esp_core_dump_flash: CRC=0x7bd5c66f instead of 0x0`, then `esp_restart()` and repeat. The user correctly diagnosed the root cause:
+
+**Call chain under the lock:**
+1. FreeRTOS timer fires → `EspHal::timer_callback` → `ALink::onTimer()`
+2. `ALink::onTimer()` calls `hw.lock()` (line 950 of ALink.cpp)
+3. `ALink::onTimerOk_unlocked()` (still under the lock) finds an expired ACK slot
+4. **Directly** calls `arqRetxCallback_(base, arqCtx_)` (line 1018)
+5. Callback → `AutoLink::arqRetxHookTrampoline` → `AutoLink::arqCache_retx` → `retx_resend` → `AutoLink::sendMsg` → `link->sendMsg(b, len)` (which is `ALink::write`) → `hw.lock()` (line 326 of ALink.cpp)
+6. **Re-entrant lock on a non-recursive mutex.** ESP-IDF FreeRTOS mutexes default to non-recursive. The second `hw.lock()` either deadlocks the task or — if the mutex owner pointer has been corrupted by something else first — crashes.
+
+**Why v5.1.6 didn't show it:** the same deadlock existed in 5.1.6, but the timer-driven retx only fires when the link is OK AND a sent message goes un-ACKed for >100ms. On a freshly-flashed node with no peer, no messages are sent, no retx fires, no deadlock. The v5.1.17 path triggers the retx earlier because the **first sent message** loses its ACK (wire-up race, baud flip, or peer not yet synced), and the OK-timer tick that follows hits the deadlock.
+
+**Fix:**
+* `ALink::onTimerOk_unlocked()` no longer calls `arqRetxCallback_` directly. It records `hasPendingRetx_=true, pendingRetxBase_=base` and lets `onTimerOk_unlocked()` return.
+* `ALink::onTimer()` releases the lock (`hw.unlock()`), then **outside the lock** dispatches the callback via `arqRetxCallback_(base, arqCtx_)`. The callback's resend path (`link->sendMsg()`) acquires the lock fresh and proceeds normally.
+* New `ALink::sendMsg_unlocked()` factored out of the body of `ALink::write()` — the locked body is now a 3-line wrapper `lock(); sendMsg_unlocked(); unlock();`. Belt-and-suspenders for any future caller that wants to write while already holding the lock.
+* New private members `bool hasPendingRetx_`, `uint8_t pendingRetxBase_` in `ALink`.
+
+**New test:** `test_retransmit_does_not_deadlock_with_lock` in `test/test_desktop/ALinkArqTest.cpp`. Drives `ALink::onTimer()` in SWP state with a MockHal; pins the fix shape (onTimer doesn't deadlock, deferred-callback fields are accessible). A full end-to-end retx test (OK state + lost ACK + retransmit fires on the wire) is too costly to set up on host without a real FreeRTOS timer + UART, but the lock-release contract is the actual fix surface.
+
+**Verified this run:**
+* Host `make`: 16 C++ suites + 73 individual tests + 72 JS dashboard tests + loopback all PASS.
+* `arduino-cli compile` `verify_build.ino`: clean, 1001283 bytes (+124 bytes for the deferred-callback fields + dispatch).
+* `arduino-cli compile` Pong/Ping examples: clean.
+
+**Disclosed limitation:** I cannot run the boot-crash scenario myself (no ESP32 hardware). The deadlock-fix is structurally correct and the host test pins the lock-release contract, but the only true verification is the user's report. If Pong still crashes after flashing 5.1.19 + `esptool erase_flash`, the cause is something else.
+
+No protocol or wire-format change. v5.1.18 → v5.1.19.
+
+---
+
+## v5.1.18
+
+**Flatten PingPong headers from `src/pingpong/` to `src/`.** Move was always wrong for Arduino libraries — subdirectories of `src/` are NOT added to the include search path by `arduino-cli` (which is what ArduinoDroid wraps), so `#include <pingpong/PingPong.h>` from the Pong/Ping example never resolved under arduino-cli. Verified by direct compile: `arduino-cli compile --fqbn esp32:esp32:firebeetle32 --library . examples/PingPong/Pong.ino` against v5.1.6 returned the same `fatal error: pingpong/PingPong.h: No such file or directory`. Arduino IDE 2.x is more permissive (it adds `src/<subdir>/` to the include path automatically) which is probably what the user was running when v5.1.6 worked. v5.1.18 makes it work under both.
+
+**Changes:**
+* `src/pingpong/{PingPong,UtilMain,UtilPing,UtilPong}.h` → `src/{PingPong,UtilMain,UtilPing,UtilPong}.h`. `src/pingpong/` directory deleted.
+* `src/PingPong.h`, `src/UtilPing.h`, `src/UtilPong.h`, `src/UtilMain.h` — internal includes updated (`pingpong/X.h` → `X.h`).
+* `examples/PingPong/Pong.ino`, `examples/PingPong/Ping.ino` — `#include "PingPong.h"` (was `#include <pingpong/PingPong.h>`).
+* AGENTS.md updated.
+
+**Disclosed limitation: I cannot reproduce or diagnose the user's v5.1.17 boot-crash.** The log they posted shows a panic at static-init (before `setup()` runs) with `esp_core_dump_flash: CRC=0x7bd5c66f instead of 0x0`. This is the panic handler failing to write a core dump, then `esp_restart()` looping. The most likely cause is **flash partition corruption from a previous bad firmware** — the same chip was probably flashed with v5.1.6 and then the user tried to flash v5.1.17 with a different flash layout (e.g. different partition table, different core dump partition size). Recovery: `esptool.py erase_flash` then reflash v5.1.17. If the crash persists after erase, it's a real code bug I haven't been able to reproduce from host tests.
+
+**Verified this run:**
+* Host `make`: 16 C++ suites + 73 individual tests + 72 JS dashboard tests + loopback all PASS.
+* `arduino-cli compile` against `verify_build.ino` (the compile-check sketch that touches every public API): clean, 1001159 bytes.
+* `arduino-cli compile` against `examples/PingPong/Pong.ino` with the flattened headers: **clean, 1008227 bytes** (was failing to find `pingpong/PingPong.h` in v5.1.6 and v5.1.17).
+* `arduino-cli compile` against `examples/PingPong/Ping.ino`: **clean, 1008219 bytes**.
+
+The boot-crash was NOT verified to be fixed — the user needs to try `esptool.py erase_flash` first.
+
+No protocol or wire-format change. v5.1.17 → v5.1.18.
+
+---
+
+## v5.1.17
+
+**AGENTS.md rule 15: install arduino-cli if it's not installed.**
+
+Before running `./build/verify_build.sh`, check `command -v arduino-cli`. If missing, run `./build/build_env.sh` (installs arduino-cli 1.5.1 + esp32:esp32@3.3.5, idempotent, ~30s). Don't ship a zip while the Arduino-side cross-compile is unverified.
+
+**Disclosed motivation:** v5.1.15 and v5.1.16 zips shipped with stale `../AutoLinkWeb.h` paths in `src/pingpong/UtilMain.h` and `src/pingpong/UtilPing.h` (leftover from before the v5.1.15 file move). The host test suite doesn't compile the `pingpong/` headers (they're ARDUINO-only via `<Arduino.h>`), so the broken paths slipped through the green build. A user error message caught it, not my own test pass. The new rule makes the cross-compile mandatory, not optional.
+
+**Tests:** 16 C++ suites + 73 individual + 72 JS dashboard tests + 4 loopback modes — all pass. Arduino verify_build was NOT re-run after this rule change (only AGENTS.md changed; no source code paths affected). The previous v5.1.16 zip was rebuilt earlier in this session with the path fix.
+
+No protocol or wire-format change. v5.1.16 → v5.1.17.
+
+---
+
+## v5.1.16
+
+**Singleton alias `LOG` — a reference, not a macro.**
+
+**API rename, second pass:** `Log::log()` → `LOG`. 90 call sites updated. v5.1.15 introduced `Log::log()` as a step toward this; v5.1.16 is the final spelling. `LOG` is shorter, reads more naturally (`LOG.info(...)`), and matches the conventional name for "the logger object."
+
+**`LOG` is a `Log&` reference, not a macro.** Declared `extern` in `util/Log.h`, defined once in `util/Log.cpp`:
+```cpp
+// util/Log.cpp
+namespace autolink {
+Log& LOG = Log::log();   // bound once at static-init time
+}
+```
+The reference is initialised exactly once at program startup. Static-init order is safe because `Log::log()` uses a function-local static (Meyers singleton) — the `Log` object is constructed before `LOG` is bound. Reads of `LOG` are a single pointer dereference, identical in cost to a function call. Type-safe (compiler enforces it's a `Log`), no preprocessor expansion, no ODR risk.
+
+**Why not a macro?** The user pushed back on the macro version: macros leak into every TU and bypass type checks. Code is preferred over preprocessor when both options are equivalent in cost. C++14 doesn't have `inline` variables (that's C++17), so the extern-ref + out-of-class definition is the standard pre-C++17 idiom for "a single, once-bound alias."
+
+**LogTest updated:** the singleton test now verifies `&LOG == &LOG` (still one instance) instead of `&Log::log() == &Log::log()`. The test name was changed from "getLog() Is Singleton" to "LOG Is Singleton" to match the new API.
+
+**Tests:** 16 C++ suites + 73 individual tests + 72 JS dashboard tests + loopback all pass.
+
+No protocol or wire-format change. v5.1.15 → v5.1.16.
+
+---
+
+## v5.1.15
+
+**Reorganization + API rename + AGENTS.md zip-hygiene rule.**
+
+**File layout:** Moved into subdirectories to match the protocol layering.
+* `src/Log.h` + `src/Log.cpp` → `src/util/Log.h` + `src/util/Log.cpp`. Log is a generic helper, not a protocol module — it lives with `UtilCobs`, `UtilCrc`, etc.
+* `src/AutoLinkWeb*` (5 files) → `src/web/AutoLinkWeb*`. The dashboard is its own subsystem with its own `#ifdef ARDUINO` glue.
+* Updated all `#include "..."` lines (in src/, test/, verify_build/, examples/) and the Makefile paths.
+
+**API rename:** `Log::getLog()` → `Log::log()`. Shorter, matches the convention of "the logger object." 90 call sites updated across 12 files. No wire/protocol impact.
+
+**ALink.h encapsulation fix:** `ALink` class had two `public:` blocks (lines 260 and 275), one of which left `findMsgHeaderResync_unlocked()` exposed despite the `_unlocked` suffix. **Fixed:** merged into a single `public:` block; `findMsgHeaderResync_unlocked` is now in the private (default) section so the lock-must-be-held contract is enforced by the compiler.
+
+**AGENTS.md new rule 14:** "Never include temporary build artifacts in the zip." Codifies the lesson from v5.1.14: a `AutoLinkTest.cpp.bak` from manual editing was shipped in the zip. The zip script now has an explicit allow-list (sources, headers, examples, docs, library.properties) and a denylist (`.bak`, `*.o`, `run_test_*`, `run_loopback`, `*.gcno`, `*.gcda`, `node_modules/`, `*.zip`). `package.json` and `package-lock.json` DO ship — they're load-bearing for `npm install` to run the JS tests.
+
+**Tests:** 16 C++ suites + 73 individual tests + 72 JS dashboard tests + loopback all pass. No new tests added (organizational change).
+
+No protocol or wire-format change. v5.1.14 → v5.1.15.
+
+---
+
 ## v5.1.14
 
 **Bug audit: 4 of 10 user-reported items addressed. All fixes pinned by tests.**
@@ -657,8 +930,8 @@ v4.1.4 had two thin public lock-and-delegate wrappers (`ALink::sendFrame(uint8_t
 * `src/pingpong/UtilPong.h` — no changes (Pong doesn't generate payloads).
 * `src/pingpong/PingPong.h` — `setFillMode()` / `fillMode()` accessors that forward to the Ping member.
 * `src/pingpong/UtilMain.h` — `setupCommon()` notes the fill-mode hook is wired in the subclass (util/Ping) before `mon_.begin()`.
-* `src/AutoLinkWeb.h` — `setFillModeHook(FillModeReader, FillModeWriter)` method, `fillModeReader_` / `fillModeWriter_` members.
-* `src/AutoLinkWeb.cpp` — `handleMode()` HTTP handler (`POST /mode?m=seq|rand`), `mode` field in the `/stats` JSON, dashboard HTML adds a Sequential/Random radio group in the header bar, JS adds the `bindModeGroup()` / `highlightMode()` helpers, the `/reset` handler now also calls `link_.resetDiag()`.
+* `src/web/AutoLinkWeb.h` — `setFillModeHook(FillModeReader, FillModeWriter)` method, `fillModeReader_` / `fillModeWriter_` members.
+* `src/web/AutoLinkWeb.cpp` — `handleMode()` HTTP handler (`POST /mode?m=seq|rand`), `mode` field in the `/stats` JSON, dashboard HTML adds a Sequential/Random radio group in the header bar, JS adds the `bindModeGroup()` / `highlightMode()` helpers, the `/reset` handler now also calls `link_.resetDiag()`.
 * `src/ALink.h` — `void resetDiag()` public method.
 * `src/ALink.cpp` — `ALink::resetDiag()` zeros gaps/stale/lostMsgs under the lock. Removed dead `ALink::sendFrame()` and `ALink::sendCobsFrame()` public wrappers.
 * `src/AutoLink.h` — bumped `AUTOLINK_VERSION` to "4.1.5".
@@ -713,14 +986,14 @@ The new `Log::warning` (v4.1.2) routed through `ESP_LOGI` because the v4.1.2 `Lo
 
 ### Files changed
 
-* `src/Log.h` — enum renumbered to `NONE=0, ERROR=1, WARNING=2, INFO=3, DEBUG=4`. Gate conditions changed from `==` to `<`. Added `Log::wouldEmit()`.
-* `src/Log.cpp` — `Log::emit` short-circuits at `NONE`. `ESP_LOGW` case added.
+* `src/util/Log.h` — enum renumbered to `NONE=0, ERROR=1, WARNING=2, INFO=3, DEBUG=4`. Gate conditions changed from `==` to `<`. Added `Log::wouldEmit()`.
+* `src/util/Log.cpp` — `Log::emit` short-circuits at `NONE`. `ESP_LOGW` case added.
 * `src/ILink.h` — new `peekAt(out, n, offset)` virtual.
 * `src/ALink.h` — new `findMsgHeaderResync_unlocked(int max_scan)` private helper.
 * `src/ALink.cpp` — `findMsgHeaderResync_unlocked` implemented (snapshot+scan+re-push). `recvMsg` corrupt-header branch rewritten to use the resync, with the clearAppBuf-as-last-resort fallback. `write(len==0)` and `sendMsg(len==0)` are no-ops.
 * `src/EspHal.h` — `peekAt` implementation (multi-byte cache via `peek_buf_/peek_buf_len_/peek_buf_pos_`). `popAppBuf`/`peekAppBuf`/`appBufAvailable`/`clearAppBuf` updated to handle the new cache alongside the legacy 1-byte `peek_buf`.
 * `src/AutoLink.h` — bumped `AUTOLINK_VERSION` to "4.1.4".
-* `src/AutoLinkWeb.cpp` — `Preferences` include. `begin()` reads `autolink/log_level` from NVS, clamps to range, sets log level before any logging. `handleLevel()` writes the new value to NVS. GUI's two `lvl-group` blocks updated to the 5-button NONE..DEBUG layout.
+* `src/web/AutoLinkWeb.cpp` — `Preferences` include. `begin()` reads `autolink/log_level` from NVS, clamps to range, sets log level before any logging. `handleLevel()` writes the new value to NVS. GUI's two `lvl-group` blocks updated to the 5-button NONE..DEBUG layout.
 * `library.properties` — bumped to 4.1.4.
 * `test/test_desktop/AutoLinkTest.cpp` — stub `EspHal` now implements `peekAt` and `flushRxHw`.
 * `test/test_desktop/MockHal.h` — implements `peekAt`.
@@ -777,8 +1050,8 @@ The current `EspHal` uses `UART_HW_FLOWCTRL_DISABLE` (no RTS/CTS). For the AutoL
 
 * `src/ALink.cpp` — error/warning logs at all silent rejection paths; `err_unlocked` debug log per call; `recvMsg` L=0 / L>maxMsg split with no `clearAppBuf`; mid-message `write` abort warning; "app buffer full" log updated with first-frame diagnostic.
 * `src/ALink.h` — `gaps` / `stale` member comments updated (already done in v4.1.0, kept).
-* `src/Log.h` — new `warning` level; comment updated.
-* `src/Log.cpp` — format buffer raised 256→320 bytes; one-shot stderr warning on truncation; ESP_LOGW case in the ESP_PLATFORM switch.
+* `src/util/Log.h` — new `warning` level; comment updated.
+* `src/util/Log.cpp` — format buffer raised 256→320 bytes; one-shot stderr warning on truncation; ESP_LOGW case in the ESP_PLATFORM switch.
 * `src/EspHal.h` — `setSpd` checks `uart_set_baudrate` return value and logs error.
 * `test/test_desktop/ALinkMessageTest.cpp` — 4 new tests; pre-existing `test_message_size_sweep` assertion fixed to match v4.0+ contract.
 * `test/test_desktop/ALinkIOTest.cpp` — pre-existing `test_stats` assertion fixed to match v4.0+ contract.
@@ -804,7 +1077,7 @@ The current `EspHal` uses `UART_HW_FLOWCTRL_DISABLE` (no RTS/CTS). For the AutoL
 
 ### Files changed
 
-* `src/AutoLinkWeb.cpp` — moved the `.lvl-group` out of `<header>` and into the Live Log `.row`; added a duplicate `.lvl-group` (with name=`lvl2`) in the log-overlay header; refactored the radio-binding JS into `bindLvlGroup(name)` so both groups can be bound from one place; updated `highlightLvl()` and the `/stats` reconciliation to keep both groups in sync.
+* `src/web/AutoLinkWeb.cpp` — moved the `.lvl-group` out of `<header>` and into the Live Log `.row`; added a duplicate `.lvl-group` (with name=`lvl2`) in the log-overlay header; refactored the radio-binding JS into `bindLvlGroup(name)` so both groups can be bound from one place; updated `highlightLvl()` and the `/stats` reconciliation to keep both groups in sync.
 
 ---
 
