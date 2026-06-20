@@ -287,6 +287,116 @@ void test_facade_arq_cache_slots_exceeds_window() {
     std::cout << "PASS" << std::endl;
 }
 
+// v5.1.48 (cache-miss cascade regression test): the miss-cleanup
+// path in arqCache_retx must NOT clear any neighbour cache slot.
+//
+// Pre-v5.1.47, the miss branch ran `for i<8 onAck(seq+i)`. With seq
+// being the message base, this cleared seq..seq+7 — which crosses
+// message boundaries when messages have fewer than 8 chunks (most
+// messages). Each onAck fired the arqAckHookTrampoline, which
+// decremented/freed the neighbour's cache slot via baseSeq lookup.
+// The next chunk of those neighbours then missed its cache on retx
+// → another width-8 sweep → cascade. Visible in the v5.1.45 logs as
+// "RX ACK ... DROPPED (not in pending map)" bursts and multi-second
+// ACK ages.
+//
+// This test directly drives the cache-miss path: fill the cache
+// with several adjacent messages, take a buffer out of one slot
+// (mimicking the retx success path), then call arqCache_retx on
+// that base — which is now a cache miss. With v5.1.45 (no fix),
+// the trampoline fires 8 times for bases [seq, seq+1, ..., seq+7],
+// hitting the neighbours. With v5.1.48, the trampoline fires zero
+// times (the fix returns false without touching state).
+void test_facade_cache_miss_does_not_clear_neighbours() {
+    std::cout << "\n=== Test: cache-miss cleanup never crosses message boundaries (v5.1.48) ===" << std::endl;
+    AutoLink link(0, 16, 17, true);
+
+    // Tracer: count every base seq the arqAckHookTrampoline is
+    // called with. Use ALink::setArqHooks directly so we can
+    // swap the trampoline for our tracer (the facade's
+    // AutoLink::setArqHooks is private to the link; the
+    // underlying ALink exposes it). ArqAckCallback is
+    // bool(*)(uint8_t baseSeq, void* ctx). We'll replace
+    // BOTH ack and retx with tracers so we can observe exactly
+    // what the miss path fires.
+    int ackCalls = 0;
+    std::vector<uint8_t> ackBases;
+    auto ackTracer = [](uint8_t base, void* ctx) -> bool {
+        auto* p = static_cast<std::pair<int*, std::vector<uint8_t>*>*>(ctx);
+        (*p->first)++;
+        p->second->push_back(base);
+        return false;
+    };
+    auto retxTracer = [](uint8_t /*base*/, void* /*ctx*/) -> bool {
+        return false;  // do not actually retransmit
+    };
+    auto ctx = std::make_pair(&ackCalls, &ackBases);
+    link.linkForTest()->setArqHooks(ackTracer, retxTracer, &ctx);
+
+    // Fill the cache with three adjacent messages so the
+    // base seqs are dense (e.g. bases 10, 16, 22 with 6 chunks
+    // each at 1024B payloads).
+    uint8_t payload[16] = {0};
+    for (int i = 0; i < 3; i++) {
+        link.test_arqCache_put((uint8_t)(10 + i*6), payload, 16,
+                                (uint8_t)chunkCount(16));
+    }
+    assert(link.arqCacheSizeForTest() == 3);
+
+    // Plant ackedPending_[] for the chunks we care about — base=16
+    // and the neighbouring bases 17..23. Production would set
+    // these from sendCobsFrameAcked_unlocked; the test plants
+    // them directly so the miss-branch's onAck(seq+i) sweep has
+    // something to fire against (onAck returns immediately for
+    // seqs not in ackedPending_[], so without this planting the
+    // trampoline never fires and we can't observe the bug).
+    link.test_markAckedPending(16);
+    for (int i = 1; i < 8; i++) link.test_markAckedPending((uint8_t)(16 + i));
+
+    // Take buffer out of the middle message's slot (base=16).
+    // This mimics what the successful-retx path does — frees
+    // the slot so the protocol's next timer-fire for seq=16
+    // hits the cache-miss branch.
+    uint8_t* outBuf = nullptr;
+    int outLen = 0;
+    link.test_arqCache_takeRetxBuffer(16, &outBuf, &outLen);
+    free(outBuf);
+    assert(link.arqCacheSizeForTest() == 2);
+    assert(ackCalls == 0);  // takeRetxBuffer doesn't fire ack hook
+
+    // Trigger the cache-miss path by calling arqCache_retx on
+    // the now-empty slot. With v5.1.45 (buggy), this fires
+    // onAck(16..23) via the protocol layer, which in turn
+    // fires the ackTracer for bases 16, 17, 18, ..., 23 —
+    // clearing neighbours at base=22 (still in cache, will
+    // be prematurely freed). With v5.1.48, ackBases stays
+    // empty (no neighbour cleared).
+    link.test_arqCache_retx(16);
+
+    // Assert (a): no neighbour base was passed to the ack
+    // hook. Specifically: base=22 (still in cache) must not
+    // have been cleared, and no base at all should have been
+    // passed to the hook from the miss path.
+    int cacheAfter = link.arqCacheSizeForTest();
+    std::cout << "  miss-cleanup fired ackTracer " << ackCalls
+              << " times with bases: ";
+    for (auto b : ackBases) std::cout << (int)b << " ";
+    std::cout << "\n  cache size after miss: " << cacheAfter << std::endl;
+    // v5.1.48 fix: the miss branch returns false without
+    // firing any onAck. Pre-fix: would fire 8 times.
+    assert(ackCalls == 0);
+    // Base=22 must still be in the cache (not cleared by a
+    // stray onAck(22) from the neighbour sweep).
+    bool base22StillThere = false;
+    for (int i = 0; i < (int)link.arqCacheSizeForTest(); i++) {
+        // peek by direct lookup: arqCache_findBySeq is public.
+        if (link.test_arqCache_findBySeq(22) >= 0) base22StillThere = true;
+    }
+    assert(base22StillThere);
+    assert(cacheAfter == 2);  // only the test-targeted slot was taken
+    std::cout << "PASS (cache-miss cleared nothing; base=22 neighbour intact)" << std::endl;
+}
+
 // ---- main ---------------------------------------------------------------
 
 int main() {
@@ -308,6 +418,7 @@ int main() {
     test_facade_link_reset_clears_cache();
     test_facade_repeated_drops_do_not_latch_gate();
     test_facade_arq_cache_slots_exceeds_window();
+    test_facade_cache_miss_does_not_clear_neighbours();
     std::cout << "\n=== AutoLink Facade Tests Completed Successfully ===" << std::endl;
     return 0;
 }
