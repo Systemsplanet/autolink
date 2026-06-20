@@ -488,29 +488,35 @@ async function poll(){
     var r=await tfetch('/stats',null,5000);
     if(!r.ok)throw 0;
     var d=await r.json();
-    if(!msgPaused){
-      set('txbps',bps(d.txBps));
-      set('txtot','total '+bytes(d.txTotal));
-      set('rxbps',bps(d.rxBps));
-      set('rxtot','total '+bytes(d.rxTotal));
-      set('discon', d.errTotal);
-      var lm=d.lostMsgs||0;
-      set('lostmsgs', lm + (lm===1?' lost msg':' lost msgs'));
-      var ec=d.errCount||0;
-      set('errcnt', ec + (ec===1?' frame error':' frame errors'));
-      set('rssi',d.rssi+' dBm');
-      set('heap','heap '+bytes(d.freeHeap));
-      if(d.state==='OK'){
-        set('baud', d.baudRate ? d.baudRate.toLocaleString()+' baud' : '?');
-      } else if(d.state==='SWP'){
-        set('baud', (d.baudRate ? d.baudRate.toLocaleString() : '?')+' \u21c4 sweeping');
-      } else if(d.state==='LCK'){
-        set('baud', (d.baudRate ? d.baudRate.toLocaleString() : '?')+' \u21c4 locking');
-      } else {
-        set('baud', d.baudRate ? d.baudRate.toLocaleString()+' baud' : '\u2014');
-      }
-      set('uptime','up '+hms(d.uptimeS));
+    // v5.1.34: always update the dashboard counters — even when the
+    // user has paused log scrolling (msgPaused=true). Previously
+    // the `if(!msgPaused)` gate also skipped the counter update,
+    // so the dashboard kept showing the placeholder em-dashes until
+    // the user clicked Resume. Worse: Reset would zero the
+    // counters on the device but the display wouldn't reflect it.
+    // The `msgPaused` flag is now only used for the message-pause
+    // button label reconciliation; the counters are always live.
+    set('txbps',bps(d.txBps));
+    set('txtot','total '+bytes(d.txTotal));
+    set('rxbps',bps(d.rxBps));
+    set('rxtot','total '+bytes(d.rxTotal));
+    set('discon', d.errTotal);
+    var lm=d.lostMsgs||0;
+    set('lostmsgs', lm + (lm===1?' lost msg':' lost msgs'));
+    var ec=d.errCount||0;
+    set('errcnt', ec + (ec===1?' frame error':' frame errors'));
+    set('rssi',d.rssi+' dBm');
+    set('heap','heap '+bytes(d.freeHeap));
+    if(d.state==='OK'){
+      set('baud', d.baudRate ? d.baudRate.toLocaleString()+' baud' : '?');
+    } else if(d.state==='SWP'){
+      set('baud', (d.baudRate ? d.baudRate.toLocaleString() : '?')+' \u21c4 sweeping');
+    } else if(d.state==='LCK'){
+      set('baud', (d.baudRate ? d.baudRate.toLocaleString() : '?')+' \u21c4 locking');
+    } else {
+      set('baud', d.baudRate ? d.baudRate.toLocaleString()+' baud' : '\u2014');
     }
+    set('uptime','up '+hms(d.uptimeS));
     setPill(d.state);
     if(d.version){
       document.getElementById('ver').textContent='v'+d.version;
