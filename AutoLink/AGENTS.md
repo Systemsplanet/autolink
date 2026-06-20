@@ -206,11 +206,16 @@ for context.**
       discards the return value. That's not a test, that's
       syntax checking.
     * **Don't** write a test that reads source text and asserts
-      it contains a substring. That's grep, not a test. (We do
-      use grep-style structural pins for code that can't run on
-      host — see `AutoLinkFacadeTest.cpp` — but those are
-      documented as such and the pin must still fail when the
-      code is commented out.)
+      it contains a substring. That's grep, not a test.
+      **v5.1.43: structural-pin tests in `AutoLinkFacadeTest.cpp`
+      were deleted.** When the closed-loop sim (v5.1.38) and
+      `pumpClock` (v5.1.40) made the runtime paths reachable on
+      host, the grep pins became assertions about the source
+      text, not about runtime behavior. A structural pin can't
+      catch a logic bug inside the line it's pinning. If a path
+      still seems unreachable on host, fix that first
+      (`WireSim`, `pumpClock`, a public-API hook), don't
+      grep-pin it.
     * **Don't** ship a fix without first verifying the test
       catches the bug. Toggle fix off, run, confirm FAIL.
     * **Do** toggle every new fix before declaring done. Budget
