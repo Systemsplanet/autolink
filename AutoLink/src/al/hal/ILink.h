@@ -14,6 +14,12 @@ public:
     virtual ~ILink() {}
     void bind(ALink* l) { link = l; }
 
+    // v5.1.38: health check (WiFi connection alive, etc.). Default
+    // returns true so non-network HALs (MockHal, host stub) need
+    // no override. EspHal overrides to return its `healthy` flag,
+    // which is set by the WiFi connection callbacks.
+    virtual bool isHealthy() const { return true; }
+
     virtual void begin() = 0;
     virtual void setSpd(uint32_t s) = 0;
     virtual void sendBreak() = 0;
