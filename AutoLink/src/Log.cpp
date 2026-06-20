@@ -3,14 +3,6 @@
 #include <time.h>
 #include <string.h>
 
-// --------------------------------------------------------------------------
-// Log.cpp  —  autolink internal logger implementation
-//
-// On ESP_PLATFORM the formatted line is passed to the matching ESP_LOG*
-// macro so it still appears in the IDF monitor stream.
-// On host builds the line goes straight to stdout.
-// --------------------------------------------------------------------------
-
 #ifdef ESP_PLATFORM
 #  define LOG_LOCAL_LEVEL ESP_LOG_VERBOSE
 #  include "esp_log.h"
@@ -21,24 +13,39 @@ namespace autolink {
 void Log::emit(const char* sev, const char* tag,
                const char* fmt, va_list ap) const
 {
-    char msg[256];
-    vsnprintf(msg, sizeof(msg), fmt, ap);
+    if (lvl == NONE) return;
+
+    // 384-byte cap. Longer lines get truncated; the first overflow
+    // emits a one-shot stderr warning so runaway formats are visible.
+    // Raised from 320 to fit the WIRING CHECK message
+    // (~322 bytes after argument expansion) without truncation.
+    char msg[384];
+    int needed = vsnprintf(msg, sizeof(msg), fmt, ap);
+    if (needed > (int)sizeof(msg) - 1) {
+        static bool truncWarned_ = false;
+        if (!truncWarned_) {
+            fprintf(stderr,
+                "E [%s] Log::emit: line truncated (needed %d bytes, buffer %u). "
+                "Shorten the format string or raise the buffer size.\n",
+                tag, needed, (unsigned)sizeof(msg));
+            truncWarned_ = true;
+        }
+    }
 
 #ifdef ESP_PLATFORM
     switch (sev[0]) {
         case 'E': ESP_LOGE(tag, "%s", msg); break;
+        case 'W': ESP_LOGW(tag, "%s", msg); break;
+        case 'V': ESP_LOGV(tag, "%s", msg); break;
         case 'D': ESP_LOGD(tag, "%s", msg); break;
         default:  ESP_LOGI(tag, "%s", msg); break;
     }
 #else
-    // Host build: "<L> [<tag>] <msg>" to stdout for the test runner.
+    // Host: "<L> [<tag>] <msg>" to stdout.
     fprintf(stdout, "%c [%s] %s\n", sev[0], tag, msg);
     fflush(stdout);
 #endif
 
-    // Optional sink (e.g. AutoLinkWeb log panel). Called after normal output
-    // so serial is never delayed. Fast pointer check — sink is set once at
-    // startup from begin() and cleared on teardown.
     if (sink_fn_) sink_fn_(sev[0], tag, msg, sink_ctx_);
 }
 
