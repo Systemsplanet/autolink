@@ -37,7 +37,7 @@ TEST_BINS = run_test_crc run_test_cobs run_test_blink run_test_framerx \
             run_test_baudsweep run_test_log run_test_mockhal run_test_autolink \
             run_test_alink_io run_test_alink_message run_test_alink_negotiation \
             run_test_alink_error run_test_alink_watchdog run_test_alink_cobsseq \
-            run_test_alink_arq run_test_alink_web
+            run_test_alink_arq run_test_alink_web run_loopback_noise
 
 LOOPBACK_BIN = run_loopback
 
@@ -48,6 +48,7 @@ LOOPBACK_QUIET_SECS = 10
 
 all: $(TEST_BINS) $(LOOPBACK_BIN) test_dashboard_js
 	@echo "=== $(words $(TEST_BINS)) C++ suites + dashboard JS test PASS ==="
+	@./run_loopback_noise
 	@echo "=== Running loopback smoke test ($(LOOPBACK_QUIET_SECS)s) ... ==="
 	@./run_loopback $(LOOPBACK_QUIET_SECS) 2>&1 | grep -E '^\(PASS\|PARTIAL\|FAIL\):|^Total:|^Ping state:|^Messages TX:|^Pong state:|^T=  +[0-9]+s' | head -25
 	@./run_loopback $(LOOPBACK_QUIET_SECS) >/dev/null 2>&1 && echo '=== Loopback PASS ===' || echo '=== Loopback FAIL ==='
@@ -137,8 +138,14 @@ run_test_alink_io: $(LINK_SRC) $(TPROTO)/ALinkIOTest.cpp
 run_loopback: $(LINK_SRC) $(TPROTO)/loopback_test.cpp
 	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/loopback_test.cpp -o $@ -pthread
 
+run_loopback_noise: $(LINK_SRC) $(TPROTO)/loopback_noise_test.cpp
+	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/loopback_noise_test.cpp -o $@ -pthread
+
 loopback: run_loopback
 	./run_loopback 30
+
+loopback_noise: run_loopback_noise
+	./run_loopback_noise
 
 loopback_quick: run_loopback
 	./run_loopback 5
