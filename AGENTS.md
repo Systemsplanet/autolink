@@ -89,6 +89,27 @@ for context.**
    true? Are the "no change" claims still correct? `README.md`
    and `library.properties` must reflect the same version string.
 
+7a. **The example in the README must match the example in the
+    source.** Whenever you document a usage snippet in
+    `README.md` (the "Quick Start: Ping / Pong" block, the
+    "Using AutoLink Directly" block, or any other code fence),
+    open the actual `.ino` file under `examples/` and the
+    actual header under `src/` and diff them line-by-line:
+    the include path, the constructor arguments, the namespace,
+    the method names. README snippets are user-facing — if the
+    user copies a snippet and it doesn't compile because the
+    README says `#include <pingpong/PingPong.h>` but the actual
+    file is `#include "PingPong.h"`, that's a 100% reproducible
+    install failure. Lesson learned the hard way in v5.1.45:
+    the README had a stale `<pingpong/PingPong.h>` path while
+    every shipped example used `"PingPong.h"`. The discrepancy
+    shipped for an entire version cycle. The fix was a
+    one-character edit; the cost was the user's first 30
+    seconds of every install. Same rule applies to `docAPI.md`,
+    `docWebMonitor.md`, and any other markdown that contains a
+    copyable code block. Cross-check by reading the example,
+    not by skimming the diff.
+
 8. **Use short variable names.** `b`, `n`, `i`, `j`, `e`, `ok`,
    `lv`, `seq`, `cb` are fine. `m_messageBufferLength` is not.
    The reader is a senior developer — they read the type, not
@@ -128,12 +149,78 @@ for context.**
     MockHal even when it just wanted to bump one parameter.
     Refactored to a plain field with a setter.
 
+9c. **Never do RTOS work (mutex, semaphore, stream buffer,
+    task, timer) in a constructor that might run before the
+    scheduler is up.** User sketches declare `PingPong upp(...)`
+    at namespace scope — which Arduino's startup hoists into
+    `.init_array` and runs BEFORE `app_main` / `setup()`, i.e.
+    before the FreeRTOS scheduler is initialized. A ctor that
+    calls `xSemaphoreCreateMutex()`, `xStreamBufferCreate()`,
+    `xTaskCreate()`, `xTimerCreate()`, or even `malloc()` in a
+    heap-fragmented boot, will crash deep in the kernel on the
+    first timer tick (typical symptom: assert in
+    `vApplicationGetTimerTaskMemory` with `pxTCBBufferTemp ==
+    NULL`, identical backtrace on every boot). Two safe shapes:
+    (a) Meyers singleton — static-local object inside a
+    `getInstance()` accessor, constructs lazily on first call.
+    This is what `Log::log()` does. (b) Store config in the
+    ctor, allocate RTOS primitives in `begin()`. This is what
+    `EspHal` does as of v5.1.45 (post-audit fix). **Lesson
+    learned the hard way in v5.1.17** (the original `Log& log`
+    static-init bug, same shape — namespace-scope reference
+    bound to a singleton whose ctor touched the heap pre-RTOS)
+    and again in v5.1.45 (EspHal ctor allocating FreeRTOS
+    primitives, identical symptom). When in doubt, audit any
+    namespace-scope object whose ctor touches the heap:
+
 10. **Never log anything obvious to a senior developer.** Do not
     log inside hot paths. Do not log "entering function", "exiting
     function", "got N bytes". Do log: the version at startup, the
     result of a wire operation (`ack received`, `retransmit N`),
     the cause of a state change (`link dropped: 30 s idle`), the
     resolution of an error.
+
+    Quick audit grep before adding any new global or any new ctor
+    work — paste the output into the PR description so the audit
+    is repeatable:
+    ```
+    # Find any namespace-scope object whose ctor allocates RTOS
+    # primitives or heap. Each match is a candidate boot-loop bug.
+    grep -rn "^[A-Z][A-Za-z_]* [a-z][A-Za-z_]* *;" src/ \
+        --include='*.cpp' --include='*.h'
+    grep -rn "xSemaphore\|xQueue\|xTask\|xTimer\|xStreamBuffer" \
+        src/ --include='*.h' --include='*.cpp'
+    ```
+    The first list is globals; the second is RTOS call sites.
+    Cross-reference: any RTOS call inside a ctor whose object
+    can be at namespace scope is a static-init hazard.
+
+9d. **When collapsing two `#ifdef ARDUINO / #else` branches to
+    a shared body, verify BOTH paths get every required call.**
+    If Arduino did `hal->begin(); link->begin();` and host did
+    `link->begin();` (because `MockHal::begin()` is a no-op and
+    there's no HAL to install), collapsing to a single
+    `link->begin()` is correct for host and WRONG for Arduino:
+    `EspHal::begin()` is the only thing that runs
+    `uart_driver_install()`, `uart_set_pin()`, the event-task
+    create, AND `gpio_set_pull_mode()` on the RX pin. Skipping
+    it on Arduino leaves `p_uart_obj[UART2] == NULL` and every
+    `uart_write_bytes_with_break()` returns a driver error.
+    Symptom: Ping spins in SWP→BREAK forever, no `UART2 ready`
+    log line ever appears. **Lesson learned the hard way in
+    v5.1.40**: the begin() rewrite collapsed both paths to one
+    line for "drive begin() on host too" so clock-injection
+    tests would arm the SWP timer. It silently broke the
+    Arduino path because `link->begin()` was called and the
+    SWP state machine ran, but the UART underneath it was
+    never installed. Five releases shipped like this. Audit
+    check: any `#ifdef ARDUINO` block that contains a call the
+    `#else` block omits is a candidate. Fix: keep the `#ifdef`
+    split (preferred when the call sets up platform-specific
+    resources), or make the production path idempotent so
+    calling it twice from host is safe — but only if the
+    production path doesn't fail open on a half-initialized
+    system.
 
 11. **Never output a zip until verified.** Both the host tests
     (`make` in `test/test_desktop/`) AND the ESP32 cross-compile
@@ -721,6 +808,8 @@ loopback is the cheapest end-to-end check.
 6. Update docVersion.md (newest entry on top, short bullets,
    disclosed limitations).
 7. Re-read docVersion.md, README.md, this file for accuracy.
+   Cross-check any README code fence against the actual .ino /
+   src/ file it documents (rule 7a).
 8. Zip → /workspace/autolink/AutoLink-<version>.zip.
 9. Surface the zip in <deliver-assets> in your response.
 ```
