@@ -379,6 +379,7 @@ mkdir -p /tmp/Smoke && cat > /tmp/Smoke/Smoke.ino <<'EOF'
 void setup(){} void loop(){}
 EOF
 bash build/arduino-cli-cmd.sh compile --fqbn esp32:esp32:firebeetle32 \
+    --library . \
     --warnings none /tmp/Smoke
 ```
 
