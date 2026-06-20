@@ -364,6 +364,9 @@ async function test_three_failures_show_alert() {
 async function test_pause_toggle() {
     console.log('\n=== Test: Pause/Start button toggles label ===');
     const dom = await setup();
+    // v5.1.33: toggleMsgPause no-ops when role isn't Ping. Force
+    // the role for this test (in real usage it comes from /stats).
+    dom.window.deviceRole = 'Ping';
     // The header button starts with "▶ Start" (paused, ready to
     // begin sending) and toggles to "▪▪ Pause" when clicked.
     // Pin the initial state and the toggled state.
@@ -653,6 +656,8 @@ async function test_startup_logs_version_and_role() {
 async function test_pause_logs_state_change() {
     console.log('\n=== Test: pause toggle logs the new state ===');
     const dom = await setup();
+    // v5.1.33: gating requires role to be Ping before any toggle fires.
+    dom.window.deviceRole = 'Ping';
     const topPbtn = dom.window.document.getElementById('topPbtn');
     truthy(topPbtn, 'topPbtn should exist');
     // Hook console.log to capture output. jsdom exposes window.console
@@ -683,6 +688,9 @@ async function test_pause_logs_state_change() {
 async function test_pause_toggle_posts_to_pausemsg_endpoint() {
     console.log('\n=== Test: pause toggle POSTs /pausemsg (v5.1.29 device-side pause) ===');
     const dom = await setup();
+    // v5.1.33: toggleMsgPause no-ops when role isn't Ping. Set up
+    // the mock first, then run a poll() so the role pill is set to
+    // Ping before the click.
     const calls = [];
     __mockFetch = (url, opts) => {
         calls.push({ url: url, opts: opts });
@@ -690,13 +698,20 @@ async function test_pause_toggle_posts_to_pausemsg_endpoint() {
             return Promise.resolve(jsonResp({ state: 'OK', errCount: 0, errTotal: 0,
                 lostMsgs: 0, txBps: 0, rxBps: 0, txTotal: 0, rxTotal: 0,
                 rssi: -65, freeHeap: 200000, uptimeS: 0, baudRate: 115200,
-                lvl: 3, mode: 0, role: 'Ping', version: '5.1.29' }));
+                lvl: 3, mode: 0, role: 'Ping', version: '5.1.33' }));
         }
         if (url.startsWith('/pausemsg')) {
             return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}), text: () => Promise.resolve('ok') });
         }
         return Promise.resolve(jsonResp({ head: 0, lines: [] }));
     };
+    // Prime the role: a single poll() makes the JS know this is Ping.
+    await dom.window.poll();
+    eq(dom.window.deviceRole, 'Ping',
+        'deviceRole should be Ping after poll() (was ' + dom.window.deviceRole + ')');
+    // Clear captured calls from the priming poll so the assertion
+    // below only sees clicks.
+    calls.length = 0;
     // Click — toggleMsgPause is async; await it so the POST lands
     // before we inspect calls. msgPaused starts true (button reads
     // "Start", device is paused). First click flips it to false,
@@ -726,40 +741,76 @@ async function test_pause_toggle_posts_to_pausemsg_endpoint() {
     console.log('  PASS');
 }
 
-// v5.1.29: when the device returns 404 (no /pausemsg hook — Pong
-// side, or older firmware), the optimistic local UI flip should be
-// reverted so the button label doesn't lie. The captured console
-// log should mention the 404.
-async function test_pause_toggle_reverts_on_404() {
-    console.log('\n=== Test: pause toggle reverts on 404 (no device hook) ===');
+// v5.1.33: pause toggle must be a no-op when role is not Ping.
+// Previously the click flipped local state optimistically, POSTed
+// /pausemsg, then reverted on 404 (Pong). The flicker was visible
+// for ~100 ms — Pause briefly showed, then reverted to Start. The
+// fix gates the entire handler on deviceRole === 'Ping'. On Pong
+// the button is hidden by JS the moment /stats reports role=Pong,
+// and clicks before that point are silent no-ops.
+async function test_pause_toggle_noop_on_pong() {
+    console.log('\n=== Test: pause toggle is a no-op on Pong (v5.1.33 no-flicker) ===');
     const dom = await setup();
-    __mockFetch = (url) => {
+    const calls = [];
+    __mockFetch = (url, opts) => {
+        calls.push({ url: url, opts: opts });
         if (url.startsWith('/stats')) {
             return Promise.resolve(jsonResp({ state: 'OK', errCount: 0, errTotal: 0,
                 lostMsgs: 0, txBps: 0, rxBps: 0, txTotal: 0, rxTotal: 0,
                 rssi: -65, freeHeap: 200000, uptimeS: 0, baudRate: 115200,
-                lvl: 3, mode: 0, role: 'Ping', version: '5.1.29' }));
-        }
-        if (url.startsWith('/pausemsg')) {
-            return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({}), text: () => Promise.resolve('no msg pause (Pong?)') });
+                lvl: 3, mode: 0, role: 'Pong', version: '5.1.33' }));
         }
         return Promise.resolve(jsonResp({ head: 0, lines: [] }));
     };
-    const initial = dom.window.msgPaused;
-    const captured = [];
-    const origLog = dom.window.console.log;
-    dom.window.console.log = function(...args) { captured.push(args.join(' ')); };
-    try {
-        await dom.window.toggleMsgPause();
-        await new Promise(r => setTimeout(r, 20));
-    } finally {
-        dom.window.console.log = origLog;
-    }
-    eq(dom.window.msgPaused, initial,
-        'msgPaused should revert to initial on 404 (was ' + dom.window.msgPaused + ', initial ' + initial + ')');
-    const logStr = captured.join('\n');
-    truthy(logStr.includes('404') || logStr.includes('not support'),
-        'should log a warning about the 404, got: ' + logStr);
+    // First poll: device identifies as Pong.
+    await dom.window.poll();
+    eq(dom.window.deviceRole, 'Pong',
+        'deviceRole should be Pong after poll (was ' + dom.window.deviceRole + ')');
+
+    // The Pause/Start button must be hidden via inline style.display='none'.
+    const topPbtn = dom.window.document.getElementById('topPbtn');
+    truthy(topPbtn, 'topPbtn should exist');
+    eq(topPbtn.style.display, 'none',
+        'topPbtn should be display:none on Pong (was: "' + topPbtn.style.display + '")');
+
+    // Even if the user somehow clicks the button (CSS hasn't applied,
+    // race on page load), the handler must not POST /pausemsg and
+    // must not flip msgPaused. Pre-fix: local flip would show Pause
+    // for ~100 ms before reverting to Start on 404.
+    const beforeMsgPaused = dom.window.msgPaused;
+    const beforeLabel = topPbtn.innerHTML;
+    calls.length = 0;
+    await dom.window.toggleMsgPause();
+    await new Promise(r => setTimeout(r, 20));
+    const pauseCalls = calls.filter(c => c.url.startsWith('/pausemsg'));
+    eq(pauseCalls.length, 0,
+        'no /pausemsg POST on Pong (got ' + pauseCalls.length + ')');
+    eq(dom.window.msgPaused, beforeMsgPaused,
+        'msgPaused should not change on Pong (was ' + beforeMsgPaused + ', now ' + dom.window.msgPaused + ')');
+    // Button label also unchanged: pre-fix it would briefly show
+    // "Pause" before reverting to "Start". Now it stays whatever
+    // it was (here, the initial "Start").
+    eq(topPbtn.innerHTML, beforeLabel,
+        'button label should not change on Pong click (was "' + beforeLabel + '", now "' + topPbtn.innerHTML + '")');
+    console.log('  PASS');
+}
+
+// v5.1.33: before the first /stats response lands, deviceRole is
+// null. A click during that window must also be a no-op so we
+// don't show the flicker on first load (before the role pill is
+// set). Belt-and-suspenders with the CSS rule.
+async function test_pause_toggle_noop_before_role_known() {
+    console.log('\n=== Test: pause toggle no-op before device role is known ===');
+    const dom = await setup();
+    // Setup() already called poll once with default mock; role is
+    // 'unknown' (whatever the default mock returns). Set it to null
+    // to simulate "first poll hasn't landed yet".
+    dom.window.deviceRole = null;
+    const before = dom.window.msgPaused;
+    await dom.window.toggleMsgPause();
+    await new Promise(r => setTimeout(r, 20));
+    eq(dom.window.msgPaused, before,
+        'msgPaused should not change when role is null (was ' + before + ', now ' + dom.window.msgPaused + ')');
     console.log('  PASS');
 }
 
@@ -768,6 +819,13 @@ async function test_pause_toggle_reverts_on_404() {
 async function test_pause_label_reconciles_with_stats_msgpaused() {
     console.log('\n=== Test: /stats.msgPaused reconciles the button label ===');
     const dom = await setup();
+    // v5.1.33: priming poll sets the role. But the test sets up the
+    // mock AFTER setup(), so the priming poll uses the default mock
+    // and might leave deviceRole as 'unknown'. Force it to Ping so
+    // applyMsgPauseLabel() (called below) actually shows the button
+    // and we can assert on it. In real usage the first /stats with
+    // role=Ping lands within ~1 s of page load.
+    dom.window.deviceRole = 'Ping';
     // First poll: device says not paused.
     __mockFetch = (url) => {
         if (url.startsWith('/stats')) {
@@ -988,7 +1046,8 @@ async function test_log_overlay_open_close_logged() {
         await test_startup_logs_version_and_role();
         await test_pause_logs_state_change();
         await test_pause_toggle_posts_to_pausemsg_endpoint();
-        await test_pause_toggle_reverts_on_404();
+        await test_pause_toggle_noop_on_pong();
+        await test_pause_toggle_noop_before_role_known();
         await test_pause_label_reconciles_with_stats_msgpaused();
         await test_level_change_logs_request_and_result();
         await test_reboot_logs_progress();
