@@ -6,6 +6,7 @@
 #ifdef ARDUINO
 
 #include "AutoLink.h"
+#include "AutoLinkWebCore.h"   // WebSnapshot (used directly by /stats handler)
 #include <WiFi.h>
 #include "esp_http_server.h"
 #include "esp_timer.h"
@@ -50,6 +51,21 @@ public:
     explicit AutoLinkWeb(AutoLink& link);
     ~AutoLinkWeb();
 
+    // Tell the monitor which role the sketch is running (Ping vs
+    // Pong). Dashboard renders the label at the top of the page.
+    // Safe to call once from setup() before begin(); "" clears.
+    void setRole(const char* role);
+
+    // Optional fill-mode hook for the Ping side. AutoLinkWeb doesn't
+    // depend on UtilPing, so we take two C function pointers: one to
+    // read the current mode (1 Hz timer) and one to set it (POST /mode).
+    // Both null by default; if null, mode field is 0 and /mode 404s.
+    using FillModeReader = uint8_t (*)();
+    using FillModeWriter = void (*)(uint8_t);
+    void setFillModeHook(FillModeReader r, FillModeWriter w) {
+        fillModeReader_ = r; fillModeWriter_ = w;
+    }
+
     // Attempt WiFi connection and start the HTTP server.
     // Logs the SSID and the *length* of the password — never the password itself.
     // Blocks in setup() for up to ~12 s while connecting; returns immediately
@@ -74,17 +90,12 @@ private:
         char     line[LINE_CAP]; // formatted "[E][Tag] message"
     };
 
-    struct Snapshot {
-        char     state[4];       // "OK", "SWP", "LCK" + NUL
-        uint32_t errCount;       // cumulative frame errors (lifetime)
-        uint32_t txBps, rxBps;   // bytes/s since last sample
-        uint64_t txTotal, rxTotal, errTotal; // cumulative
-        uint64_t lostMsgs;       // cumulative messages lost on the wire
-        int32_t  rssi;           // WiFi RSSI dBm
-        uint32_t freeHeap;       // ESP heap bytes free
-        uint32_t uptimeS;        // millis()/1000
-        uint32_t baudRate;       // current UART baud (0 while sweeping before first lock)
-    };
+    // Stats snapshot — written by 1 Hz timer, read by /stats handler.
+    // We use WebSnapshot directly (defined in AutoLinkWebCore.h) so the
+    // timer and the handler share the same layout — no field-by-field
+    // copy. The previous design had a parallel `Snapshot` type that
+    // drifted silently; this is the single source of truth.
+    using Snapshot = WebSnapshot;
 
     // ---- members ----
     AutoLink&          link_;
@@ -92,8 +103,12 @@ private:
     bool               enabled_   = false;
     bool               ntpSynced_ = false; // true once SNTP wall-clock is valid
 
-    // Stats snapshot — written by 1 Hz timer, read by /stats handler.
     Snapshot           snap_      = {};
+
+    // Optional hooks to the Ping side (set via setFillModeHook).
+    // When null, the mode field is 0 (sequential default) and /mode 404s.
+    FillModeReader     fillModeReader_ = nullptr;
+    FillModeWriter     fillModeWriter_ = nullptr;
     uint64_t           prevTx_    = 0;
     uint64_t           prevRx_    = 0;
     SemaphoreHandle_t  snapMtx_   = nullptr;
@@ -119,6 +134,7 @@ private:
     static esp_err_t handleLogs (httpd_req_t* req);
     static esp_err_t handleReset(httpd_req_t* req); // POST /reset — calls resetStats()+resetErrors()
     static esp_err_t handleLevel(httpd_req_t* req); // POST /level?lv=N — set log level (0=Error,1=Info,2=Debug)
+    static esp_err_t handleMode (httpd_req_t* req); // POST /mode?m=seq|rand — fill mode (Ping only)
     static esp_err_t handleReboot(httpd_req_t* req); // POST /reboot — esp_restart()
 };
 
