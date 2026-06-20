@@ -1,4 +1,4 @@
-// UtilFrameRx.cpp — reliable-mode frame receive accumulator (v4.0.0).
+// UtilFrameRx.cpp — reliable-mode frame receive accumulator.
 // See UtilFrameRx.h for the public interface.
 #include "UtilFrameRx.h"
 #include "UtilCobs.h"
@@ -26,17 +26,25 @@ int UtilFrameRx::feed(const uint8_t* data, int len) {
             size_t decLen = UtilCobs::decode(buf, idx, decoded);
             idx = 0;
             bool dropped;
-            if (decLen > 1 &&
+            if (decLen >= 2 &&
                 UtilCrc::crc8(decoded, (int)decLen - 1) == decoded[decLen - 1]) {
-                // v4.0.0: first decoded byte is cobsSeq, rest is payload.
-                // Always present, even when n==0 (a 0-byte payload is legal
-                // and lets a sender emit a "cobsSeq-only" frame if it ever
-                // needs to advance the receiver's seq counter).
-                uint8_t cobsSeq = decoded[0];
-                const uint8_t* payload = decoded + 1;
-                int payloadLen = (int)decLen - 1 - 1;  // -1 for CRC, -1 for cobsSeq
-                if (payloadLen < 0) payloadLen = 0;
-                dropped = lis.onPayload(cobsSeq, payload, payloadLen);
+                // CRC valid. First byte discriminates data vs ACK.
+                if (decoded[0] == ACK_TYPE) {
+                    // ACK frame: second byte is the cobsSeq being acked.
+                    // decLen >= 2 means we have at least ACK_TYPE +
+                    // ackedSeq + CRC. The ackedSeq itself is
+                    // unconstrained (any 0..255), so we don't validate
+                    // its range — the upper layer (ALink) checks if it
+                    // matches a pending slot.
+                    dropped = lis.onAck(decoded[1]);
+                } else {
+                    // Data frame: first byte is cobsSeq; rest is payload.
+                    uint8_t cobsSeq = decoded[0];
+                    const uint8_t* payload = decoded + 1;
+                    int payloadLen = (int)decLen - 1 - 1;  // -1 for CRC, -1 for cobsSeq
+                    if (payloadLen < 0) payloadLen = 0;
+                    dropped = lis.onPayload(cobsSeq, payload, payloadLen);
+                }
             } else {
                 // Malformed COBS, CRC-only frame, or bad CRC: desync.
                 dropped = lis.onFrameError();
