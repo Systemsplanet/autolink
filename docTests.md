@@ -8,7 +8,7 @@ the real UART peripheral on hardware.
 
 | Path | Purpose |
 |------|---------|
-| `AutoLink/test/test_desktop/` | Host-side unit + integration tests. 20 binaries, 199 test functions (v5.1.45: wire format break — ACK_TYPE moved 0x33→0xFF, cobsSeq skips 0xFF, LD_SEQ_WRAP=255; merged `LinkDecision.h` table-driven tests; added ARQ chunk-boundary tests; gated dashboard JS test on jsdom). |
+| `AutoLink/test/test_desktop/` | Host-side unit + integration tests. 21 `TEST_BINS` entries (20 `run_test_*` + `run_loopback_noise`), 199 test functions (v5.1.45: wire format break — ACK_TYPE moved 0x33→0xFF, cobsSeq skips 0xFF, LD_SEQ_WRAP=255; merged `LinkDecision.h` table-driven tests; added ARQ chunk-boundary tests + 254→0 wrap regression guard; gated dashboard JS test on jsdom). |
 | `AutoLink/test/test_embedded/test_embedded.ino` | On-hardware self-loopback smoke test for the `AutoLink` facade. |
 | `AutoLink/test/test_desktop/Makefile` | Single entry point for all build / run / coverage modes. |
 | `AutoLink/test/test_desktop/coverage_merge.sh` | Helper that assembles the per-source `.gcda` files into a single coverage report. |
@@ -25,7 +25,7 @@ make
 
 Output:
 ```
-=== All 20 test suites PASS ===
+=== All 21 TEST_BINS PASS ===
 ```
 
 ## Run one suite
@@ -50,9 +50,11 @@ Removes all binaries, `.gcno`/`.gcda` files, and the `coverage/` tree.
 
 # 🧪 Test Suites
 
-20 binaries, organised one-class-per-file. Counts below are the actual
-PASS-line totals on the current code (v5.1.45). Counts move as fixes
-land — regenerate via `make all` and count `^PASS` lines per binary.
+21 `TEST_BINS` entries (20 `run_test_*` + `run_loopback_noise`),
+organised one-class-per-file. Counts below are the actual
+test-function totals on the current code (v5.1.45). Counts move as
+fixes land — regenerate via `make all` and parse
+`grep -cE '^(void|static void|int) test_' test/test_desktop/**/*Test.cpp`.
 
 | Binary | File | Tests | What it covers |
 |--------|------|-------|----------------|
@@ -63,7 +65,7 @@ land — regenerate via `make all` and count `^PASS` lines per binary.
 | `run_test_baudsweep` | `UtilBaudSweepTest.cpp` | 12 | Baud scoring, threshold fall-back, real cable scenario |
 | `run_test_log` | `LogTest.cpp` | 6 | Level filtering, sink registration, context pointer, truncation |
 | `run_test_mockhal` | `MockHalTest.cpp` | 9 | `MockHal` ILink mock: setSpd, sendBreak, TX buffer, app buffer, clock |
-| `run_test_alink_io` | `ALinkIOTest.cpp` | 6 | Byte I/O, reliable mode, throughput (v5.1.45: 16000B now passes), stats, README scenario |
+| `run_test_alink_io` | `ALinkIOTest.cpp` | 7 | Byte I/O, reliable mode, throughput (v5.1.45: 16000B now passes), stats, README scenario, 254→0 wrap regression guard (v5.1.45 fix-2) |
 | `run_test_alink_message` | `ALinkMessageTest.cpp` | 19 | Message API: round-trip, boundaries, size sweep, CRC reject, corrupt-header resync, 240-chunk ARQ cap, send-rejection error paths |
 | `run_test_alink_negotiation` | `ALinkNegotiationTest.cpp` | 3 | SWP/LCK/OK state machine, best-baud scoring, top-down sweep + fast-ack |
 | `run_test_alink_error` | `ALinkErrorTest.cpp` | 6 | Error threshold, lifetime counter, link-failure regression, scattered errors, parser yield |
@@ -76,6 +78,7 @@ land — regenerate via `make all` and count `^PASS` lines per binary.
 | `run_test_clock_injection` | `ClockInjectionTest.cpp` | 8 | pumpClock/runFor, ACK timeout retx (v5.1.45: idleTimeoutMs=300), RTO schedule, cobsSeq wraparound (v5.1.45: merged two wrap tests) |
 | `run_test_linkdecision` | `LinkDecisionTest.cpp` | 22 | Pure decision logic (v5.1.41): classifyGap, decideArqSlot, decideSwpTick, decideLckTick, decideIdleWatchdog, decideKeepalive, decideAppBuf |
 | `run_test_wiresim_closedloop` | `WireSimClosedLoopTest.cpp` | 4 | WireSim 2-node simulator (v5.1.38): full OK-state message exchange |
+| `run_loopback_noise` | `LoopbackNoiseTest.cpp` | 1 | 10s loopback with stochastic frame drop + intermittent BREAKs |
 
 The 5 ALink `*` files are split from a single `ALinkTest.cpp` by
 functionality area so each file stays small (≤ 250 lines) and easy to
