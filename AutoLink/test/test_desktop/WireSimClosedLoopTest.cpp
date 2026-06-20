@@ -272,11 +272,47 @@ void test_closed_loop_single_drop_recovers() {
     std::cout << "PASS" << std::endl;
 }
 
+void test_cache_miss_loop_does_not_latch() {
+    // v5.1.39 fix: when arqCache_retx sees a cache miss, the
+    // facade clears ackedPending_ for the original chunks via
+    // onAck, breaking the v5.1.38 cache-miss loop. Without the
+    // fix, every cache miss returns true (= drop), causing
+    // every successful retx on a noisy wire to be followed by a
+    // forced link drop 100ms later.
+    //
+    // This test pins the fix by running a TWO-NODE closed loop
+    // (not just WireSim::step) so the app layer actually
+    // generates retx events on a noisy wire. We count total
+    // OK->SWP transitions. With the fix, the count is bounded
+    // (~forced-drops + a few real drops). Without the fix, the
+    // cache-miss loop amplifies every retx into a drop.
+    std::cout << "\n=== Test: cache-miss loop does not latch (v5.1.39) ===" << std::endl;
+    WireSim sim;
+    sim.setFrameDropPct(20);
+    sim.setForcedDropEvery(500);
+    TwoNodeFixture fix(sim);
+    int baselineDrops = sim.dropsInjected();
+    for (int cycle = 0; cycle < 5000; cycle++) fix.step(1);
+    int drops = sim.dropsInjected();
+    int protoDrops = sim.protoDropsSeen();
+    int dropsDelta = drops - baselineDrops;
+    std::cout << "  drops_injected=" << drops
+              << " (+" << dropsDelta << ")"
+              << ", proto_drops=" << protoDrops << std::endl;
+    // With the v5.1.39 fix, proto_drops tracks drops_injected
+    // (no amplification). Without the fix, every cache miss
+    // causes a drop -- proto_drops would be many times
+    // drops_injected.
+    assert(protoDrops <= dropsDelta * 2 + 20);  // cache-miss loop pushes this to 50+
+    std::cout << "PASS" << std::endl;
+}
+
 int main() {
     std::cout << "=== Closed-Loop Two-Node AutoLink Tests (WireSim) ===" << std::endl;
     test_closed_loop_with_forced_drops();
     test_closed_loop_saturates_after_many_drops();
     test_closed_loop_single_drop_recovers();
+    test_cache_miss_loop_does_not_latch();
     std::cout << "\n=== WireSim Closed-Loop Tests Completed Successfully ===" << std::endl;
     return 0;
 }
