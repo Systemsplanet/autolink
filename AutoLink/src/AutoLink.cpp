@@ -72,14 +72,14 @@ void AutoLink::arqCache_put(uint8_t seq, const uint8_t* b, int len, uint8_t chun
         if (!pending_[i].in_use) { slot = i; break; }
     }
     if (slot < 0) {
-        Log::getLog().error("AutoLink",
+        Log::log().error("AutoLink",
             "ARQ cache full (32 pending); dropping cache entry for cobsSeq=%u",
             (unsigned)seq);
         return;
     }
     pending_[slot].buf = (uint8_t*)malloc(len);
     if (!pending_[slot].buf) {
-        Log::getLog().error("AutoLink",
+        Log::log().error("AutoLink",
             "ARQ cache malloc failed for %d bytes", len);
         return;
     }
@@ -119,12 +119,12 @@ bool AutoLink::arqCache_retx(uint8_t seq) {
     if (idx < 0) {
         // Cache miss: seq was never sent by us, or cache already freed
         // (stale retransmit trigger). Protocol will drop on MAX_RETX.
-        Log::getLog().error("AutoLink",
+        Log::log().error("AutoLink",
             "ARQ retransmit requested for cobsSeq=%u but no cache slot; "
             "the link will drop", (unsigned)seq);
         return true;  // drop
     }
-    Log::getLog().warning("AutoLink",
+    Log::log().warning("AutoLink",
         "ARQ retransmit cobsSeq=%u (%d bytes, slot=%d)",
         (unsigned)seq, pending_[idx].len, (int)idx);
     // Free the OLD cache slot BEFORE retransmitting. The retransmit
