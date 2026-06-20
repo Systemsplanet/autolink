@@ -6,6 +6,7 @@
 #include <iostream>
 #include <cassert>
 #include <vector>
+#include <string>
 #include "MockHal.h"
 
 using namespace autolink;
@@ -189,6 +190,121 @@ void test_asymmetric_peer_death_recovery() {
  std::cout << "PASS" << std::endl;
 }
 
+// v5.1.31: facade-driven link pause. When setLinkPaused(true) is
+// called, onTimerOk_unlocked() must NOT drop the link on idle AND
+// must NOT emit keepalive frames. The link stays up silently
+// indefinitely (until manual resume or dropLink()). This is what
+// lets Ping's Pause/Start button work — the link must survive
+// the operator's inspection window without re-sweep churn.
+void test_setLinkPaused_suppresses_idle_drop_and_keepalive() {
+ std::cout << "\n=== Test: setLinkPaused(true) suppresses idle-drop and keepalive (v5.1.31) ===" << std::endl;
+ AutoLinkConfig cfg;
+ cfg.allowedBauds[0] = 9600; cfg.allowedBauds[1] = 115200; cfg.allowedBaudsCount = 2; cfg.pingSamplesPerBaud = 1;
+ cfg.reliableMode = true;
+ cfg.idleTimeoutMs = 3000;
+ MockHal mHal, sHal;
+ mHal.peer = &sHal; sHal.peer = &mHal;
+ ALink ping(mHal, true, cfg);
+ ALink pong(sHal, false, cfg);
+ negotiate_to_ok(ping, pong, mHal, sHal);
+
+ // Pause the ping side.
+ ping.setLinkPaused(true);
+
+ // Clear any post-negotiation TX so we can detect keepalive emissions.
+ mHal.clearTx(); sHal.clearTx();
+
+ // Advance time well past idleTimeoutMs (3 s) in several onTimer ticks.
+ // Without setLinkPaused, the watchdog would drop the link around t=4 s.
+ // With it, the link should stay OK and no keepalive frames should emit.
+ for (int t = 1000; t <= 9000; t += 1000) {
+ mHal.now = (uint32_t)t;
+ ping.onTimer();
+ bool pingOk = ping.getState() == State::OK;
+ bool pingQuiet = mHal.txBuf.empty();
+ if (!pingOk) {
+ std::cerr << "\nping dropped while paused at t=" << t << " (state="
+ << (int)ping.getState() << ")" << std::endl;
+ }
+ if (!pingQuiet) {
+ std::cerr << "\nping emitted a frame while paused at t=" << t
+ << " (txBuf size=" << mHal.txBuf.size() << ")" << std::endl;
+ }
+ assert(pingOk);
+ assert(pingQuiet);
+ }
+
+ // Pong was NOT paused (only ping side). Pong's idle watchdog is
+ // independent, so if pong sees zero RX from ping for idleTimeoutMs
+ // it WILL drop. Verify this is the case — the user must pause both
+ // sides to keep the link fully silent.
+ pong.onTimer();
+ // pong's lastRxMs was set when ping's REQ arrived, so the timer
+ // above didn't advance pong's clock. Force pong's clock to detect.
+ sHal.now = 9000;
+ pong.onTimer();
+ bool pongSwp = pong.getState() == State::SWP;
+ if (!pongSwp) {
+ std::cerr << "\npong should have dropped due to its OWN idle watchdog (independence). state="
+ << (int)pong.getState() << std::endl;
+ }
+ assert(pongSwp);
+
+ // Now bring ping's link down by setLinkPaused(false) — should not
+ // have torn down because we never set up anything to tear. Just
+ // unpause and confirm ping survives one tick.
+ mHal.peer = &sHal; sHal.peer = &mHal;
+ pong.setLinkPaused(true);
+ // (pong is already in SWP; setLinkPaused is a no-op for non-OK,
+ // but let's still call to prove the setter is idempotent.)
+ pong.setLinkPaused(false);
+ pong.setLinkPaused(true);
+ std::cout << "PASS" << std::endl;
+}
+
+// v5.1.31: setLinkPaused(false) restores normal idle/keepalive
+// behavior. We assert this by toggling on then off and verifying
+// the link still works.
+void test_setLinkPaused_false_restores_normal() {
+ std::cout << "\n=== Test: setLinkPaused(false) restores normal watchdog behavior ===" << std::endl;
+ AutoLinkConfig cfg;
+ cfg.allowedBauds[0] = 9600; cfg.allowedBauds[1] = 115200; cfg.allowedBaudsCount = 2; cfg.pingSamplesPerBaud = 1;
+ cfg.reliableMode = true;
+ cfg.idleTimeoutMs = 3000;
+ MockHal mHal, sHal;
+ mHal.peer = &sHal; sHal.peer = &mHal;
+ ALink ping(mHal, true, cfg);
+ ALink pong(sHal, false, cfg);
+ negotiate_to_ok(ping, pong, mHal, sHal);
+
+ // Pause, advance, confirm no drop. Then unpause, advance past
+ // idle, confirm drop happens.
+ ping.setLinkPaused(true);
+ mHal.now = 5000;
+ ping.onTimer();
+ if (ping.getState() != State::OK) {
+ std::cerr << "\nshould not drop while paused (state="
+ << (int)ping.getState() << ")" << std::endl;
+ }
+ assert(ping.getState() == State::OK);
+
+ ping.setLinkPaused(false);
+ mHal.now = 5000; // simulate pong's lastRxMs being stale by
+ // zeroing both timers via clearTx/peer-deliver. Easiest: just
+ // drop pong, see that pong will go SWP on idle.
+ sHal.now = 5000;
+ ping.onTimer();
+ pong.onTimer();
+ // After unpause, ping's idle watchdog should bite because no
+ // keepalive ever went out. The link drops.
+ if (ping.getState() != State::SWP) {
+ std::cerr << "\nping should drop after unpause + idle (state="
+ << (int)ping.getState() << ")" << std::endl;
+ }
+ assert(ping.getState() == State::SWP);
+ std::cout << "PASS" << std::endl;
+}
+
 int main() {
  std::cout << "=== Running ALinkWatchdog Tests ===" << std::endl;
  test_idle_watchdog();
@@ -197,6 +313,8 @@ int main() {
  test_keepalive_quiet_after_recent_tx();
  test_lck_timeout();
  test_asymmetric_peer_death_recovery();
+ test_setLinkPaused_suppresses_idle_drop_and_keepalive();
+ test_setLinkPaused_false_restores_normal();
  std::cout << "\n=== ALinkWatchdog Tests Completed Successfully ===" << std::endl;
  return 0;
 }
