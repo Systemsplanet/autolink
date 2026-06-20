@@ -4,6 +4,90 @@ All releases, most recent first.
 
 ---
 
+## v5.1.38
+
+**WireSim: closed-loop two-node AutoLink test infrastructure.**
+
+The v5.1.35-36 series shipped three times with tests that "passed" but
+didn't exercise the bug paths. The root cause: AutoLinkFacadeTest
+bypassed the protocol (cache helpers called directly, no UART); the
+loopback test bypassed the facade (raw ALink, not AutoLink). The two
+test layers never met, and the bugs that needed both layers to
+manifest — the cache being orphaned by a link drop, the
+cache-full gate weaponizing the leak, the TOCTOU in sendMsg — all
+slipped through.
+
+v5.1.38 closes that gap. `WireSim.h` is a new header that connects
+two full `AutoLink` instances back-to-back in one host process via
+two `MockHal`s, with deterministic frame-drop, forced drops, and a
+shared clock. `TwoNodeFixture` drives the real send/recv/window
+loop body from `UtilPing`/`UtilPong` against the wire. Three
+behavioral tests in `WireSimClosedLoopTest.cpp`:
+
+1. **5000-cycle killer** — 2% frame drop + forced drop every 800
+   cycles. After every drop event (forced OR protocol-driven), the
+   cache MUST return to 0 within 500ms. **Toggle-verified: reverts
+   to FAIL on the v5.1.36 link-reset bug.**
+2. **Saturation scenario** — 3 back-to-back forced drops, link
+   recovers, bytes resume. Validates the "doesn't latch" property.
+3. **Single-drop regression** — one drop, cache cleared, link
+   recovers, OK.
+
+**Implementation details:**
+
+- `AutoLink(ILink* hal_in, bool isMasterNode, AutoLinkConfig cfg)`
+  host-only constructor (gated to `AUTOLINK_HOST_TEST`). The ILink
+  is BORROWED, not owned — the WireSim heap-allocates the
+  MockHals and uses a `NoOpDeleter` on the facade's
+  `unique_ptr<ILink>` to avoid double-free at destruction.
+- `link->setArqHooks(...)` already existed; the facade's
+  `arqAckHookTrampoline` and `arqRetxHookTrampoline` are now
+  exercised end-to-end on the host.
+- `link->setLinkResetHook(...)` (added in v5.1.37) fires from
+  inside `reset_unlocked` on every drop, clearing the facade
+  cache. The closed-loop test verifies this hook fires and
+  clears properly under noisy wire conditions.
+
+**v5.1.37 follow-up: cache-miss loop fix.** v5.1.37 fixed five
+bugs but the closed-loop test surfaces a SIXTH, pre-existing bug:
+when `arqCache_retx` retransmits, the original chunk's
+`ackedPending_` stays `true`. The retransmit timer keeps firing
+for the original chunk every 100ms; the cache lookup misses (the
+entry is under the new base seq); the protocol returns `true` to
+drop the link; the link drops 100ms after every successful
+retransmit on a noisy wire. Fix in v5.1.38: after a successful
+retx, call `link->onAck` for the original base seq and each
+chunk seq. `onAck` clears `ackedPending_[s]=false` and notifies
+the facade (no-op because the cache entry was already taken).
+The link is left in a clean state where only the NEW chunks'
+pending state exists.
+
+**Disclosed limitations:**
+
+- The closed-loop test runs at simulated ms granularity (1 step
+  per ms), but the production protocol's `RTO` is 100ms. The
+  test runs fast enough that the simulation doesn't exercise
+  real-time-sensitive behavior (FreeRTOS scheduling, DMA,
+  interrupts). Bugs that only manifest under real-time
+  contention are not caught.
+- `WireSim::step` uses `pipe_data` (the same function as the
+  loopback test), which applies frame-level drop deterministically
+  via an LCG seed. The drop pattern is reproducible. The 2%
+  drop rate matches the production "lossy wire" scenario
+  (long cables, EMI, power glitches).
+- I cannot run the code on hardware (no ESP32 in this
+  environment). The fix is host + cross-compile verified. The
+  cache-miss loop fix has only been tested in the closed-loop
+  simulation; on real hardware the timing may differ.
+
+All 19 C++ suites + 1 facade suite (11 tests) + 1 closed-loop
+suite (3 tests) + 97 dashboard JS tests + 10 s loopback + 5 s
+loopback-noise regression all PASS. Arduino `verify_build.ino`
+compiles clean. No protocol or wire-format change. v5.1.37 →
+v5.1.38.
+
+---
+
 ## v5.1.37
 
 **Five ARQ facade bugs found and fixed. Behavioral tests added.**
