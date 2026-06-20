@@ -34,6 +34,16 @@ public:
  // wire-level semantics.
  MockHal* peer = nullptr;
 
+ // Wire-noise injection knob for protocol-level loopback tests. When set
+ // to a value in [0,100], pipe_data() will drop that percentage of frames
+ // before delivering them to the peer's link. Drop a *frame* (whole
+ // COBS-encoded packet) rather than random bytes because that's what real
+ // wire glitches look like — a burst of noise eats a packet, not part of
+ // one. Defaults to 0 (clean wire, every prior test's behavior).
+ int frameDropPct = 0;
+ int bytesDropped = 0; // running counter of bytes lost to noise
+ uint32_t dropRngSeed = 1; // deterministic — same seed = same drops every run
+
  std::queue<uint8_t> appBuf;
  mutable std::mutex mtx;
 
@@ -122,11 +132,47 @@ public:
 // Hand a src MockHal's pending TX bytes to dest's link, as if they
 // arrived on the wire. Used by every test that exercises the protocol
 // across a paired ping/pong.
+//
+// Frame-level drop: if src.frameDropPct is set, each frame in the buffer
+// (delimited by the 0x00 COBS sentinel) has `frameDropPct`% chance of
+// being dropped entirely before being delivered to dest's onRx. This
+// simulates wire noise that loses whole packets (a burst of EMI) without
+// corrupting individual bytes mid-packet. Used by
+// test_loopback_noise_triggers_baud_fallback to verify the protocol's
+// error-threshold / re-sweep path actually fires under noise.
 inline void pipe_data(MockHal& src, MockHal& dest) {
- if (!src.txBuf.empty()) {
+ if (src.txBuf.empty()) return;
+ if (src.frameDropPct <= 0) {
  dest.link->onRx(src.txBuf.data(), src.txBuf.size());
  src.clearTx();
+ return;
  }
+ // Deterministic LCG so test failures are reproducible. We advance the
+ // seed for every frame we *consider* (drop or keep) and drop when
+ // (seed % 100) < frameDropPct.
+ uint32_t s = src.dropRngSeed ? src.dropRngSeed : 1;
+ std::vector<uint8_t> kept;
+ kept.reserve(src.txBuf.size());
+ // Walk frames delimited by 0x00; deliver only the kept ones.
+ size_t i = 0;
+ while (i < src.txBuf.size()) {
+ size_t end = i;
+ while (end < src.txBuf.size() && src.txBuf[end] != 0x00) end++;
+ // [i, end) is one frame's payload. The trailing 0x00 (if any) is the
+ // COBS end-marker.
+ size_t frameEnd = end;
+ if (frameEnd < src.txBuf.size()) frameEnd++; // include the sentinel
+ bool drop = ((s = s * 1664525u + 1013904223u) % 100u) < (uint32_t)src.frameDropPct;
+ if (drop) {
+ src.bytesDropped += (int)(frameEnd - i);
+ } else {
+ kept.insert(kept.end(), src.txBuf.begin() + i, src.txBuf.begin() + frameEnd);
+ }
+ i = frameEnd;
+ }
+ src.dropRngSeed = s;
+ src.clearTx();
+ if (!kept.empty()) dest.link->onRx(kept.data(), kept.size());
 }
 
 // Negotiate a ping/pong MockHal pair into State::OK via the legacy
