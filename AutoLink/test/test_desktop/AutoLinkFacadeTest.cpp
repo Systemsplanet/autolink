@@ -155,38 +155,30 @@ void test_facade_sendmsg_has_cache_gate_before_link_send() {
     while ((n = fread(buf, 1, sizeof(buf), f)) > 0) contents.append(buf, n);
     fclose(f);
 
-    // Find the sendMsg method body. We need to look INSIDE the body
-    // for the gate, not in comments. The gate line is a real code
-    // statement; if someone comments it out (the v5.1.35 revert), the
-    // line is preceded by "//" and is no longer an active statement.
-    // The class declares sendMsg inline (no `bool AutoLink::sendMsg`
-    // line in the source), so we anchor on a unique string that
-    // appears in the v5.1.35 explanatory block right above the gate.
-    size_t sendMsgStart = contents.find("refuse to send here");
-    if (sendMsgStart == std::string::npos) {
-        // Fallback: try the function body anchor.
-        sendMsgStart = contents.find("link->peekTxSeq");
-        if (sendMsgStart == std::string::npos) {
-            std::cerr << "\ncannot find sendMsg body anchor" << std::endl;
-            assert(false);
-        }
+    // v5.1.39 (one-owner design): the cache gate moved from
+    // AutoLink::sendMsg into ALink::sendMsgEx (the protocol layer).
+    // We now inspect ALink.cpp for the gate check, not AutoLink.h.
+    // This pins the v5.1.35 bug (reverting would mean removing
+    // the protocol-side gate, which lets the cache overflow the
+    // WINDOW and latch).
+    std::string alinkContents;
+    {
+        FILE* f2 = fopen("../../src/al/protocol/ALink.cpp", "r");
+        if (!f2) { std::cerr << "\ncannot open ALink.cpp" << std::endl; assert(false); }
+        char buf[8192];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof(buf), f2)) > 0) alinkContents.append(buf, n);
+        fclose(f2);
     }
-    // Look for the gate INSIDE the body, not in a comment line.
-    // Strategy: find every line containing the gate pattern, check
-    // it's not commented out. A line is commented if it starts (after
-    // whitespace) with "//".
-    auto findActiveLine = [&](const std::string& needle) -> size_t {
-        size_t pos = sendMsgStart;
-        while ((pos = contents.find(needle, pos)) != std::string::npos) {
-            // Find start of the line containing this pos.
-            size_t lineStart = contents.rfind('\n', pos);
+    auto findActiveLine2 = [&](const std::string& text, const std::string& needle) -> size_t {
+        size_t pos = text.find(needle);
+        while (pos != std::string::npos) {
+            size_t lineStart = text.rfind('\n', pos);
             if (lineStart == std::string::npos) lineStart = 0;
-            else lineStart++; // skip the newline
-            // Skip leading whitespace.
+            else lineStart++;
             size_t trimmed = lineStart;
-            while (trimmed < pos && (contents[trimmed] == ' ' || contents[trimmed] == '\t')) trimmed++;
-            if (trimmed + 1 < pos && contents[trimmed] == '/' && contents[trimmed+1] == '/') {
-                // Commented out — keep searching.
+            while (trimmed < pos && (text[trimmed] == ' ' || text[trimmed] == '\t')) trimmed++;
+            if (trimmed + 1 < pos && text[trimmed] == '/' && text[trimmed+1] == '/') {
                 pos++;
                 continue;
             }
@@ -194,33 +186,21 @@ void test_facade_sendmsg_has_cache_gate_before_link_send() {
         }
         return std::string::npos;
     };
-
-    size_t gatePos = findActiveLine("pendingCount_ >= ARQ_CACHE_SLOTS");
-    size_t retFalsePos = (gatePos == std::string::npos) ? std::string::npos
-        : findActiveLine("return false");
-    size_t linkSendMsgPos = findActiveLine("link->sendMsg");
-    size_t arqCachePutPos = findActiveLine("arqCache_put(seq, b, len");
-
-    if (gatePos == std::string::npos) {
+    size_t gatePos = findActiveLine2(alinkContents, "arqCacheHasRoomCallback_ && !arqCacheHasRoomCallback_");
+    size_t insertPos = findActiveLine2(alinkContents, "arqCacheInsertCallback_(baseSeq, b, len,");
+    size_t sendMsgExBody = alinkContents.find("bool ALink::sendMsgEx");
+    bool gatePresent = (gatePos != std::string::npos && sendMsgExBody != std::string::npos && gatePos > sendMsgExBody);
+    bool insertPresent = (insertPos != std::string::npos && sendMsgExBody != std::string::npos && insertPos > sendMsgExBody);
+    if (!gatePresent || !insertPresent) {
         std::cerr << "\nstructural pin FAILED: 'pendingCount_ >= ARQ_CACHE_SLOTS' gate not active in AutoLink::sendMsg" << std::endl;
         assert(false);
     }
-    if (retFalsePos == std::string::npos || retFalsePos < gatePos) {
-        std::cerr << "\nstructural pin FAILED: gate's 'return false' early-return not present after gate" << std::endl;
-        assert(false);
-    }
-    if (linkSendMsgPos == std::string::npos || linkSendMsgPos < gatePos) {
-        std::cerr << "\nstructural pin FAILED: link->sendMsg should appear AFTER the gate (got link->sendMsg at "
-                  << linkSendMsgPos << ", gate at " << gatePos << ")" << std::endl;
-        assert(false);
-    }
-    if (arqCachePutPos == std::string::npos || arqCachePutPos < linkSendMsgPos) {
-        std::cerr << "\nstructural pin FAILED: arqCache_put should appear AFTER link->sendMsg (otherwise the gate is pointless)" << std::endl;
-        assert(false);
-    }
+    // v5.1.39: gate must precede insert (in sendMsgEx). With this
+    // order, every stamped seq is guaranteed a cache slot before
+    // the wire bytes go out.
+    assert(gatePos < insertPos && "v5.1.39: gate must precede insert");
     std::cout << "  gate at offset " << gatePos
-              << ", link->sendMsg at " << linkSendMsgPos
-              << ", arqCache_put at " << arqCachePutPos << std::endl;
+              << ", insert at " << insertPos << std::endl;
     std::cout << "PASS" << std::endl;
 }
 
@@ -233,32 +213,31 @@ void test_facade_sendmsg_has_cache_gate_before_link_send() {
 // seq's lookup — broken state.
 
 void test_facade_arqcache_rejects_when_full() {
-    std::cout << "\n=== Test: arqCache_put refuses when full (under Bug 1 fix) ===" << std::endl;
+    // v5.1.39 (one-owner design): the cache is keyed directly on
+    // cobsSeq (256 entries, one per possible seq). The "rejected
+    // when full" semantics moved from cache insert to gate check
+    // (arqCache_hasRoom, called from sendMsgEx). The gate
+    // prevents the protocol from stamping a seq that has no cache
+    // slot. By the time insert runs, the cache is guaranteed room
+    // (pendingCount_ < ARQ_CACHE_CAP). So this test now checks
+    // the gate, not the insert.
+    std::cout << "\n=== Test: ARQ cache gate (one-owner design, v5.1.39) ===" << std::endl;
     AutoLink link(0, 16, 17, /*isMaster=*/true);
+    // Fill the cache to its cap (240). 240 because the gate uses
+    // ARQ_CACHE_CAP = 240 (one per cobsSeq, with margin over
+    // WINDOW=32 * ~6 chunks = ~192 in flight max).
     uint8_t payload[32] = {0};
-    for (int i = 0; i < AutoLink::ARQ_CACHE_SLOTS_PUBLIC; i++) {
+    int filled = 0;
+    for (int i = 0; filled < 240 && i < 256; i++) {
         link.test_arqCache_put((uint8_t)i, payload, 32, (uint8_t)chunkCount(32));
+        filled++;
     }
-    assert(link.arqCacheSizeForTest() == AutoLink::ARQ_CACHE_SLOTS_PUBLIC);
-    // (ARQ_CACHE_SLOTS+1)th put: must not bump the count above the cap, must not corrupt
-    // the existing ARQ_CACHE_SLOTS slots.
-    link.test_arqCache_put(99, payload, 32, (uint8_t)chunkCount(32));
-    if (link.arqCacheSizeForTest() != AutoLink::ARQ_CACHE_SLOTS_PUBLIC) {
-        std::cerr << "\narqCache size should stay at " << AutoLink::ARQ_CACHE_SLOTS_PUBLIC
-                  << " after a refused put, got " << link.arqCacheSizeForTest() << std::endl;
-    }
-    assert(link.arqCacheSizeForTest() == AutoLink::ARQ_CACHE_SLOTS_PUBLIC);
-    // All original seqs (0..ARQ_CACHE_SLOTS-1) must still be findable.
-    for (int i = 0; i < AutoLink::ARQ_CACHE_SLOTS_PUBLIC; i++) {
-        uint8_t* outBuf = nullptr;
-        int outLen = 0;
-        link.test_arqCache_takeRetxBuffer((uint8_t)i, &outBuf, &outLen);
-        if (outBuf == nullptr || outLen != 32) {
-            std::cerr << "\nseq " << i << " should still be findable after a refused 33rd put (got len=" << outLen << ")" << std::endl;
-            assert(false);
-        }
-        free(outBuf);
-    }
+    assert(link.arqCacheSizeForTest() == 240);
+    // At cap: gate (hasRoom) must return false.
+    assert(!link.test_arqCache_hasRoom());
+    // Free one slot: gate must return true.
+    link.test_arqCache_freeBySeq(0);
+    assert(link.test_arqCache_hasRoom());
     std::cout << "PASS" << std::endl;
 }
 
@@ -722,11 +701,15 @@ void test_facade_sendmsg_uses_sendmsgex_not_peek() {
     // here" sits right above the gate, like the v5.1.35 test).
     size_t sendMsgStart = contents.find("refuse to send here");
     if (sendMsgStart == std::string::npos) {
-        // Fallback: the v5.1.37 explanatory comment about sendMsgEx
         sendMsgStart = contents.find("sendMsgEx returns the base cobsSeq");
         if (sendMsgStart == std::string::npos) {
-            std::cerr << "\ncannot find sendMsg body anchor for atomicity check" << std::endl;
-            assert(false);
+            // v5.1.39 fallback: the new design has sendMsgEx in
+            // the sendMsg body (one-owner design).
+            sendMsgStart = contents.find("link->sendMsgEx(b, len, nullptr)");
+            if (sendMsgStart == std::string::npos) {
+                std::cerr << "\ncannot find sendMsg body anchor for atomicity check" << std::endl;
+                assert(false);
+            }
         }
     }
     auto findActiveLine = [&](size_t start, const std::string& needle) -> size_t {
