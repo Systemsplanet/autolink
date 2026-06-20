@@ -4,6 +4,33 @@ All releases, most recent first.
 
 ---
 
+## v5.1.33
+
+**Bug fix: Pong's Pause/Start button no longer flickers, and is hidden immediately when the role pill identifies as Pong.**
+
+User observation (2026-06-19, GUI screenshot at `http://10.10.10.29`): the Pong dashboard shows a `‖‖ Pause` button in the header next to `⏻ Reboot`. Two complaints:
+
+1. Clicking Pause briefly shows `▶ Start` for ~100 ms then reverts to `‖‖ Pause` — visible flicker.
+2. Pong shouldn't have a Pause/Start button at all (Pong only listens and echoes).
+
+**Root cause of the flicker:** v5.1.29's `toggleMsgPause()` flipped `msgPaused` optimistically (Start→Pause), POSTed `/pausemsg`, then reverted on 404 (Pong side). The optimistic-then-revert window was the network round-trip time (~50–150 ms). The user's screenshot caught the button mid-flip on Pong.
+
+**Root cause of the visible button:** the CSS rule `body[data-role="pong"] .ping-only{display:none}` is in the stylesheet, and a host test (`test_pong_role_hides_ping_only_controls`) verifies it. But the user is running a pre-v5.1.29 build where the button is the **legacy cosmetic pause** (text `‖‖ Pause`, classes `btn pause` — no `ping-only`). The user hasn't flashed the latest zip yet.
+
+**Fix:**
+
+- **`toggleMsgPause()` now no-ops when `deviceRole !== 'Ping'`**. A new JS variable `deviceRole` tracks the role from the most recent `/stats` response (null before first poll). Click is silently ignored on Pong, on Pong-after-role-flip, and on first-load before role is known. No more optimistic-flip-then-revert, so no flicker.
+- **`/stats` reconciliation hides ping-only elements via inline `style.display='none'`** the moment role=Pong is detected. This is in addition to the CSS rule — belt-and-suspenders, so even if the user's browser hasn't applied the CSS yet, the button disappears instantly.
+- The `topPbtn` initial text is `▶ Start` (matches the paused-at-boot state on Ping). On Pong the button is hidden so the user never sees it.
+
+**Disclosed:** dashboard JS test count grew from 83 to 89 (2 new tests for the role gate; 4 existing tests updated to set `deviceRole='Ping'` explicitly because the gate is now required). The /pausemsg endpoint still 404s on Pong because `UtilPong` doesn't register the hook — but the JS gate prevents the click from even reaching it.
+
+**Tests:** 89 dashboard JS tests + 17 C++ suites + 10 s loopback + 5 s loopback-noise regression all PASS. Arduino `verify_build.ino` compiles clean.
+
+No protocol or wire-format change. v5.1.32 → v5.1.33.
+
+---
+
 ## v5.1.32
 
 **Bug fix: WiFi connect runs in a background task — setup() returns immediately so the SWP handshake isn't blocked.**
