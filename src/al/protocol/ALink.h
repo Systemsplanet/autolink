@@ -198,7 +198,19 @@ class ALink : private UtilFrameRx::Listener {
     // until manual resume / dropLink().)
     bool    linkPaused_        = false;
     static constexpr uint8_t MAX_RETX = 5;     // give up after this many
-    static constexpr uint32_t ACK_RTO_MS = 100; // retransmit timeout (one OK tick)
+    // v5.1.47: ACK_RTO_MS raised 100 → 500. Under full-duplex
+    // load, observed ACK latency tops out around 260 ms while
+    // 100 ms was the threshold. Every timeout at 100 ms was
+    // spurious (the real ACK landed a few ms after the timer
+    // fired). 500 ms gives a ~2x margin over the worst observed
+    // 260 ms while staying well under the idle watchdog
+    // (idleTimeoutMs default 5000 ms) and the link-drop
+    // timeline. Fixed constant rather than baud-derived: simpler,
+    // and the cascade fix (the for-loop removal in AutoLink.cpp
+    // arqCache_retx) is what actually matters — the multi-second
+    // ACK ages in the v5.1.45 logs were a consequence of the
+    // cascade, not the short RTO.
+    static constexpr uint32_t ACK_RTO_MS = 500;
 
     // v5 ARQ hook types — declared before the members that use them.
     // v5.1.39 (one-owner design): the protocol layer owns the
@@ -443,6 +455,14 @@ public:
     void onRx(const uint8_t* data, int len);
     void onBreak();
     void onTimer();
+
+    // v5.1.48: host-only test hook. Production code sets
+    // ackedPending_[s]=true inside sendCobsFrameAcked_unlocked.
+    // The cache-miss regression test drives arqCache_retx directly
+    // without going through a full closed loop, so it needs a way
+    // to plant the pending flag. Compiled out on device via the
+    // empty inline body in AutoLink.cpp (zero cost on production).
+    void test_markAckedPending(uint8_t s) { ackedPending_[s] = true; }
 };
 
 } // namespace autolink
