@@ -1,5 +1,5 @@
 #!/bin/bash
-# verify_build.sh — cross-compile verify_build/verify_build.ino
+# verify_build.sh — cross-compile build/verify_build.ino
 # against the ESP32 Arduino target, like ArduinoDroid would.
 #
 # Compiles the library as-is, in-place. No staging, no flatten,
@@ -19,7 +19,7 @@ set -e
 FQBN="${FQBN:-esp32:esp32:firebeetle32}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-SKETCH_DIR="$REPO_DIR/verify_build"
+SKETCH_DIR="$REPO_DIR/build/verify_build"
 
 # All arduino-cli calls go through the wrapper so install-on-demand
 # works (no separate "run build_env.sh first" step).
