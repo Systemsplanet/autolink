@@ -8,7 +8,7 @@
 #pragma once
 #ifndef ARDUINO
 
-#include "ALink.h"
+#include "al/protocol/ALink.h"
 #include <queue>
 #include <mutex>
 #include <vector>
