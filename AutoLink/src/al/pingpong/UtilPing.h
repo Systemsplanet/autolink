@@ -41,6 +41,13 @@ public:
         randomSeed(esp_random());
         if (ssid_) installWebHooks();
         setupCommon();
+        // v5.1.31: paused_ defaults true. Propagate to protocol so
+        // it suppresses idle-drop and keepalive emissions from the
+        // very first onTimer tick (not just after /pausemsg fires).
+        // Without this, the first ~5 s after boot would still try
+        // keepalives and might still drop the link if the operator
+        // is slow to click Start.
+        comm_.setLinkPaused(paused_);
         log_.debug("Ping",
             "setup complete  WINDOW=%d  MAX_TX_PER_LOOP=%d  "
             "SETTLE_MS=%lu  STALL_MS=%lu  BUF_SIZE=%d",
@@ -271,7 +278,16 @@ public:
     // affected log polling but not Ping's send loop — Ping would
     // blast bytes from the moment the link settled, regardless of
     // what the operator did in the UI.
-    void        setPaused(bool p) { paused_ = p; log_.info("Ping", "device-side pause %s", p ? "ON" : "OFF"); }
+    void        setPaused(bool p) {
+        paused_ = p;
+        // v5.1.31: also tell the protocol layer to stop its idle
+        // watchdog and keepalive emissions while paused. Without
+        // this, the link would drop after idleTimeoutMs (5 s) of
+        // silence, forcing Ping to re-sweep before the operator even
+        // clicks Start. With this, the link stays up silently.
+        comm_.setLinkPaused(p);
+        log_.info("Ping", "device-side pause %s", p ? "ON" : "OFF");
+    }
     bool        isPaused() const { return paused_; }
     static bool pausedReaderThunk_() {
         return s_active_ ? s_active_->isPaused() : false;
