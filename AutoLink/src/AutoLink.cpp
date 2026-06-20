@@ -68,13 +68,13 @@ void AutoLink::arqCache_put(uint8_t seq, const uint8_t* b, int len, uint8_t chun
     // unless the cache map is corrupt; cheap to be safe).
     arqCache_freeBySeq(seq);
     int slot = -1;
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < ARQ_CACHE_SLOTS; i++) {
         if (!pending_[i].in_use) { slot = i; break; }
     }
     if (slot < 0) {
         Log::log().error("AutoLink",
-            "ARQ cache full (32 pending); dropping cache entry for cobsSeq=%u",
-            (unsigned)seq);
+            "ARQ cache full (%d pending); dropping cache entry for cobsSeq=%u",
+            ARQ_CACHE_SLOTS, (unsigned)seq);
         return;
     }
     pending_[slot].buf = (uint8_t*)malloc(len);
@@ -94,7 +94,7 @@ void AutoLink::arqCache_put(uint8_t seq, const uint8_t* b, int len, uint8_t chun
 
 int8_t AutoLink::arqCache_findBySeq(uint8_t seq) {
     int8_t idx = seqToPending_[seq];
-    if (idx < 0 || idx >= 32) return -1;
+    if (idx < 0 || idx >= ARQ_CACHE_SLOTS) return -1;
     if (!pending_[idx].in_use || pending_[idx].seq != seq) return -1;
     return idx;
 }
@@ -175,11 +175,73 @@ void AutoLink::arqCache_takeRetxBuffer(uint8_t seq, uint8_t** bufOut, int* lenOu
 // Re-send a previously-cached payload. Called by arqCache_retx after
 // the old slot has been freed. Public on the facade (v5.1.14) so the
 // test can call arqCache_takeRetxBuffer + retx_resend as two phases.
+//
+// v5.1.37: this previously leaked the `buf` pointer (taken from the
+// cache by arqCache_takeRetxBuffer, ownership transferred to us).
+// sendMsg memcpys the payload into a NEW cache slot keyed under a
+// fresh cobsSeq, then returns — leaving the old buffer still
+// malloc'd. Every retransmit leaked `len` bytes; after MAX_RETX
+// retransmits with full-size messages (1024 B), up to 160 KB of
+// heap gone. On ESP32, eventual OOM. Fix: free the buffer after
+// sendMsg returns, regardless of whether sendMsg succeeded
+// (sendMsg copies the bytes synchronously under the lock, so
+// ownership of the source bytes transfers to us on return).
 void AutoLink::retx_resend(const uint8_t* buf, int len) {
     if (buf == nullptr || len <= 0) return;
     sendMsg(buf, len);
+    // Ownership of `buf` was transferred to us by
+    // arqCache_takeRetxBuffer. The bytes have been memcpyd into
+    // the new cache slot by sendMsg, so the source buffer is
+    // unreachable from any data structure. Free it.
+    free((void*)buf);
 }
 
 // end of cache helpers
+
+// v5.1.37: free every pending payload, zero pendingCount_, and
+// reset seqToPending_ to "no mapping". Called by the link-reset
+// trampoline from inside ALink::reset_unlocked, after the protocol
+// has cleared its own ARQ maps and reset cobsSeq to 0. Without
+// this, a link drop orphaned the cache: the old session's cobsSeqs
+// were never reclaimed by arqCache_freeBySeq (the new session
+// reuses low seqs first, doesn't sweep back through the old high
+// range), pendingCount_ never returned to 0, and the v5.1.36
+// cache-full gate latched on the very next sendMsg. Now the gate
+// sees pendingCount_=0 and the link can recover.
+//
+// Called under the link lock (it's dispatched from reset_unlocked).
+// Does NOT take any other lock — the facade's cache arrays are not
+// protected by a lock of their own today, and the only writer on
+// the host side is the user thread. On Arduino, sendMsg is called
+// from the Arduino loopTask and reset_unlocked is also called from
+// the loopTask (or from onTimer on the timer task, but the timer
+// task is the one running onTimer — which has its own lock-free
+// path through onPayload etc). In practice the cache is only
+// written from the loop task and the lock-protected ALink paths,
+// and the link lock serializes them.
+void AutoLink::arqCache_clearAll() {
+    for (int i = 0; i < ARQ_CACHE_SLOTS; i++) {
+        if (pending_[i].buf) {
+            free(pending_[i].buf);
+            pending_[i].buf = nullptr;
+        }
+        pending_[i].in_use      = false;
+        pending_[i].seq         = 0;
+        pending_[i].len         = 0;
+        pending_[i].chunks_left = 0;
+    }
+    memset(seqToPending_, -1, sizeof(seqToPending_));
+    pendingCount_ = 0;
+    Log::log().info("AutoLink",
+        "ARQ cache cleared (link reset): %d slot(s) freed", ARQ_CACHE_SLOTS);
+}
+
+// C-linkage trampoline that ALink::reset_unlocked calls to notify
+// the facade that the link has been reset. ctx is the AutoLink*
+// (set in the constructor via setLinkResetHook).
+void AutoLink::linkResetHookTrampoline(void* ctx) {
+    AutoLink* self = static_cast<AutoLink*>(ctx);
+    if (self) self->arqCache_clearAll();
+}
 
 } // namespace autolink
