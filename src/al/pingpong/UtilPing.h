@@ -92,6 +92,10 @@ public:
             comm_.blinkWait(4);
             tReady_ = millis();
             wasReady_ = true;
+            // Fresh link-up. Reset the transient counter so a
+            // stale count from before the re-sweep doesn't push
+            // the next hiccup over the drop threshold.
+            consecTransient_ = 0;
         }
 
         if (millis() - tReady_ < SETTLE_MS) {
@@ -110,9 +114,11 @@ public:
             if (now - tStall_ > STALL_MS) {
                 log_.error("Ping",
                     "pipeline stall — WINDOW=%d full for %lu ms, no echoes. "
-                    "Clearing pending. pending=%d",
-                    WINDOW, (unsigned long)(now - tStall_), pendingCount_);
-                resetPending_("stall", /*dropLink=*/true);
+                    "pending=%d  consec=%lu",
+                    WINDOW, (unsigned long)(now - tStall_), pendingCount_,
+                    (unsigned long)consecTransient_);
+                resetPending_("stall", /*dropLink=*/consecTransient_ >= STALL_TOLERANCE);
+                consecTransient_++;
             }
         } else {
             tStall_ = 0;
@@ -182,6 +188,9 @@ public:
             pending_[slot].crc = crc;
             pendingCount_++;
             sentThisLoop++;
+            // Healthy TX — reset the transient counter so a long
+            // successful run doesn't carry a stale count from earlier.
+            consecTransient_ = 0;
         }
         if (sentThisLoop > 0) {
             Diag d; comm_.getDiag(d);
@@ -233,11 +242,17 @@ public:
             Diag d; comm_.getDiag(d);
             log_.error("Ping",
                 "recv rejected (CRC/desync)  pending=%d  gap=%llu stale=%llu "
-                "— clearing pending",
+                "— clearing pending  consec=%lu",
                 pendingCount_,
                 (unsigned long long)d.gaps,
-                (unsigned long long)d.stale);
-            resetPending_("recv reject", /*dropLink=*/true);
+                (unsigned long long)d.stale,
+                (unsigned long)consecTransient_);
+            resetPending_("recv reject", /*dropLink=*/consecTransient_ >= REJECT_TOLERANCE);
+            consecTransient_++;
+        } else {
+            // Healthy recv — reset the transient counter so a single
+            // hiccup doesn't accumulate forever.
+            consecTransient_ = 0;
         }
 
         logStats("Ping");
@@ -351,6 +366,16 @@ private:
     static constexpr int      MAX_TX_PER_LOOP = 16;
     static constexpr uint32_t STALL_MS        = 3000;
     static constexpr uint32_t SWEEP_STALL_MS  = 2000;
+    // v5.1.47 (transient-tolerance): how many consecutive stall /
+    // recv-reject events to absorb before actually dropLink()'ing.
+    // A lone hiccup (one missed echo, one desync, one wire-glitch
+    // reset) should not force a 5-baud re-sweep — the cost of a
+    // re-sweep is huge (10+ seconds of no data) and the chance
+    // of an unrecoverable wire problem is low if the link had
+    // been healthy moments before. Threshold of 3 means we
+    // tolerate two consecutive transient events before breaking.
+    static constexpr uint32_t REJECT_TOLERANCE = 3;
+    static constexpr uint32_t STALL_TOLERANCE  = 2;
     // Belt-and-suspenders settle for Pong's lock; cobsSeq already
     // rejects stale frames, so 100 ms is enough.
     static constexpr uint32_t SETTLE_MS       = 100;
@@ -363,6 +388,7 @@ private:
     uint32_t tReady_       = 0;
     uint32_t tSweepStall_  = 0;
     uint32_t tNotReady_    = 0;
+    uint32_t consecTransient_ = 0; // v5.1.47: tolerate transients before dropLink
 
     // Separate TX/RX buffers so recv() can't overwrite a payload
     // whose CRC is still pending comparison.
