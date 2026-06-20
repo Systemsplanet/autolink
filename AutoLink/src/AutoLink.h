@@ -9,9 +9,9 @@
 // corresponds to exactly one sendMsg() that was acknowledged by the
 // peer" — no message is silently lost on a healthy link.
 #pragma once
-#include "ALink.h"
-#include "Log.h"
-#include "util/UtilBlink.h"
+#include "al/protocol/ALink.h"
+#include "al/util/Log.h"
+#include "al/util/UtilBlink.h"
 #include <memory>
 #include <string.h>     // memset/memcpy
 #include <stdlib.h>     // malloc/free
@@ -28,7 +28,7 @@
 // segfaulted. The pre-existing stub was insufficient because it
 // didn't satisfy ILink, so ALink couldn't be instantiated.)
 typedef int uart_port_t;
-#include "ILink.h"
+#include "al/hal/ILink.h"
 namespace autolink {
 struct EspHal : public ILink {
     ~EspHal() override = default;
@@ -62,7 +62,7 @@ struct EspBlinkHal {
 } // namespace autolink
 
 #else
-#include "EspHal.h"
+#include "al/hal/EspHal.h"
 #endif
 
 #ifdef ARDUINO
@@ -82,7 +82,7 @@ public:
 namespace autolink {
 
 // Keep in sync with library.properties.
-#define AUTOLINK_VERSION "5.1.14"
+#define AUTOLINK_VERSION "5.1.27"
 
 class AutoLink : public Stream {
 private:
@@ -146,6 +146,12 @@ public:
         for (int i = 0; i < 32; i++) if (pending_[i].in_use) n++;
         return n;
     }
+    // v5.1.19: test-only accessor to drive ALink::onTimer() so the
+    // host test can pin the deferred-retransmit fix without a real
+    // FreeRTOS timer. The accessor returns the ALink*; the test
+    // then calls onTimer() to fire the OK tick, then advances the
+    // MockHal clock and calls onTimer() again to trigger a retx.
+    ALink* linkForTest() { return link.get(); }
     // Thin wrappers around the private cache methods so the host
     // test can exercise them. Public on purpose for testing only;
     // production callers go through send() / sendMsg() / the hook
