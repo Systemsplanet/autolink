@@ -17,10 +17,10 @@
 #error "Build with -DAUTOLINK_HOST_TEST (see Makefile)"
 #endif
 
-#include "ILink.h"
-#include "ALink.h" // pulls in AutoLinkConfig used by the EspHal stub ctor
-#include "Log.h"
-#include "util/UtilBlink.h"
+#include "al/hal/ILink.h"
+#include "al/protocol/ALink.h" // pulls in AutoLinkConfig used by the EspHal stub ctor
+#include "al/util/Log.h"
+#include "al/util/UtilBlink.h"
 
 // ---------------------------------------------------------------------------
 // AutoLink facade tests.
