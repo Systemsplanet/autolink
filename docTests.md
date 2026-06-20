@@ -8,7 +8,7 @@ the real UART peripheral on hardware.
 
 | Path | Purpose |
 |------|---------|
-| `AutoLink/test/test_desktop/` | Host-side unit + integration tests. 14 binaries, 96 tests (v5.1.39: added closed-loop cache-miss-loop test). |
+| `AutoLink/test/test_desktop/` | Host-side unit + integration tests. 15 binaries, 105 tests (v5.1.40: added 6 boundary/state tests for cobsSeq wraparound, per-node idle, keepalive interval, forced drop, and pumpClock safety). |
 | `AutoLink/test/test_embedded/test_embedded.ino` | On-hardware self-loopback smoke test for the `AutoLink` facade. |
 | `AutoLink/test/test_desktop/Makefile` | Single entry point for all build / run / coverage modes. |
 | `AutoLink/test/test_desktop/coverage_merge.sh` | Helper that assembles the per-source `.gcda` files into a single coverage report. |
