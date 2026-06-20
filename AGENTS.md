@@ -20,7 +20,7 @@ for context.**
   tests do NOT compile `AutoLinkWeb.cpp`** — they only cover
   `AutoLinkWebCore.cpp`. Any change to the Arduino-only glue file
   needs an actual cross-compile to verify.
-- `verify_build/verify_build.ino` — minimal Arduino sketch that
+- `build/verify_build/verify_build.ino` — minimal Arduino sketch that
   exercises every public `AutoLink` / `AutoLinkWeb` API. Use it
   to verify an actual ESP32 build before declaring anything done.
 - `test/test_desktop/loopback_test.cpp` — host-side loopback that
@@ -326,6 +326,39 @@ for context.**
     `WireSimClosedLoopTest.cpp`. Don't put such tests in
     `AutoLinkFacadeTest.cpp` — those test the cache in isolation;
     the closed loop is the missing dimension.
+
+19c. **Time and scheduling are injectable; idle-timeout, ACK RTO,
+    and SWP/LCK stall are sub-ms deterministic host tests.** Pre-
+    v5.1.40 had three time-dependent paths unreachable on host:
+    idle watchdog (`cfg.idleTimeoutMs`), ACK retransmit timeout
+    (`ACK_RTO_MS`), and SWP/LCK stall retries. Either you waited
+    real wall-clock time (not feasible) or you called `onTimer()`
+    unconditionally (which doesn't faithfully simulate "5 s of
+    idle"). v5.1.40 adds `MockHal::pumpClock(deltaMs)` —
+    advances the simulated clock AND fires `onTimer()` only when
+    the protocol's scheduled deadline has elapsed. Same
+    chokepoint in production: `EspHal::startTimer(ms)` schedules
+    a FreeRTOS timer that calls `link->onTimer()` when it fires.
+    Both paths are deterministic in their respective contexts.
+    `MockHal::runFor(targetMs)` is a convenience that loops
+    `pumpClock` until total elapsed. **Any new time-dependent
+    behavior MUST be reachable via `pumpClock`/`runFor`** — if
+    you add a wall-clock wait or a `while(!deadline)` poll
+    without going through the timer scheduling API, the host test
+    suite will silently miss it. Companion rule: **`ALink::begin()`
+    MUST be called from `AutoLink::begin()` on host too** (was
+    gated to ARDUINO pre-v5.1.40). Without it, `MockHal::startTimer`
+    is never called, no timer is armed, and host tests can't
+    drive the state machine. The change is safe on host because
+    `EspHal::begin()` is a no-op there.
+    
+    The three deterministic clock tests live in
+    `ClockInjectionTest.cpp` (added v5.1.40): idle watchdog
+    drops link after `cfg.idleTimeoutMs` of simulated silence;
+    ACK timeout at `ACK_RTO_MS` triggers retransmit on a
+    one-way wire; SWP/LCK stall forces `sendBreak()` after
+    `allowedBaudsCount * 2 * cfg.delayMs`. Toggle-verified:
+    reverting `pumpClock` to a no-op fails test 1.
 
 19b. **One owner for in-flight state: the protocol owns the seq
     stamps; the facade owns payload storage, sequenced by the same
