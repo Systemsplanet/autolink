@@ -78,6 +78,15 @@ bool AutoLinkWeb::begin(const char* ssid, const char* pass, uint16_t port) {
     if (enabled_) return true;
     port_ = port;
 
+    // v5.1.32: heap-copy the SSID and password so the bg task can
+    // read them after this stack frame is gone. The password stays
+    // in this object's member only; we never log it (only its
+    // length, see wifiTaskThunk_).
+    if (ssid_) { free(ssid_); ssid_ = nullptr; }
+    if (pass_) { free(pass_); pass_ = nullptr; }
+    if (ssid) ssid_ = strdup(ssid);
+    if (pass) pass_ = strdup(pass);
+
     Log& log = Log::log();
     log.info(TAG, "begin: entering (port=%u)", (unsigned)port);
     // Restore the saved log level from NVS before any other setup.
@@ -131,85 +140,108 @@ bool AutoLinkWeb::begin(const char* ssid, const char* pass, uint16_t port) {
             }
         }
     }
-    log.info(TAG, "WiFi connect SSID=\"%s\" passLen=%u", ssid, (unsigned)strlen(pass));
+    log.info(TAG, "WiFi connect SSID=\"%s\" passLen=%u (background task)",
+        ssid, (unsigned)strlen(pass));
 
+    // v5.1.32: WiFi connect runs in a background FreeRTOS task
+    // (wifiTask_). begin() returns immediately so the rest of
+    // setup() — and especially the link layer's SWP handshake —
+    // runs without being blocked by WiFi's `delay(250)` calls and
+    // interrupt storms. The task gives up after WIFI_BG_TIMEOUT_MS
+    // (10 s by default) so a long-term AP outage doesn't pin a
+    // task on the scheduler.
+    //
+    // Disclosed: this trades the old "block setup until WiFi is up
+    // OR fails forever" for "try once in the background, give up
+    // after 10 s if it doesn't connect". The user gets the Serial
+    // monitor back immediately and can monitor the SWP start
+    // process even if WiFi never comes up. If WiFi fails, the
+    // dashboard never starts and isUp() stays false.
     WiFi.mode(WIFI_STA);
-    log.info(TAG, "WiFi: mode set to STA, calling WiFi.begin");
-
-    // v5.1.29: retry until connected. Previously one failed attempt
-    // disabled the web monitor for the entire boot — if the AP came
-    // up a few seconds after the device (slow AP, channel change,
-    // DHCP hiccup) the user got a 404 in their browser and assumed
-    // the device was broken. Now we loop: each attempt gets
-    // WIFI_TIMEOUT_MS to connect; on failure we log, back off
-    // WIFI_RETRY_BACKOFF_MS, and try again. Either WIFI_RETRY_MAX_ATTEMPTS
-    // (if >0) or forever (if 0). One-shot timers and the HTTP server
-    // never start until WiFi is up, so the only resource cost is
-    // occasional WiFi.begin() calls.
-    int attempt = 0;
-    uint32_t overallStart = millis();
-    uint32_t lastRetryLog = 0;
-    bool connected = false;
-    while (!connected) {
-        attempt++;
-        if (WIFI_RETRY_MAX_ATTEMPTS > 0 && attempt > WIFI_RETRY_MAX_ATTEMPTS) {
-            log.error(TAG, "WiFi: gave up after %d attempts (%lu ms total) — web monitor disabled",
-                attempt - 1, (unsigned long)(millis() - overallStart));
+    log.info(TAG, "WiFi: mode set to STA, launching background connect task");
+    if (wifiTask_) {
+        // begin() called twice; let the prior task finish on its own.
+        log.warning(TAG, "WiFi bg task already running; ignoring re-begin");
+    } else {
+        BaseType_t ok = xTaskCreate(
+            &AutoLinkWeb::wifiTaskThunk_, "al-wifi-bg",
+            4096,        // stack words
+            this,        // arg
+            1,           // priority (low)
+            &wifiTask_);
+        if (ok != pdPASS) {
+            log.error(TAG, "xTaskCreate for WiFi bg failed; web monitor disabled");
             return false;
         }
+    }
+    // HTTP server, log ring, and stats timer are started by the bg
+    // task on successful WiFi connect. Until then isUp() == false
+    // and the sketch runs normally (SWP keeps going, UART RX
+    // works, the operator can read the Serial monitor).
+    log.info(TAG, "begin() returned; WiFi connecting in background (up to %lu s)",
+        (unsigned long)(WIFI_BG_TIMEOUT_MS / 1000));
+    return true;
+}
 
-        WiFi.begin(ssid, pass);
-        log.info(TAG, "WiFi.begin attempt #%d returned status=%d",
-            attempt, (int)WiFi.status());
+// v5.1.32: WiFi bg task. Polls WiFi.status() for up to
+// WIFI_BG_TIMEOUT_MS. On success, sets up the HTTP server, log
+// ring, stats timer (the same setup the blocking version did
+// inline). On timeout, logs and exits. Self-deletes.
+void AutoLinkWeb::wifiTaskThunk_(void* arg) {
+    auto* self = static_cast<AutoLinkWeb*>(arg);
+    Log& log = Log::log();
+    log.info(TAG, "WiFi bg task started (timeout=%lu s)",
+        (unsigned long)(WIFI_BG_TIMEOUT_MS / 1000));
 
-        const uint32_t startMs = millis();
-        uint32_t lastProgressLog = 0;
-        while (WiFi.status() != WL_CONNECTED) {
-            if (millis() - startMs > WIFI_TIMEOUT_MS) break;
-            // Log every 2 s so a stuck connect is visible on the Serial
-            // monitor without spamming (was previously silent until
-            // success/failure, which made "apps never start" impossible
-            // to diagnose).
-            if (millis() - lastProgressLog > 2000) {
-                log.info(TAG, "WiFi connecting... status=%d elapsed=%lu ms (attempt %d)",
-                    (int)WiFi.status(), (unsigned long)(millis() - startMs), attempt);
-                lastProgressLog = millis();
-            }
-            delay(250);
+    WiFi.begin(self->ssid_, self->pass_);
+    log.info(TAG, "WiFi.begin returned status=%d", (int)WiFi.status());
+
+    const uint32_t startMs = millis();
+    uint32_t lastProgressLog = 0;
+    while (WiFi.status() != WL_CONNECTED) {
+        if (millis() - startMs > WIFI_BG_TIMEOUT_MS) {
+            log.error(TAG,
+                "WiFi bg task: gave up after %lu ms (status=%d) — "
+                "web monitor disabled; SWP handshake continues. "
+                "Sketch runs normally; reboot to retry WiFi.",
+                (unsigned long)(millis() - startMs), (int)WiFi.status());
+            self->wifiTask_ = nullptr;
+            vTaskDelete(nullptr);
+            return;
         }
-
-        if (WiFi.status() == WL_CONNECTED) {
-            connected = true;
-            break;
+        if (millis() - lastProgressLog > 2000) {
+            log.info(TAG, "WiFi connecting... status=%d elapsed=%lu ms",
+                (int)WiFi.status(), (unsigned long)(millis() - startMs));
+            lastProgressLog = millis();
         }
-
-        // Failed attempt. Log once per retry-log-interval to avoid
-        // flooding the serial monitor on a long-term outage; the
-        // per-attempt progress logs above already give high-res info
-        // during each 12 s window.
-        if (millis() - lastRetryLog > WIFI_RETRY_LOG_INTERVAL_MS) {
-            log.warning(TAG, "WiFi: attempt #%d failed (status=%d), retrying in %lu ms (total elapsed=%lu ms)",
-                attempt, (int)WiFi.status(),
-                (unsigned long)WIFI_RETRY_BACKOFF_MS,
-                (unsigned long)(millis() - overallStart));
-            lastRetryLog = millis();
-        } else {
-            log.debug(TAG, "WiFi: attempt #%d failed (status=%d), retrying in %lu ms",
-                attempt, (int)WiFi.status(), (unsigned long)WIFI_RETRY_BACKOFF_MS);
-        }
-        // Disconnect cleanly between attempts so the next WiFi.begin
-        // is a fresh association, not a half-open one. The
-        // disconnect() call also clears the AP's stale auth state.
-        WiFi.disconnect();
-        delay(WIFI_RETRY_BACKOFF_MS);
+        vTaskDelay(pdMS_TO_TICKS(WIFI_BG_TICK_MS));
     }
 
-    log.info(TAG, "WiFi connected IP=%s (took %lu ms, %d attempt(s))",
+    log.info(TAG, "WiFi connected IP=%s (took %lu ms)",
         WiFi.localIP().toString().c_str(),
-        (unsigned long)(millis() - overallStart), attempt);
+        (unsigned long)(millis() - startMs));
 
-    // ----- allocate resources; clean up everything on any failure -----
+    // From here on, this is the same setup the blocking version
+    // did after WiFi came up. We need a lock here because
+    // begin() is being called from the Arduino main task and
+    // these resources might be touched by it; use a small mutex
+    // around the resource setup.
+    // (No-op if already set up by a prior begin(); we already
+    // guarded wifiTask_ above.)
+    self->setupHttpAndLogging_();
+    self->wifiTask_ = nullptr;
+    vTaskDelete(nullptr);
+}
 
+// v5.1.32: factored out of begin() so the bg task can call it
+// after WiFi comes up. Allocates the log ring, stats timer, and
+// HTTP server; sets enabled_=true on success.
+bool AutoLinkWeb::setupHttpAndLogging_() {
+    Log& log = Log::log();
+    if (enabled_) {
+        log.warning(TAG, "setupHttpAndLogging_ called twice; ignoring");
+        return true;
+    }
     logRing_ = (LogEntry*)calloc(RING_CAP, sizeof(LogEntry));
     snapMtx_ = xSemaphoreCreateMutex();
     logMtx_  = xSemaphoreCreateMutex();
