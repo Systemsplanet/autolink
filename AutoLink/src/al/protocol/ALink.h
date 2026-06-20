@@ -201,26 +201,35 @@ class ALink : private UtilFrameRx::Listener {
     static constexpr uint32_t ACK_RTO_MS = 100; // retransmit timeout (one OK tick)
 
     // v5 ARQ hook types — declared before the members that use them.
+    // v5.1.39 (one-owner design): the protocol layer owns the
+    // in-flight tracking; the facade provides the payload
+    // storage via these callbacks, all firing UNDER THE LINK
+    // LOCK. See the v5.1.39 rationale in AutoLink.h.
     using ArqAckCallback   = bool (*)(uint8_t ackedSeq, void* ctx);
     using ArqRetxCallback  = bool (*)(uint8_t retxSeq,  void* ctx);
+    // v5.1.39: cache hooks (gate, insert, clear).
+    using ArqCacheHasRoomCallback = bool (*)(void* ctx);
+    using ArqCacheInsertCallback  = void (*)(uint8_t baseSeq, const uint8_t* payload, int payloadLen, uint8_t chunkCount, void* ctx);
+    using ArqCacheClearAllCallback = void (*)(void* ctx);
     // v5.1.37: link-reset hook. Fired from inside reset_unlocked
     // AFTER the protocol's own ARQ maps and cobsSeq are cleared.
     // Gives the facade a chance to clear any state it keeps parallel
-    // to the protocol (e.g. the payload cache). Without this hook,
-    // the facade's pending_[32] and pendingCount_ survive the reset
-    // and orphan entries under cobsSeqs the new session will never
-    // reuse — causing the v5.1.36 cache-full gate to latch. The
-    // callback runs under the link lock (same scope as the protocol
-    // reset); keep it short and lock-free on any shared state.
+    // to the protocol (e.g. the payload cache). The callback runs
+    // under the link lock; keep it short and lock-free on any
+    // shared state. (v5.1.39: same signature as
+    // ArqCacheClearAllCallback — the v5.1.39 facade wires both to
+    // the same trampoline.)
     using LinkResetCallback = void (*)(void* ctx);
 
-    // Facade hooks. Null by default (no facade = no retransmit = old
-    // best-effort behavior, though in v5 we REQUIRE the facade for
-    // reliability). Set via setArqHooks().
-    ArqAckCallback    arqAckCallback_    = nullptr;
-    ArqRetxCallback   arqRetxCallback_   = nullptr;
-    void*             arqCtx_            = nullptr;
-    LinkResetCallback linkResetCallback_ = nullptr;
+    // Facade hooks. Null by default. Set via setArqHooks() (legacy)
+    // or setArqCacheHooks() (v5.1.39, unified).
+    ArqAckCallback            arqAckCallback_            = nullptr;
+    ArqRetxCallback           arqRetxCallback_           = nullptr;
+    ArqCacheHasRoomCallback  arqCacheHasRoomCallback_   = nullptr;
+    ArqCacheInsertCallback   arqCacheInsertCallback_    = nullptr;
+    ArqCacheClearAllCallback arqCacheClearAllCallback_  = nullptr;
+    LinkResetCallback         linkResetCallback_         = nullptr;
+    void*                     arqCtx_                    = nullptr;
 
     bool onPayload(uint8_t cobsSeq, const uint8_t* b, int n) override;
     // v5 ARQ: onAck is non-virtual; the facade registers a callback
@@ -323,24 +332,39 @@ public:
     // the protocol layer is about to stamp on the wire.
     uint8_t peekTxSeq() const { return txSeq; }
 
-    // v5 ARQ: register facade hooks. arqAckCallback_(seq, ctx) is
-    // called after clearing the protocol-layer ARQ state for the
-    // acked cobsSeq (facade frees its cache slot). arqRetxCallback_
-    // (seq, ctx) is called when a slot's RTO has expired (facade
-    // re-sends from its cache). Either callback returning true
-    // asks the protocol layer to drop the link.
+    // v5 ARQ: register facade hooks (legacy). The v5.1.39 facade
+    // uses setArqCacheHooks() instead (unified). This legacy entry
+    // is kept so v5.1.37 facade code paths still work, but new
+    // code should use the unified setter.
     void setArqHooks(ArqAckCallback ack, ArqRetxCallback retx, void* ctx) {
         arqAckCallback_  = ack;
         arqRetxCallback_ = retx;
         arqCtx_          = ctx;
     }
-    // v5.1.37: register a callback that fires from inside
-    // reset_unlocked after the protocol state is cleared. Used by
-    // the AutoLink facade to free its payload cache. ctx is the
-    // same pointer passed to setArqHooks() — the facade uses `this`.
+    // v5.1.37 (kept for back-compat): link-reset hook.
     void setLinkResetHook(LinkResetCallback cb, void* ctx) {
         linkResetCallback_ = cb;
-        arqCtx_            = ctx;  // share ctx with arq hooks
+        arqCtx_            = ctx;
+    }
+    // v5.1.39: unified ARQ cache hooks. All callbacks fire
+    // UNDER THE PROTOCOL'S LINK LOCK. The gate (hasRoom) is
+    // called before any stamping; the insert is called after all
+    // chunks are stamped (single atomic step). The clearAll is
+    // called from reset_unlocked after the protocol's own state
+    // is cleared. ack/retx are equivalent to the v5.1.37 hooks.
+    // All share the same ctx (the facade's `this`).
+    void setArqCacheHooks(ArqAckCallback ack,
+                           ArqRetxCallback retx,
+                           ArqCacheHasRoomCallback hasRoom,
+                           ArqCacheInsertCallback insert,
+                           ArqCacheClearAllCallback clearAll,
+                           void* ctx) {
+        arqAckCallback_           = ack;
+        arqRetxCallback_          = retx;
+        arqCacheHasRoomCallback_  = hasRoom;
+        arqCacheInsertCallback_   = insert;
+        arqCacheClearAllCallback_ = clearAll;
+        arqCtx_                   = ctx;
     }
 
     ALink(ILink& hw, bool isMasterNode, const AutoLinkConfig& config = AutoLinkConfig());
