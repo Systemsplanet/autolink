@@ -1020,6 +1020,11 @@ void ALink::onTimer() {
 void ALink::onTimerOk_unlocked() {
     if (cfg.idleTimeoutMs <= 0) return;
     uint32_t now = hw.nowMs();
+    // v5.1.31: facade-driven link pause. Skip both the idle-drop
+    // check AND the keepalive emission so the operator can inspect
+    // the link without tearing it down. The peer side has its own
+    // pause flag (independently set by its facade).
+    if (linkPaused_) return;
     if ((uint32_t)(now - lastRxMs) > (uint32_t)cfg.idleTimeoutMs) {
         Log::log().info(ALINK_TAG, "Idle for %u ms (limit %d) -> dropping link",
                            (unsigned)(now - lastRxMs), cfg.idleTimeoutMs);
