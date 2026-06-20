@@ -29,6 +29,7 @@ int formatStatsJson(const WebSnapshot* s,
         "\"txTotal\":%llu,\"rxTotal\":%llu,"
         "\"rssi\":%d,\"freeHeap\":%lu,\"uptimeS\":%lu,"
         "\"baudRate\":%lu,\"lvl\":%d,\"mode\":%u,"
+        "\"msgPaused\":%u,"
         "\"role\":\"%s\","
         "\"version\":\"%s\"}",
         s->state,
@@ -45,6 +46,7 @@ int formatStatsJson(const WebSnapshot* s,
         (unsigned long)s->baudRate,
         logLevel,
         (unsigned)s->fillMode,
+        (unsigned)s->msgPaused,
         s->role,
         version ? version : "");
 }
