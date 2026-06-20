@@ -179,6 +179,17 @@ class ALink : private UtilFrameRx::Listener {
     // and the second lock attempt deadlocked the task.
     bool    hasPendingRetx_    = false;
     uint8_t pendingRetxBase_   = 0;
+
+    // v5.1.31: facade-driven link pause. When true, onTimerOk_unlocked
+    // skips BOTH the idle-drop check AND the keepalive emission —
+    // Ping/Pong is in "operator inspecting the link" mode and the
+    // user has not asked the device to send anything yet. The peer
+    // sees no traffic from this side; the peer's idle watchdog is
+    // independent and will still bite on the peer side after
+    // idleTimeoutMs of silence from us. (If both sides are paused,
+    // both watchdogs are suppressed and the link stays up indefinitely
+    // until manual resume / dropLink().)
+    bool    linkPaused_        = false;
     static constexpr uint8_t MAX_RETX = 5;     // give up after this many
     static constexpr uint32_t ACK_RTO_MS = 100; // retransmit timeout (one OK tick)
 
@@ -336,6 +347,16 @@ public:
     // gap triggers a retransmit, not a drop).
     bool sendMsg(const uint8_t* b, int len);
     void dropLink();   // send BREAK, transition to SWP
+
+    // v5.1.31: when the facade (Ping side, paused_=true) wants to
+    // inspect the link without tearing it down, it can suppress the
+    // idle watchdog. While paused, onTimerOk_unlocked() will not
+    // drop the link on idle and will not emit keepalive frames.
+    // Pong will still see its own keepalives — Pong's idle watchdog
+    // is independent. If both sides are paused, no link activity is
+    // expected and the link stays up indefinitely (until manual
+    // resume or an explicit dropLink()). Default false.
+    void setLinkPaused(bool p) { linkPaused_ = p; }
     int  recvMsg(uint8_t* b, int max_len);
 
     // ARQ inspection (for tests + diagnostics). pendingAcks() returns
