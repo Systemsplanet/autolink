@@ -83,7 +83,7 @@ public:
 namespace autolink {
 
 // Keep in sync with library.properties.
-#define AUTOLINK_VERSION "5.1.45"
+#define AUTOLINK_VERSION "5.1.48"
 
 class AutoLink : public Stream {
 private:
@@ -226,6 +226,17 @@ public:
     bool test_arqCache_hasRoom() { return arqCache_hasRoom(); }
     void test_arqCache_freeBySeq(uint8_t s) { arqCache_freeBySeq(s); }
     bool test_arqCache_retx(uint8_t baseSeq) { return arqCache_retx(baseSeq); }
+    int8_t test_arqCache_findBySeq(uint8_t s) { return arqCache_findBySeq(s); }
+    // v5.1.48: pre-populate ackedPending_ in the protocol so the
+    // miss-branch's onAck(seq+i) sweep has something to fire
+    // against. Production only sets this in
+    // sendCobsFrameAcked_unlocked (i.e. inside real sendMsgEx
+    // traffic). Tests that drive arqCache_retx directly need a
+    // way to plant the pending flag without going through a full
+    // closed loop.
+    void test_markAckedPending(uint8_t s) {
+        if (link) link->test_markAckedPending(s);
+    }
     void test_arqCache_takeRetxBuffer(uint8_t baseSeq, uint8_t** bufOut, int* lenOut)
         { arqCache_takeRetxBuffer(baseSeq, bufOut, lenOut); }
     // v5.1.37: test hook for retx_resend. Public so the test can
@@ -354,16 +365,26 @@ public:
     }
 #endif
 
-    // v5.1.40: drive begin() on host too. ALink::begin() schedules
-    // the SWP timer (and on master, sends the initial BREAK), which
-    // is the entry point for all time-dependent behavior. Without
-    // calling begin() on host, MockHal::startTimer is never called,
-    // the timer is never armed, and the host test can't drive the
-    // SWP/OK/LCK state machine via clock injection. On host the
-    // EspHal stub's begin() is a no-op (no UART to start), so this
-    // is safe.
+    // v5.1.46: Arduino path must drive the HAL first.
+    // EspHal::begin() runs uart_driver_install() / uart_set_pin() /
+    // installs the event task, then calls link->begin() at its
+    // tail (EspHal.h:249). Skipping hal->begin() left
+    // p_uart_obj[UART2] NULL, so every uart_flush_input /
+    // uart_write_bytes_with_break returned a driver error, tx/rx
+    // moved zero bytes, the sweep couldn't progress, and Ping
+    // spun in SWP→BREAK forever. The v5.1.40 "drive begin() on
+    // host too" rewrite collapsed both paths to `link->begin()`
+    // directly — correct for host (MockHal::begin() is a no-op,
+    // no UART to install), wrong for Arduino. Split the paths:
+    // Arduino goes through hal->begin() (which itself calls
+    // link->begin()); host calls link->begin() directly so the
+    // SWP timer is armed for clock-injection tests.
     void begin() {
-        link->begin();
+#ifdef ARDUINO
+        hal->begin();  // installs UART + event task, then link->begin() at its tail
+#else
+        link->begin(); // host: MockHal::begin() is empty, drive protocol directly
+#endif
     }
 
     void blinkWait(int n, int onMs = 60, int offMs = 60, long delayMs = 0) {
