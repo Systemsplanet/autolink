@@ -135,33 +135,78 @@ bool AutoLinkWeb::begin(const char* ssid, const char* pass, uint16_t port) {
 
     WiFi.mode(WIFI_STA);
     log.info(TAG, "WiFi: mode set to STA, calling WiFi.begin");
-    WiFi.begin(ssid, pass);
-    log.info(TAG, "WiFi.begin returned (status=%d), entering connect poll loop",
-        (int)WiFi.status());
 
-    const uint32_t startMs = millis();
-    uint32_t lastProgressLog = 0;
-    while (WiFi.status() != WL_CONNECTED) {
-        if (millis() - startMs > WIFI_TIMEOUT_MS) break;
-        // Log every 2 s so a stuck connect is visible on the Serial
-        // monitor without spamming (was previously silent until
-        // success/failure, which made "apps never start" impossible
-        // to diagnose).
-        if (millis() - lastProgressLog > 2000) {
-            log.info(TAG, "WiFi connecting... status=%d elapsed=%lu ms",
-                (int)WiFi.status(), (unsigned long)(millis() - startMs));
-            lastProgressLog = millis();
+    // v5.1.29: retry until connected. Previously one failed attempt
+    // disabled the web monitor for the entire boot — if the AP came
+    // up a few seconds after the device (slow AP, channel change,
+    // DHCP hiccup) the user got a 404 in their browser and assumed
+    // the device was broken. Now we loop: each attempt gets
+    // WIFI_TIMEOUT_MS to connect; on failure we log, back off
+    // WIFI_RETRY_BACKOFF_MS, and try again. Either WIFI_RETRY_MAX_ATTEMPTS
+    // (if >0) or forever (if 0). One-shot timers and the HTTP server
+    // never start until WiFi is up, so the only resource cost is
+    // occasional WiFi.begin() calls.
+    int attempt = 0;
+    uint32_t overallStart = millis();
+    uint32_t lastRetryLog = 0;
+    bool connected = false;
+    while (!connected) {
+        attempt++;
+        if (WIFI_RETRY_MAX_ATTEMPTS > 0 && attempt > WIFI_RETRY_MAX_ATTEMPTS) {
+            log.error(TAG, "WiFi: gave up after %d attempts (%lu ms total) — web monitor disabled",
+                attempt - 1, (unsigned long)(millis() - overallStart));
+            return false;
         }
-        delay(250);
+
+        WiFi.begin(ssid, pass);
+        log.info(TAG, "WiFi.begin attempt #%d returned status=%d",
+            attempt, (int)WiFi.status());
+
+        const uint32_t startMs = millis();
+        uint32_t lastProgressLog = 0;
+        while (WiFi.status() != WL_CONNECTED) {
+            if (millis() - startMs > WIFI_TIMEOUT_MS) break;
+            // Log every 2 s so a stuck connect is visible on the Serial
+            // monitor without spamming (was previously silent until
+            // success/failure, which made "apps never start" impossible
+            // to diagnose).
+            if (millis() - lastProgressLog > 2000) {
+                log.info(TAG, "WiFi connecting... status=%d elapsed=%lu ms (attempt %d)",
+                    (int)WiFi.status(), (unsigned long)(millis() - startMs), attempt);
+                lastProgressLog = millis();
+            }
+            delay(250);
+        }
+
+        if (WiFi.status() == WL_CONNECTED) {
+            connected = true;
+            break;
+        }
+
+        // Failed attempt. Log once per retry-log-interval to avoid
+        // flooding the serial monitor on a long-term outage; the
+        // per-attempt progress logs above already give high-res info
+        // during each 12 s window.
+        if (millis() - lastRetryLog > WIFI_RETRY_LOG_INTERVAL_MS) {
+            log.warning(TAG, "WiFi: attempt #%d failed (status=%d), retrying in %lu ms (total elapsed=%lu ms)",
+                attempt, (int)WiFi.status(),
+                (unsigned long)WIFI_RETRY_BACKOFF_MS,
+                (unsigned long)(millis() - overallStart));
+            lastRetryLog = millis();
+        } else {
+            log.debug(TAG, "WiFi: attempt #%d failed (status=%d), retrying in %lu ms",
+                attempt, (int)WiFi.status(), (unsigned long)WIFI_RETRY_BACKOFF_MS);
+        }
+        // Disconnect cleanly between attempts so the next WiFi.begin
+        // is a fresh association, not a half-open one. The
+        // disconnect() call also clears the AP's stale auth state.
+        WiFi.disconnect();
+        delay(WIFI_RETRY_BACKOFF_MS);
     }
 
-    if (WiFi.status() != WL_CONNECTED) {
-        log.error(TAG, "WiFi connect failed after %lu ms (status=%d) — web monitor disabled",
-            (unsigned long)(millis() - startMs), (int)WiFi.status());
-        return false;
-    }
-    log.info(TAG, "WiFi connected IP=%s (took %lu ms)",
-        WiFi.localIP().toString().c_str(), (unsigned long)(millis() - startMs));
+    log.info(TAG, "WiFi connected IP=%s (took %lu ms, %d attempt(s))",
+        WiFi.localIP().toString().c_str(),
+        (unsigned long)(millis() - overallStart), attempt);
 
     // ----- allocate resources; clean up everything on any failure -----
 
@@ -267,6 +312,7 @@ bool AutoLinkWeb::begin(const char* ssid, const char* pass, uint16_t port) {
         const httpd_uri_t r4 = { "/reboot", HTTP_POST, handleReboot, this };
         const httpd_uri_t r5 = { "/level",  HTTP_POST, handleLevel,  this };
         const httpd_uri_t r6 = { "/mode",   HTTP_POST, handleMode,   this };
+        const httpd_uri_t r7 = { "/pausemsg", HTTP_POST, handleMsgPause, this };
         httpd_register_uri_handler(server_, &r0);
         httpd_register_uri_handler(server_, &r1);
         httpd_register_uri_handler(server_, &r2);
@@ -274,6 +320,7 @@ bool AutoLinkWeb::begin(const char* ssid, const char* pass, uint16_t port) {
         httpd_register_uri_handler(server_, &r4);
         httpd_register_uri_handler(server_, &r5);
         httpd_register_uri_handler(server_, &r6);
+        httpd_register_uri_handler(server_, &r7);
     }
 
     enabled_ = true;
@@ -323,6 +370,12 @@ void AutoLinkWeb::statTimerCb(void* arg) {
     // Read fill mode via the optional hook. Default 0 (sequential)
     // when no hook is registered (Pong side).
     self->snap_.fillMode = self->fillModeReader_ ? self->fillModeReader_() : 0;
+    // v5.1.29: read device-side pause state for /stats. When no hook
+    // is registered, default to 0 (not paused). The dashboard reads
+    // /stats.msgPaused on every poll and reflects it in the button
+    // label so the operator can see whether the device actually
+    // respects the button click.
+    self->snap_.msgPaused = self->msgPausedReader_ ? (self->msgPausedReader_() ? 1u : 0u) : 0u;
     // snap_.role is set once by setRole() in setup() and never
     // changes; the /stats handler reads it directly.
     xSemaphoreGive(self->snapMtx_);
@@ -617,6 +670,49 @@ esp_err_t AutoLinkWeb::handleMode(httpd_req_t* req) {
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_set_hdr(req, "Connection", "close");
     httpd_resp_send(req, "ok", 2);
+    return ESP_OK;
+}
+
+// HTTP handler: POST /pausemsg?p=1|0
+// v5.1.29: device-side message pause. Ping registers a writer hook
+// that flips its `paused_` flag; when true, Ping's loop() returns
+// before pumping bytes. The Pause/Resume button in the dashboard now
+// hits this endpoint instead of being a JS-only toggle. The previous
+// behavior had Ping blasting bytes from boot regardless of button
+// state — the button only paused log polling, not message sending.
+esp_err_t AutoLinkWeb::handleMsgPause(httpd_req_t* req) {
+    char query[48] = {};
+    char val[8]    = {};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK
+        || httpd_query_key_value(query, "p", val, sizeof(val)) != ESP_OK) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "missing ?p=", 12);
+        return ESP_OK;
+    }
+    auto* self = static_cast<AutoLinkWeb*>(req->user_ctx);
+    if (!self->msgPausedWriter_) {
+        // No hook registered — likely the Pong side. 404 so the
+        // dashboard's button click can be detected and ignored.
+        httpd_resp_set_status(req, "404 Not Found");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "no msg pause (Pong?)", 22);
+        return ESP_OK;
+    }
+    bool paused = false;
+    if (strcmp(val, "1") == 0 || strcmp(val, "true") == 0) paused = true;
+    else if (strcmp(val, "0") == 0 || strcmp(val, "false") == 0) paused = false;
+    else {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "p must be '1', '0', 'true', or 'false'", 38);
+        return ESP_OK;
+    }
+    self->msgPausedWriter_(paused);
+    Log::log().info(TAG, "Message pause set to %s via web", paused ? "PAUSED" : "RESUMED");
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_set_hdr(req, "Connection", "close");
+    httpd_resp_send(req, paused ? "paused" : "resumed", paused ? 6 : 7);
     return ESP_OK;
 }
 
