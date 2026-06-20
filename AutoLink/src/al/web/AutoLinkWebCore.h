@@ -53,6 +53,7 @@ struct WebSnapshot {
     uint32_t uptimeS;
     uint32_t baudRate;
     uint8_t  fillMode;
+    uint8_t  msgPaused; // v5.1.29: 1 = device-side pause active, 0 = sending
     char     role[8];
 };
 
