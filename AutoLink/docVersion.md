@@ -4,6 +4,69 @@ All releases, most recent first.
 
 ---
 
+## v5.1.42
+
+**Host-only invariant checks on the ARQ cache. Compiled out on device.**
+
+Pre-v5.1.42 the ARQ cache (the 256-slot array in the AutoLink
+facade keyed on `cobsSeq`) had a single structural invariant —
+"if you call `arqCacheSizeForTest()` the answer matches reality."
+Every bug in v5.1.37 (cache orphaned, peekTxSeq race, retx buffer
+leak, zero margin) and v5.1.39 (cache-miss loop) was a violation
+of a deeper invariant that nothing was checking: **pendingCount_
+must equal the count of `in_use` slots**.
+
+The bugs were silent because the only feedback was "fails after
+3 drops" or "test_X passes but production_X drops." Debugging
+required walking the cache in a debugger or writing a new test
+that happened to probe the right field. The cost of a real
+invariant check on host is 256 byte comparisons — negligible
+compared to the savings in debug time.
+
+v5.1.42 adds `AutoLink::assertCacheInvariants()` (host-only,
+compiled out under `#ifdef AUTOLINK_HOST_TEST`). It runs after
+every cache mutation:
+
+- `arqCache_insert_unlocked`
+- `arqCache_freeBySeq`
+- `arqCache_takeRetxBuffer`
+- `arqCache_clearAll`
+
+The invariants are:
+
+| # | Check | Catches |
+|---|---|---|
+| 1 | `pendingCount_ == count(in_use)` | Bug 1 (v5.1.37) cache orphan; Bug 6 (v5.1.38) cache-miss loop |
+| 2 | `in_use=true ⇒ buf != nullptr` | Bug 3 (v5.1.37) retx buffer leak |
+| 3 | `in_use=true ⇒ chunks_total > 0` | Insert forgot to set |
+| 4 | `chunks_left <= chunks_total` | Bug 2 (v5.1.37) peekTxSeq race |
+| 5 | `in_use=false ⇒ chunks_left==0` | takeRetxBuffer left stale tally (fixed in v5.1.42) |
+| 6 | `0 <= pendingCount_ <= ARQ_CACHE_SLOTS` | Cap violation |
+
+**Toggle-verified:** commenting out `pendingCount_++` in
+`arqCache_insert_unlocked` causes
+`AutoLink::sendMsg gates on cache-full BEFORE link->sendMsg` to
+abort on the very first insert with assertion #1. Test the
+assertion, not the symptom.
+
+**Side fix:** `arqCache_takeRetxBuffer` previously left
+`chunks_left` nonzero when setting `in_use=false`, violating
+invariant #5. The old comment claimed this was intentional
+("Setting it to 0 here would mask the 'header was ACKed but a
+payload chunk is still being retried' case") but the slot is
+freed (buf=null, in_use=false) so the chunks_left value is
+dead state — the retx callback tracks remaining payload chunks
+in its own copy, not in `pending_[i].chunks_left`. Zeroed in
+v5.1.42.
+
+**Test count:**
+- 19 host binaries + `run_test_linkdecision` (22 tests) +
+  `AutoLinkFacadeTest.cpp` now runs invariant checks on every
+  cache mutation. 15 binaries pass + 22 decision tests = **37**
+  passing. 4 pre-existing failures unchanged from v5.1.38.
+
+---
+
 ## v5.1.41
 
 **Pure decision logic extracted from I/O. 22 table-driven tests, no hardware, no mocks.**
