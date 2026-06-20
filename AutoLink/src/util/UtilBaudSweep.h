@@ -1,7 +1,6 @@
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
-#include <vector>
 
 // ----------------------------------------------------------------------------
 // UtilBaudSweep — auto-baud reliability scoring.
@@ -12,10 +11,18 @@
 // success rate meets a threshold, instead of the old "any PING wins"
 // behavior that one missed PING could drop the link to a much slower rate.
 //
-// Pure value class: no UART, no locks. Owns its own score vector; the link
+// Pure value class: no UART, no locks. Owns its own score table; the link
 // layer just hands it a count per baud and asks for a recommendation at
 // REQ time. Host-testable on its own (see UtilBaudSweepTest).
+//
+// Fixed-size C array (no <vector>) so the Arduino build works on
+// toolchains without the C++ standard library. Max baud count is
+// MAX_BAUDS; configuring more fails at AutoLinkConfig construction.
 // ----------------------------------------------------------------------------
+#ifndef UTIL_BAUD_SWEEP_MAX_BAUDS
+#define UTIL_BAUD_SWEEP_MAX_BAUDS 16   // generous; default config uses 4
+#endif
+
 namespace autolink {
 
 class UtilBaudSweep {
@@ -31,7 +38,12 @@ public:
                                           // can set it explicitly to a fixed value
     };
 
-    explicit UtilBaudSweep(int numBauds) : scores_(numBauds, 0) {}
+    explicit UtilBaudSweep(int numBauds) : numBauds_(0) {
+        if (numBauds < 0) numBauds = 0;
+        if (numBauds > UTIL_BAUD_SWEEP_MAX_BAUDS) numBauds = UTIL_BAUD_SWEEP_MAX_BAUDS;
+        numBauds_ = numBauds;
+        for (int i = 0; i < UTIL_BAUD_SWEEP_MAX_BAUDS; i++) scores_[i] = 0;
+    }
 
     // Wire a config in. Must be called before any score() / pickBest() calls.
     void configure(const Config& c);
@@ -39,13 +51,13 @@ public:
     // Per-PING tick: record one decode at baud index `idx`. The caller is
     // responsible for tracking the current baud index and which sample of N
     // we're on; this class just counts.
-    void score(int idx) { if (idx >= 0 && idx < (int)scores_.size()) scores_[idx]++; }
+    void score(int idx) { if (idx >= 0 && idx < numBauds_) scores_[idx]++; }
 
     // Mark a PING window as "we're done with this baud" -- resets the
     // running score for that index to 0 so a fresh sweep starts clean. Not
     // needed for the simple "send N PINGs, pick at end" model, but useful
     // if the Pong ever wants to re-evaluate mid-sweep.
-    void resetIndex(int idx) { if (idx >= 0 && idx < (int)scores_.size()) scores_[idx] = 0; }
+    void resetIndex(int idx) { if (idx >= 0 && idx < numBauds_) scores_[idx] = 0; }
 
     // Reset the whole sweep (call on link drop / start of new negotiation).
     void resetAll();
@@ -70,13 +82,14 @@ public:
     // How many decoded PINGs landed at index `idx`. Exposed for logging
     // and tests.
     int scoreAt(int idx) const {
-        return (idx >= 0 && idx < (int)scores_.size()) ? scores_[idx] : 0;
+        return (idx >= 0 && idx < numBauds_) ? scores_[idx] : 0;
     }
-    int numBauds() const { return (int)scores_.size(); }
+    int numBauds() const { return numBauds_; }
 
 private:
-    std::vector<int> scores_;
-    Config           cfg_;
+    int     scores_[UTIL_BAUD_SWEEP_MAX_BAUDS];
+    int     numBauds_;
+    Config  cfg_;
 };
 
 } // namespace autolink
