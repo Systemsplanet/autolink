@@ -15,6 +15,7 @@
 #include <memory>
 #include <string.h>     // memset/memcpy
 #include <stdlib.h>     // malloc/free
+#include <functional>   // v5.1.37: no-op deleter for borrowed ILink*
 
 #ifdef AUTOLINK_HOST_TEST
 // Host stub for EspHal: a minimal ILink implementation so
@@ -82,11 +83,31 @@ public:
 namespace autolink {
 
 // Keep in sync with library.properties.
-#define AUTOLINK_VERSION "5.1.37"
+#define AUTOLINK_VERSION "5.1.38"
 
 class AutoLink : public Stream {
 private:
-    std::unique_ptr<EspHal> hal;
+#ifdef AUTOLINK_HOST_TEST
+    // v5.1.37: the host-only ILink* injection constructor needs
+    // a unique_ptr<ILink, NoOpDeleter> because the ILink is
+    // BORROWED (not owned). Use a custom deleter type alias so
+    // the member declaration works for both the production
+    // (default_delete<ILink>) and host (NoOpDeleter) paths.
+    struct NoOpDeleter {
+        void operator()(ILink*) const noexcept { /* borrowed, no-op */ }
+    };
+    using ILinkPtr = std::unique_ptr<ILink, NoOpDeleter>;
+#else
+    using ILinkPtr = std::unique_ptr<ILink>;
+#endif
+
+    // v5.1.37: holds the ILink. In production this owns an EspHal
+    // (default constructor). The host-only ILink* injection
+    // constructor below uses a no-op deleter because the test's
+    // MockHal is owned by WireSim (heap-allocated) and the
+    // AutoLink's ILink is a borrowed observer, not an owner.
+    // WireSim's unique_ptr<MockHal> does the actual delete.
+    ILinkPtr hal;
     std::unique_ptr<ALink> link;
 #ifdef ARDUINO
     EspBlinkHal blinkHal;
@@ -184,6 +205,10 @@ public:
     // then calls onTimer() to fire the OK tick, then advances the
     // MockHal clock and calls onTimer() again to trigger a retx.
     ALink* linkForTest() { return link.get(); }
+    // v5.1.37: const overload so WireSim can call from const
+    // contexts (e.g. bytesTransferredAtoB is const). getStats is
+    // already const on ALink.
+    const ALink* linkForTest() const { return link.get(); }
     // Thin wrappers around the private cache methods so the host
     // test can exercise them. Public on purpose for testing only;
     // production callers go through send() / sendMsg() / the hook
@@ -215,6 +240,8 @@ public:
     {
 #ifdef ARDUINO
         blinkHal.bind(&blinker);
+#endif
+#ifdef ARDUINO
         memset(seqToPending_, -1, sizeof(seqToPending_));
 
         size_t need = 2 * 16 * (cfg.maxMsg + MSG_HDR);
@@ -222,7 +249,7 @@ public:
         size_t need_tx = 16 * ((cfg.maxMsg + MSG_HDR) * 5 / 4 + 64);
         if (cfg.txBufferSize < need_tx) cfg.txBufferSize = need_tx;
 
-        hal = std::make_unique<EspHal>(u_num, rx_pin, tx_pin, cfg);
+        hal = ILinkPtr(std::make_unique<EspHal>(u_num, rx_pin, tx_pin, cfg).release());
         link = std::make_unique<ALink>(*hal, isMasterNode, cfg);
         // v5 ARQ: register cache hooks with the protocol layer.
         link->setArqHooks(&arqAckHookTrampoline, &arqRetxHookTrampoline, this);
@@ -241,8 +268,13 @@ public:
         if (cfg.txBufferSize < need_tx) cfg.txBufferSize = need_tx;
         // Instantiate the stub HAL+ALink pair so accessors that
         // dereference link (getState, available, getStats, ...) don't
-        // null-deref. (Disclosed v5.1.14.)
-        hal = std::make_unique<EspHal>(u_num, rx_pin, tx_pin, cfg);
+        // null-deref. The stub EspHal is a no-op; the NoOpDeleter
+        // we wrap it in is intentional — the stub is a stack of
+        // virtual no-ops that never needs to be freed. (Disclosed
+        // v5.1.14.) The production ARDUINO path uses the default
+        // deleter because the real EspHal has FreeRTOS resources
+        // that need to be released in ~EspHal().
+        hal = ILinkPtr(std::make_unique<EspHal>(u_num, rx_pin, tx_pin, cfg).release());
         link = std::make_unique<ALink>(*hal, isMasterNode, cfg);
         link->setArqHooks(&arqAckHookTrampoline, &arqRetxHookTrampoline, this);
         link->setLinkResetHook(&linkResetHookTrampoline, this);
@@ -255,6 +287,53 @@ public:
     }
 #else
     ~AutoLink() = default;
+#endif
+
+#ifdef AUTOLINK_HOST_TEST
+    // v5.1.37 (closed-loop test): host-only constructor that takes
+    // an injected ILink*. The AutoLink facade borrows the ILink
+    // (does NOT take ownership) and builds the ALink protocol
+    // layer on top of it, exactly like the production constructor
+    // does with EspHal. This lets the host test put a real ILink
+    // (MockHal) under the facade and drive the closed loop with
+    // two AutoLink instances pipe'd together. Without this, the
+    // only way to get an AutoLink running on host is with the
+    // no-op EspHal stub, which never moves bytes, so the closed
+    // loop can't be exercised.
+    //
+    // The ILink is BORROWED, not owned. WireSim heap-allocates
+    // the MockHals and stores them in unique_ptr<MockHal> so the
+    // MockHal dtors run in the right order (MockHals are destroyed
+    // AFTER the AutoLinks, since AutoLinks are declared later in
+    // WireSim and destruction order is reverse of declaration).
+    // We use a no-op deleter on the AutoLink's unique_ptr<ILink>
+    // so its dtor doesn't double-free.
+    //
+    // Production callers use the (u_num, rx_pin, tx_pin, ...) form.
+    // This constructor is gated to AUTOLINK_HOST_TEST so it can't
+    // be misused on real hardware (the test's MockHal is not a
+    // real ILink).
+    AutoLink(ILink* hal_in, bool isMasterNode, AutoLinkConfig cfg = AutoLinkConfig()) {
+        memset(seqToPending_, -1, sizeof(seqToPending_));
+        // Mirror the ARDUINO-side auto-sizing so getStreamBufferSize
+        // returns the same value on host. (Disclosed v5.1.14.)
+        size_t need = 2 * 16 * (cfg.maxMsg + 6);
+        if (cfg.streamBufferSize < need) cfg.streamBufferSize = need;
+        size_t need_tx = 16 * ((cfg.maxMsg + 6) * 5 / 4 + 64);
+        if (cfg.txBufferSize < need_tx) cfg.txBufferSize = need_tx;
+        // Borrow the ILink* with a no-op deleter; the caller
+        // (WireSim) owns it and will free it via its own
+        // unique_ptr<MockHal>.
+        hal = ILinkPtr(hal_in);
+        link = std::make_unique<ALink>(*hal, isMasterNode, cfg);
+        // v5 ARQ: register cache hooks with the protocol layer.
+        link->setArqHooks(&arqAckHookTrampoline, &arqRetxHookTrampoline, this);
+        // v5.1.37: register the link-reset hook so ALink::reset_unlocked
+        // can also clear the facade's payload cache. Without this, a
+        // link drop orphans the cache and the v5.1.36 cache-full gate
+        // latches.
+        link->setLinkResetHook(&linkResetHookTrampoline, this);
+    }
 #endif
 
     void begin() {
