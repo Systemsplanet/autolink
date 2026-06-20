@@ -27,7 +27,7 @@ static const char DASHBOARD_HTML[] = R"HTML(<!DOCTYPE html>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f2f5;color:#111827;min-height:100vh}
-/* Hide Ping-only controls (fill mode radio, pause/resume) when the
+/* Hide Ping-only controls (fill mode radio, pause/start) when the
    device is a Pong. Pong is receive-only, so these are meaningless
    affordances. The body[data-role="pong"] attribute is set by the
    /stats poll handler once we know the role. Default: show
@@ -95,7 +95,7 @@ main{padding:14px;max-width:540px;margin:0 auto}
     <label><input type="radio" name="mode" value="seq" id="modeSeq"><span>Sequential</span></label>
     <label><input type="radio" name="mode" value="rand" id="modeRand"><span>Random</span></label>
   </div>
-  <button class="btn pause ping-only" id="topPbtn" onclick="toggleMsgPause()">&#9646;&#9646; Pause</button>
+  <button class="btn pause ping-only" id="topPbtn" onclick="toggleMsgPause()">&#9654; Start</button>
   <span class="pill swp" id="pill">SWP</span>
 </header>
 <main>
@@ -187,7 +187,13 @@ main{padding:14px;max-width:540px;margin:0 auto}
 console.log('[autolink] dashboard script loaded, HTML build v)HTML" AUTOLINK_VERSION R"HTML(');
 console.log('[autolink] starting up…');
 
-var logPaused=false,msgPaused=false,logFullOpen=false,lastSeq=0,fails=0,busy=false,currentLvl=null;
+// v5.1.29: msgPaused starts true so the button reads "Start" on
+// load. The device is actually paused at boot (paused_=true in
+// UtilPing) and waits for /pausemsg?p=0 to begin sending. Showing
+// "Start" up front matches the device state and avoids the
+// confusing "Pause button while nothing's happening" UX. The /stats
+// poll reconciles in case anything diverges.
+var logPaused=false,msgPaused=true,logFullOpen=false,lastSeq=0,fails=0,busy=false,currentLvl=null;
 var currentMode=null;
 
 function fallbackCopy(text,b){
@@ -381,7 +387,7 @@ async function toggleMsgPause(){
 function applyMsgPauseLabel(){
   var b=document.getElementById('topPbtn');
   if(b){
-    if(msgPaused){b.innerHTML='\u25b6 Resume';b.className='btn pause on';}
+    if(msgPaused){b.innerHTML='\u25b6 Start';b.className='btn pause on';}
     else{b.innerHTML='\u25ae\u25ae Pause';b.className='btn pause';}
   }
 }
@@ -514,10 +520,11 @@ async function poll(){
         rp.classList.add('empty');
       }
     }
-    // Show Ping-only controls (Sequential/Random radio, Pause/Resume
-    // for messages and log scroll) only on the Ping side. Pong is
-    // receive-only and has no fill mode, so the radio is meaningless;
-    // the Pause/Resume buttons are likewise Ping-side affordances.
+    // Show Ping-only controls (Sequential/Random radio, Pause/Start
+    // for messages) only on the Ping side. Pong is receive-only and
+    // has no fill mode, so the radio is meaningless; the Pause/Start
+    // message button is likewise a Ping-side affordance. Log-scroll
+    // Pause/Resume is shared (visible on both).
     // Element IDs are tagged with the class .ping-only and toggled
     // by the `data-role` attribute on the body.
     if(d.role==='Ping'){
