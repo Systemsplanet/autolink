@@ -1,13 +1,12 @@
-// Pong.ino — AutoLink pong node (v4.0.7).
+// Pong.ino — AutoLink pong node.
 //
 // Echoes every complete message back to Ping. Reconnects after any
 // link disruption automatically — no state machine needed in the
 // sketch.
 //
-// v4.0.7: unified entry point. Both Ping.ino and Pong.ino are byte-
-// identical apart from the PingPong::PING / PingPong::PONG enum
-// value. To switch a board from Pong to Ping, change the enum and
-// re-flash; no other source change needed.
+// To switch a board from Pong to Ping, change PingPong::PONG to
+// PingPong::PING and re-flash. The two .ino files are otherwise
+// identical.
 
 #include <pingpong/PingPong.h>
 using namespace autolink;
