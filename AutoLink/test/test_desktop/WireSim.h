@@ -103,9 +103,15 @@ public:
     // Advance both clocks by `deltaMs`, then run one tick on each
     // side and pipe the resulting bytes across the wire (with
     // frame-drop). Also handles forced drops.
+    // v5.1.40 (injectable clock): use MockHal's deterministic
+    // pumpClock() instead of manual onTimer() calls. pumpClock
+    // advances time AND fires onTimer() only when the deadline
+    // has elapsed — making idle-timeout, ACK-timeout, and
+    // sweep-stall tests sub-ms deterministic without real wall-
+    // clock waits. Loop until no timer is due (a fired timer
+    // may re-arm, e.g. OK->SWP transition restarts the sweep
+    // timer).
     void step(uint32_t deltaMs) {
-        mA_->now += deltaMs;
-        mB_->now += deltaMs;
         // Snapshot protocol drops BEFORE the step so we can detect
         // drops the protocol layer triggers internally (err_unlocked
         // path, cache-miss path, etc.). The protocol's dropLink()
@@ -128,10 +134,24 @@ public:
                 dropPending_ = false;
             }
         }
-        // OnTimer drives the protocol state machine and any
-        // timer-pending retransmits.
-        a_.linkForTest()->onTimer();
-        b_.linkForTest()->onTimer();
+        // v5.1.40: pumpClock advances BOTH clocks by deltaMs AND
+        // fires onTimer() deterministically when the protocol's
+        // scheduled deadline has elapsed. Replaces the v5.1.38
+        // manual onTimer() calls (which fired every step regardless
+        // of timing — so ACK_RTO_MS, idle-timeout, and sweep-stall
+        // behavior was untestable as written). Bound the inner
+        // loop to avoid pathological re-arm chains.
+        int fireCountA = 0, fireCountB = 0;
+        mA_->now += deltaMs;
+        mB_->now += deltaMs;
+        while ((mA_->nextTimerAtMs != UINT32_MAX && mA_->now >= mA_->nextTimerAtMs) && fireCountA++ < 32) {
+            mA_->timerFiredCalls++;
+            a_.linkForTest()->onTimer();
+        }
+        while ((mB_->nextTimerAtMs != UINT32_MAX && mB_->now >= mB_->nextTimerAtMs) && fireCountB++ < 32) {
+            mB_->timerFiredCalls++;
+            b_.linkForTest()->onTimer();
+        }
         // Pipe bytes across the wire. pipe_data() applies frame drop
         // per side.
         pipe_data(*mA_, *mB_);
@@ -171,6 +191,12 @@ public:
     int pendingCountB()  const { return b_.arqCacheSizeForTest(); }
     State getStateA()    const { return a_.getState(); }
     State getStateB()    const { return b_.getState(); }
+    // v5.1.40: test accessors for the underlying AutoLink and
+    // MockHal instances. The MockHal pointers are needed for
+    // pumpClock (deterministic clock pump). The AutoLink refs
+    // are needed for setLinkPaused, getStats, dropLink etc.
+    AutoLink& nodeAForTest() { return a_; }
+    AutoLink& nodeBForTest() { return b_; }
     // Test accessors (read-only, host-only). The test wants to
     // inspect the raw txBuf size to diagnose "bytes stuck"
     // failures. Kept simple — return by const ref, no copies.
@@ -234,12 +260,13 @@ private:
 class TwoNodeFixture {
 public:
     explicit TwoNodeFixture(WireSim& sim) : sim_(sim) {
-        // WINDOW=32, MAX_TX_PER_LOOP=16 — matches UtilPing's defaults.
-        // (UtilPing uses these constants; the closed loop has to
-        // match or the throughput profile diverges.)
         pendingA_.assign(32, Slot{false, 0, 0, 0});
         pendingB_.assign(32, Slot{false, 0, 0, 0});
     }
+    // v5.1.40: expose the AutoLink instances so clock-injection
+    // tests can call setLinkPaused, getStats, etc.
+    AutoLink& nodeA() { return sim_.nodeAForTest(); }
+    AutoLink& nodeB() { return sim_.nodeBForTest(); }
 
     // Kick off the protocol. Must be called before step(). The
     // first few steps will negotiate SWP -> LCK -> OK.
