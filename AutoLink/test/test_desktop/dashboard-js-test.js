@@ -670,6 +670,123 @@ async function test_pause_logs_state_change() {
     console.log('  PASS');
 }
 
+// v5.1.29: toggleMsgPause must POST /pausemsg to the device, not just
+// flip a JS variable. The previous version was a JS-only toggle that
+// affected log polling but didn't reach the firmware; Ping kept
+// blasting bytes regardless of the button. This test mocks fetch,
+// clicks the button, and asserts the captured fetch args include the
+// /pausemsg endpoint with the right query param.
+async function test_pause_toggle_posts_to_pausemsg_endpoint() {
+    console.log('\n=== Test: pause toggle POSTs /pausemsg (v5.1.29 device-side pause) ===');
+    const dom = await setup();
+    const calls = [];
+    __mockFetch = (url, opts) => {
+        calls.push({ url: url, opts: opts });
+        if (url.startsWith('/stats')) {
+            return Promise.resolve(jsonResp({ state: 'OK', errCount: 0, errTotal: 0,
+                lostMsgs: 0, txBps: 0, rxBps: 0, txTotal: 0, rxTotal: 0,
+                rssi: -65, freeHeap: 200000, uptimeS: 0, baudRate: 115200,
+                lvl: 3, mode: 0, role: 'Ping', version: '5.1.29' }));
+        }
+        if (url.startsWith('/pausemsg')) {
+            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}), text: () => Promise.resolve('ok') });
+        }
+        return Promise.resolve(jsonResp({ head: 0, lines: [] }));
+    };
+    // Click — toggleMsgPause is async; await it so the POST lands
+    // before we inspect calls.
+    await dom.window.toggleMsgPause();
+    // Settle microtasks (the await chain inside tfetch).
+    await new Promise(r => setTimeout(r, 20));
+    const pauseCalls = calls.filter(c => c.url.startsWith('/pausemsg'));
+    eq(pauseCalls.length, 1,
+        'toggleMsgPause should issue exactly one /pausemsg POST, got ' + pauseCalls.length);
+    eq(pauseCalls[0].url, '/pausemsg?p=1',
+        'first click should send p=1 (paused), got ' + pauseCalls[0].url);
+    eq(pauseCalls[0].opts && pauseCalls[0].opts.method, 'POST',
+        'should be POST, got ' + JSON.stringify(pauseCalls[0].opts));
+
+    // Click again — should flip back to p=0 (resumed).
+    calls.length = 0;
+    await dom.window.toggleMsgPause();
+    await new Promise(r => setTimeout(r, 20));
+    const resumeCalls = calls.filter(c => c.url.startsWith('/pausemsg'));
+    eq(resumeCalls.length, 1,
+        'second toggle should issue another /pausemsg POST, got ' + resumeCalls.length);
+    eq(resumeCalls[0].url, '/pausemsg?p=0',
+        'second click should send p=0 (resumed), got ' + resumeCalls[0].url);
+
+    console.log('  PASS');
+}
+
+// v5.1.29: when the device returns 404 (no /pausemsg hook — Pong
+// side, or older firmware), the optimistic local UI flip should be
+// reverted so the button label doesn't lie. The captured console
+// log should mention the 404.
+async function test_pause_toggle_reverts_on_404() {
+    console.log('\n=== Test: pause toggle reverts on 404 (no device hook) ===');
+    const dom = await setup();
+    __mockFetch = (url) => {
+        if (url.startsWith('/stats')) {
+            return Promise.resolve(jsonResp({ state: 'OK', errCount: 0, errTotal: 0,
+                lostMsgs: 0, txBps: 0, rxBps: 0, txTotal: 0, rxTotal: 0,
+                rssi: -65, freeHeap: 200000, uptimeS: 0, baudRate: 115200,
+                lvl: 3, mode: 0, role: 'Ping', version: '5.1.29' }));
+        }
+        if (url.startsWith('/pausemsg')) {
+            return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({}), text: () => Promise.resolve('no msg pause (Pong?)') });
+        }
+        return Promise.resolve(jsonResp({ head: 0, lines: [] }));
+    };
+    const initial = dom.window.msgPaused;
+    const captured = [];
+    const origLog = dom.window.console.log;
+    dom.window.console.log = function(...args) { captured.push(args.join(' ')); };
+    try {
+        await dom.window.toggleMsgPause();
+        await new Promise(r => setTimeout(r, 20));
+    } finally {
+        dom.window.console.log = origLog;
+    }
+    eq(dom.window.msgPaused, initial,
+        'msgPaused should revert to initial on 404 (was ' + dom.window.msgPaused + ', initial ' + initial + ')');
+    const logStr = captured.join('\n');
+    truthy(logStr.includes('404') || logStr.includes('not support'),
+        'should log a warning about the 404, got: ' + logStr);
+    console.log('  PASS');
+}
+
+// v5.1.29: /stats.msgPaused is reconciled into the UI on every poll.
+// This catches refresh-after-pause, race on boot, and tab-switch.
+async function test_pause_label_reconciles_with_stats_msgpaused() {
+    console.log('\n=== Test: /stats.msgPaused reconciles the button label ===');
+    const dom = await setup();
+    // First poll: device says not paused.
+    __mockFetch = (url) => {
+        if (url.startsWith('/stats')) {
+            return Promise.resolve(jsonResp({ state: 'OK', errCount: 0, errTotal: 0,
+                lostMsgs: 0, txBps: 0, rxBps: 0, txTotal: 0, rxTotal: 0,
+                rssi: -65, freeHeap: 200000, uptimeS: 0, baudRate: 115200,
+                lvl: 3, mode: 0, msgPaused: 0, role: 'Ping', version: '5.1.29' }));
+        }
+        return Promise.resolve(jsonResp({ head: 0, lines: [] }));
+    };
+    // Pre-set the local state to 'paused' to simulate the user
+    // clicking Resume once (so local JS says paused but device says
+    // not paused — a clear mismatch).
+    dom.window.msgPaused = true;
+    dom.window.applyMsgPauseLabel();
+    const topPbtn = dom.window.document.getElementById('topPbtn');
+    const beforeLabel = topPbtn.innerHTML;
+    truthy(beforeLabel.indexOf('Resume') !== -1,
+        'before poll, button should say Resume (msgPaused=true local), got: ' + beforeLabel);
+    await dom.window.poll();
+    const afterLabel = topPbtn.innerHTML;
+    truthy(afterLabel.indexOf('Pause') !== -1,
+        'after poll reconciled to msgPaused=0, button should say Pause, got: ' + afterLabel);
+    console.log('  PASS');
+}
+
 async function test_level_change_logs_request_and_result() {
     console.log('\n=== Test: log-level change logs both the request and the result ===');
     const dom = await setup();
@@ -863,6 +980,9 @@ async function test_log_overlay_open_close_logged() {
         await test_fetch_timeout_default();
         await test_startup_logs_version_and_role();
         await test_pause_logs_state_change();
+        await test_pause_toggle_posts_to_pausemsg_endpoint();
+        await test_pause_toggle_reverts_on_404();
+        await test_pause_label_reconciles_with_stats_msgpaused();
         await test_level_change_logs_request_and_result();
         await test_reboot_logs_progress();
         await test_reset_logs_request_and_result();
