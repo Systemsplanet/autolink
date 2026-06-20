@@ -4,6 +4,55 @@ All releases, most recent first.
 
 ---
 
+## v5.1.32
+
+**Bug fix: WiFi connect runs in a background task — setup() returns immediately so the SWP handshake isn't blocked.**
+
+User feedback (2026-06-19): "it would be nice if WiFi was given up to 10 seconds to start before resuming so the gui can be used to monitor the start process." User's real complaint, after looking at the boot logs: the SWP handshake never completes on a fresh boot. Both Ping and Pong were stuck in SWP for 17+ seconds with zero RX — the link layer was sending PINGs into the void.
+
+**Root cause:** v5.1.29's WiFi retry loop (`mon_.begin()` blocking for up to 12 s per attempt, forever with `WIFI_RETRY_MAX_ATTEMPTS=0`) ran inline in `setup()`. The `delay(250)` calls inside the WiFi poll loop block the Arduino main task. Worse, ESP32 WiFi initialization is interrupt-heavy and drops UART RX bytes during burst activity. So while WiFi was being retried, the link layer's PINGs were lost on the wire, and Pong's reply PINGs were lost on Ping's side. Both devices finished their WiFi retry, then sat in SWP for the rest of the log with zero successful receives.
+
+**Fix:** WiFi now runs in a FreeRTOS background task (`wifiTask_`, priority 1, 4 KB stack). `AutoLinkWeb::begin()` returns in **milliseconds** with just NVS restore + log level setup. The bg task does `WiFi.begin()` and polls status for up to `WIFI_BG_TIMEOUT_MS=10000` (10 s). On success it allocates the log ring + httpd + stats timer (same code as before, factored into `setupHttpAndLogging_()`). On timeout it logs a clear error and gives up; the sketch keeps running, the SWP keeps sweeping, and the operator can read the Serial monitor without losing the link.
+
+**Disclosed:**
+- WiFi now gives up after 10 s. If your AP is unreachable at boot, the dashboard never comes up. Previously (v5.1.29) it would retry forever — that was the root cause of the SWP stall. Boot to retry WiFi.
+- The SSID and password are now heap-copied into the `AutoLinkWeb` instance so the bg task can read them after `begin()`'s stack frame is gone. They are never logged (only the length, as before).
+- The bg task uses `vTaskDelay` (FreeRTOS-friendly) instead of `delay()` (Arduino-busy-wait). Yields to other tasks instead of burning CPU.
+- `setupHttpAndLogging_()` is guarded by `enabled_` so calling begin() twice doesn't double-allocate resources.
+- **Behavior change for the GUI**: isUp() is now false until the bg task succeeds (worst case ~10 s after boot). Dashboard pages will get ERR_CONNECTION_REFUSED during that window — the dashboard's existing 3-strikes-then-reload logic handles this.
+
+**Re: "why did Ping reach LCK once but never again?"** the user's specific question. Ping reached LCK on the very first sweep because Pong's first sweep happened to land on baud[0]=115200 at the right moment (both devices boot fast and their first SWP tick is ~2.5 s after boot). After that, Ping's `setLinkPaused(true)` was active from boot (v5.1.31), AND WiFi retry was blocking setup() with `delay()` calls (v5.1.29). The combined effect: UART RX was being dropped during WiFi bursts. Once WiFi retry finally gave up (~30+ s later), Ping re-swept, but by then Pong had also finished WiFi and was on its 30th+ SWP cycle, and the timing never aligned again. The 10 s WiFi bg-task timeout makes this much less likely (most APs associate in 1–2 s).
+
+**Re: "pong should not have a start/pause button"**: the Pause/Start button already has class `.ping-only` and is hidden by CSS `body[data-role="pong"] .ping-only{display:none}`. Verified by `test_pong_role_hides_ping_only_controls` in the JS test suite. The dashboard JS receives `role` from `/stats` and sets `body[data-role="pong"]` accordingly. If the user is seeing the button on Pong, it's a stale-cached HTML or they bypassed the role pill. The `/pausemsg` endpoint already 404s on Pong because `UtilPong` doesn't register the hook.
+
+**Tests:** all 17 C++ suites + 83 JS dashboard tests + 10 s loopback + 5 s loopback-noise regression all PASS. Arduino `verify_build.ino` compiles clean.
+
+No protocol or wire-format change. v5.1.31 → v5.1.32.
+
+---
+
+## v5.1.31
+
+**Bug fix: link stays up silently while paused. Before, the idle watchdog dropped the link every ~5 s during the inspection window.**
+
+User observation (2026-06-19): after v5.1.30's Pause/Start rename, the Ping log showed the link dropped with `Idle for 6667 ms (limit 5000) -> dropping link` only ~3 seconds after `Ping paused (waiting for /pausemsg?p=0 from dashboard)`. Both sides entered SWP and re-swept, then came back OK. The user wasn't even given a chance to click Start before the link churned.
+
+**Root cause:** `ALink::onTimerOk_unlocked()` checks `now - lastRxMs > idleTimeoutMs` and drops the link. When Ping is paused, the only TX is the protocol's own keepalive frames (a cobsSeq-bearing 0-payload frame every `idleTimeoutMs/3` ms). But Ping's keepalive needs to be ACK'd by Pong; Pong hadn't reached OK yet (it was still in SWP from the initial handshake), so Ping's keepalives went unanswered, `lastRxMs` on Ping never advanced, and the watchdog fired.
+
+**Fix:** new `ALink::setLinkPaused(bool)` (facade-forwarded as `AutoLink::setLinkPaused(bool)`). When true, `onTimerOk_unlocked()` short-circuits — no idle drop, no keepalive emission. The link stays up silently for as long as paused. Each side has its own flag, so the user must pause both to fully silence the wire; pausing just one keeps the other side's watchdog active.
+
+`UtilPing::setPaused()` now also calls `comm_.setLinkPaused(p)`, so the Pause/Start button and the boot-paused default both propagate to the protocol. Setup() also propagates `paused_` (default true) to the protocol at boot, so the very first timer tick is silent — not the 2nd.
+
+**Tests:** two new C++ tests in `run_test_alink_watchdog`:
+- `test_setLinkPaused_suppresses_idle_drop_and_keepalive`: paused link survives 9 s of silent ticks (well past 3 s idle limit), emits zero frames; unpaused peer still drops via its own watchdog.
+- `test_setLinkPaused_false_restores_normal`: unpausing after a quiet period lets the watchdog bite on the next tick — proves the flag is mutable and the suppression is real, not a one-way disable.
+
+All 17 C++ suites + 83 JS dashboard tests + 10 s loopback + 5 s loopback-noise regression all PASS. Arduino `verify_build.ino` compiles clean.
+
+No protocol or wire-format change. v5.1.30 → v5.1.31.
+
+---
+
 ## v5.1.30
 
 **UI rename: Ping's message-pause button is now "Pause / Start".**
