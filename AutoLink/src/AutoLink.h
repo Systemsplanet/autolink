@@ -83,7 +83,7 @@ public:
 namespace autolink {
 
 // Keep in sync with library.properties.
-#define AUTOLINK_VERSION "5.1.41"
+#define AUTOLINK_VERSION "5.1.42"
 
 class AutoLink : public Stream {
 private:
@@ -152,6 +152,19 @@ private:
     // v5.1.39: clear all cache entries. Called from
     // ALink::reset_unlocked (via arqCacheClearAllCallback_).
     void   arqCache_clearAll();
+    // v5.1.42: cheap invariant checks. Called after every public
+    // cache mutation (insert, freeBySeq, retx, takeRetxBuffer,
+    // clearAll). Compiled out on device via the empty inline
+    // body in AutoLink.cpp — zero cost on production. On host,
+    // the body has ~256 byte comparisons that abort the test
+    // the moment a bug breaks an invariant. The asserts are the
+    // cross-checks that would have caught the v5.1.37 leaks
+    // (orphaned cache, peek race, retx buffer leak, zero margin)
+    // — invariant holds = debug builds abort on the line that
+    // broke the invariant, instead of "fails silently after 3
+    // drops." Always declared (never under #ifdef) so the call
+    // sites compile in both host and production.
+    void assertCacheInvariants() const;
     // never reclaimed by arqCache_freeBySeq (the new session
     // reuses low seqs first, doesn't sweep back through the old
     // high range), pendingCount_ never returned to 0, and the
