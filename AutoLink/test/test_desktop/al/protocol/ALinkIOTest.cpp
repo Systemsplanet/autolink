@@ -172,9 +172,16 @@ void test_readme_usage() {
  txNode.begin();
  link.begin();
 
- txNode.onTimer(); pipe_data(txHal, rxHal); // SWP: PING@9600, spdI->1
- txNode.onTimer(); pipe_data(txHal, rxHal); // SWP: PING@115200, spdI->2 -> LCK
- txNode.onTimer(); pipe_data(txHal, rxHal); // LCK: REQ_CMD; pong -> OK, replies index
+ // v5.1.40: pumpClock drives each SWP/LCK tick deterministically.
+ txHal.pumpClock(50); // SWP tick 1 -> PING@9600, spdI->1
+ txNode.onTimer();
+ pipe_data(txHal, rxHal);
+ txHal.pumpClock(50); // SWP tick 2 -> PING@115200, spdI->2 -> LCK
+ txNode.onTimer();
+ pipe_data(txHal, rxHal);
+ txHal.pumpClock(50); // LCK tick 1 -> REQ_CMD; pong -> OK
+ txNode.onTimer();
+ pipe_data(txHal, rxHal);
  pipe_data(rxHal, txHal); // ping receives baud index -> OK
 
  assert(txNode.getState() == State::OK);
