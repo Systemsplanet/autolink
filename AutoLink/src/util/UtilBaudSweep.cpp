@@ -11,7 +11,7 @@ void UtilBaudSweep::configure(const Config& c) {
 }
 
 void UtilBaudSweep::resetAll() {
-    for (size_t i = 0; i < scores_.size(); i++) scores_[i] = 0;
+    for (int i = 0; i < numBauds_; i++) scores_[i] = 0;
 }
 
 int UtilBaudSweep::pickBest() const {
@@ -23,7 +23,7 @@ int UtilBaudSweep::pickBest() const {
     // failure), it incorrectly locked at 19200.
     int minHits = (int)(cfg_.minAcceptRate * (float)cfg_.expectedSamples);
     if (minHits < 1) minHits = 1;
-    for (int j = 0; j < (int)scores_.size(); j++) {
+    for (int j = 0; j < numBauds_; j++) {
         if (scores_[j] >= minHits) return j;
     }
     // Nothing met the strict threshold; fall back to the FASTEST baud that
@@ -31,7 +31,7 @@ int UtilBaudSweep::pickBest() const {
     // slow baud with more hits: timing jitter can prevent the fastest baud
     // from reaching the threshold even when it's physically reachable, and
     // locking at a lower baud because of that is always the wrong call.
-    for (int j = 0; j < (int)scores_.size(); j++) {
+    for (int j = 0; j < numBauds_; j++) {
         if (scores_[j] > 0) return j;
     }
     return -1;
