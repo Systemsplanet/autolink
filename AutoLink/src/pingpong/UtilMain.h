@@ -1,20 +1,13 @@
-// UtilMain.h — shared base for UtilPing and UtilPong.
+// UtilMain — shared base for UtilPing and UtilPong. Owns the hardware
+// objects (AutoLink + AutoLinkWeb), the shared scratch buffer, and the
+// periodic stats logger. Only the loop() body differs between Ping
+// and Pong.
 //
-// Owns the hardware objects (AutoLink + AutoLinkWeb), the shared receive/
-// transmit scratch buffer, and the periodic stats logger. Both Ping and Pong
-// inherit from this class; only their loop() bodies differ.
-//
-// ┌──────────── WIRING ─────────────────────────────────────────────────────┐
-// │ Cross-connect the two boards:  Ping TX(GPIO17) ──► Pong RX(GPIO16)     │
-// │                                Ping RX(GPIO16) ◄── Pong TX(GPIO17)     │
-// │                                shared GND                              │
-// │ (TX→TX or RX→RX are the most common wiring mistakes and produce        │
-// │  0 received bytes at every baud. A missing GND does the same.)         │
-// │                                                                         │
-// │ Default pins: rxPin=16, txPin=17 (ESP32 UART2 defaults).               │
-// │ On the FireBeetle ESP32 these are header pins D11 (GPIO16) and          │
-// │ D10 (GPIO17). Any free GPIOs work — pass different pins if needed.     │
-// └─────────────────────────────────────────────────────────────────────────┘
+// Wiring: cross-connect the two boards.
+//   Ping TX(GPIO17) ──► Pong RX(GPIO16)
+//   Ping RX(GPIO16) ◄── Pong TX(GPIO17)
+//   shared GND
+// TX→TX or RX→RX (and missing GND) both produce 0 received bytes.
 #pragma once
 #ifdef ARDUINO
 
@@ -24,15 +17,6 @@
 
 namespace autolink {
 
-// ----------------------------------------------------------------------------
-// UtilMain — base class for UtilPing and UtilPong.
-//
-// Provides:
-//   • AutoLink + AutoLinkWeb construction and setup()
-//   • 1 KB shared scratch buffer (buf_ / BUF_SIZE)
-//   • logStats(tag) — call once per loop() to emit the 5-second throughput line
-//   • wasReady_ flag for transition-on-ready detection
-// ----------------------------------------------------------------------------
 class UtilMain {
 public:
     static constexpr int BUF_SIZE = 1024;
@@ -46,6 +30,7 @@ public:
              const char* password = nullptr,
              uint16_t    webPort  = 8765)
         : debugBaud_(debugBaud)
+        , isPing_(isPing)
         , comm_(uartNum, rxPin, txPin, isPing)
         , mon_(comm_)
         , ssid_(ssid)
@@ -54,40 +39,58 @@ public:
         , log_(Log::getLog())
     {}
 
-    // Non-copyable — AutoLink and AutoLinkWeb own hardware resources.
     UtilMain(const UtilMain&)            = delete;
     UtilMain& operator=(const UtilMain&) = delete;
 
 protected:
-    // Call from the subclass setup(). blinkCount lets Ping and Pong use
-    // distinct blink patterns if desired (Ping uses 1/2, Pong uses 1/2 too,
-    // so the argument is retained for flexibility).
+    // Subclass setup() calls this. Default log level is DEBUG so a
+    // fresh board shows full per-loop / per-frame chatter — the
+    // operator can see exactly what the protocol is doing on first
+    // boot. Switch to INFO from the dashboard's radio if the log is
+    // too noisy. AutoLinkWeb::begin() restores any NVS-saved level
+    // before this runs.
     void setupCommon() {
         esp_log_level_set("*", ESP_LOG_VERBOSE);
         log_.setLevel(Log::DEBUG);
         Serial.begin(debugBaud_);
+        // Boot banner at INFO so a Serial monitor that opened AFTER
+        // reset still sees a clear "I'm alive" line — without this,
+        // the first visible line is whatever the next event is
+        // (UART ready, link up, etc.) and a hung boot shows nothing.
+        log_.info("UtilMain", "boot: role=%s  baud=%lu  WiFi=%s",
+            isPing_ ? "Ping" : "Pong",
+            (unsigned long)debugBaud_,
+            ssid_ ? ssid_ : "disabled");
         log_.debug("UtilMain", "setupCommon: debug baud=%lu  role=%s  WiFi=%s",
             (unsigned long)debugBaud_,
-            ssid_ ? "Ping+Web" : "Ping",   // overridden by subclass tag in practice
+            ssid_ ? (isPing_ ? "Ping+Web" : "Pong+Web")
+                  : (isPing_ ? "Ping"     : "Pong"),
             ssid_ ? ssid_ : "disabled");
         comm_.blinkWait(1, 100, 100, 2000);
         log_.debug("UtilMain", "calling comm_.begin()");
         comm_.begin();
+        log_.info("UtilMain", "link layer up (comm_.begin returned)");
         if (ssid_) {
-            log_.debug("UtilMain", "starting web monitor (port %u)", (unsigned)webPort_);
-            mon_.begin(ssid_, password_, webPort_);
+            log_.info("UtilMain", "starting web monitor (port %u)", (unsigned)webPort_);
+            // setRole before begin() so the first /stats response
+            // already has the role pill populated.
+            mon_.setRole(isPing_ ? "Ping" : "Pong");
+            uint32_t monStart = millis();
+            bool monOk = mon_.begin(ssid_, password_, webPort_);
+            log_.info("UtilMain", "web monitor begin returned %s in %lu ms",
+                monOk ? "true" : "false", (unsigned long)(millis() - monStart));
         } else {
-            log_.debug("UtilMain", "WiFi disabled — skipping web monitor");
+            log_.info("UtilMain", "WiFi disabled — skipping web monitor");
         }
-        // Log the version here — after mon_.begin() so the sink is registered
-        // and the line appears in the web log panel (after NTP sync line).
+        // Version logged after mon_.begin() so the line appears in
+        // the web log panel (sink is registered inside begin()).
         log_.info("AutoLink", "v" AUTOLINK_VERSION);
         comm_.blinkWait(2, 100, 100, 2000);
         log_.debug("UtilMain", "setupCommon complete");
     }
 
-    // Emit a throughput line at most once every 5 seconds.
-    // tag should be "Ping" or "Pong" — appears as the log source label.
+    // Emit a throughput line at most once every 5 seconds. tag is
+    // "Ping" or "Pong" — appears as the log source label.
     void logStats(const char* tag) {
         uint32_t now = millis();
         if (now - tStat_ < 5000) return;
@@ -106,8 +109,8 @@ protected:
         tStat_  = now;
     }
 
-    // ── hardware objects ──────────────────────────────────────────────────
     uint32_t    debugBaud_;
+    bool        isPing_;        // captured for mon_.setRole()
     AutoLink    comm_;
     AutoLinkWeb mon_;
     const char* ssid_;
@@ -115,14 +118,13 @@ protected:
     uint16_t    webPort_;
     Log&        log_;
 
-    // ── shared state ──────────────────────────────────────────────────────
-    uint8_t  buf_[BUF_SIZE];   // shared RX / TX scratch buffer
+    uint8_t  buf_[BUF_SIZE];
     bool     wasReady_ = false;
 
 private:
-    uint32_t tStat_  = 0;   // millis() at last stat log
-    uint64_t lastTx_ = 0;   // tx byte total at last stat log
-    uint64_t lastRx_ = 0;   // rx byte total at last stat log
+    uint32_t tStat_  = 0;
+    uint64_t lastTx_ = 0;
+    uint64_t lastRx_ = 0;
 };
 
 } // namespace autolink
