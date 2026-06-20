@@ -184,7 +184,39 @@ for context.**
     example; a user `sketch_jun17b.ino` on 2026-06-19 tripped over
     it. The smoke compile takes ~30s and would have caught it.
 
-17. **Always run arduino-cli through `bash build/arduino-cli-cmd.sh`.**
+17a. **Every fix must have a regression test that actually fails
+    when the fix is reverted.** The test pattern is:
+    ```
+    1. Apply the fix.
+    2. Run the test. PASS.
+    3. Revert the fix (comment it out, set the gate to false, etc).
+    4. Run the test. It MUST FAIL.
+    5. Re-apply the fix. Run the test. PASS again.
+    ```
+    If step 4 doesn't fail, the test is useless — it doesn't pin
+    the bug. **A green test suite is not the same as a tested fix.**
+    This rule exists because the v5.1.30-v5.1.35 series shipped
+    three times with tests that "passed" but did not exercise the
+    failure mode they purported to cover. The user burned three
+    days debugging symptoms of bugs whose tests were never
+    toggled.
+
+    Specifically:
+    * **Don't** write a test that just calls a function and
+      discards the return value. That's not a test, that's
+      syntax checking.
+    * **Don't** write a test that reads source text and asserts
+      it contains a substring. That's grep, not a test. (We do
+      use grep-style structural pins for code that can't run on
+      host — see `AutoLinkFacadeTest.cpp` — but those are
+      documented as such and the pin must still fail when the
+      code is commented out.)
+    * **Don't** ship a fix without first verifying the test
+      catches the bug. Toggle fix off, run, confirm FAIL.
+    * **Do** toggle every new fix before declaring done. Budget
+      5 extra minutes per fix for the toggle-verify cycle.
+
+18. **Test files mirror the source package they exercise.** The rule
     Never call bare `arduino-cli` from a recipe, Makefile, shell
     script, or AGENTS.md note. The wrapper (`build/arduino-cli-cmd.sh`)
     does three things bare arduino-cli does not:
@@ -229,6 +261,10 @@ for context.**
         (the public facade). Stays at top because there's no
         `al/autolink/` package for it (same rule as `src/AutoLink.h`
         being at `src/`, not under `al/`).
+      - **`AutoLinkFacadeTest.cpp`** — exercises the AutoLink
+        facade's **observable behavior**, not just its syntax. Tests
+        here MUST fail when their target bug is reverted (rule 17a).
+        Stays at top for the same reason as `AutoLinkTest.cpp`.
       - `MockHalTest.cpp` + `MockHal.h` — shared **test infra**
         used by protocol, util, AND web tests. Moving it under
         any one package would create a back-reference from the
@@ -241,6 +277,25 @@ for context.**
       `test/test_desktop/al/<pkg>/`. If it's `src/X.cpp` (public
       surface), the test stays at top. If it exercises shared infra
       like `MockHal.h`, it stays at top.
+
+19. **The AutoLink facade must have behavioral coverage on host.**
+    The facade (`src/AutoLink.{h,cpp}`) is the user-facing API.
+    On host we can't construct it with a working UART, but we CAN
+    exercise:
+    * The ARQ cache helpers (`test_arqCache_put`, `arqCacheSizeForTest`,
+      `test_arqCache_takeRetxBuffer`).
+    * The reset methods (`resetStats`, `resetErrors`, `resetDiag`).
+    * The link accessor (`linkForTest`) for inspecting underlying
+      state.
+    * Structural pins on the source for code that can't be
+      exercised at runtime (e.g., gates whose runtime test requires
+      UART). See `AutoLinkFacadeTest.cpp` for the established
+      pattern.
+    Every bug in the facade's ARQ / cache / reset / link-pause
+    paths should pin itself to a test in `AutoLinkFacadeTest.cpp`.
+    Don't add such tests to `AutoLinkTest.cpp` — that file is for
+    smoke / construction tests; behavioral regressions belong in
+    the facade test, named after the bug they pin.
 
 ## Gotchas (things that bit me, do not re-discover)
 
