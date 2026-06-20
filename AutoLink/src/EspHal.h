@@ -17,7 +17,6 @@
 #include "freertos/timers.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/semphr.h"
-#include <vector>
 #include <string.h> // memset
 #include <stdlib.h>  // malloc/free
 
@@ -45,13 +44,22 @@ class EspHal : public ILink {
     SemaphoreHandle_t task_exit_sem = nullptr;
     volatile bool running = false;
     bool healthy = false;
-    // One-byte look-ahead cache for peekAppBuf(). mutable so appBufAvailable()
-    // can stay const-honest: the cache is logically an internal detail of
-    // the pop/peek path, and all callers must already hold the protocol
-    // lock before touching the app buffer. Marking it mutable documents
-    // that contract and lets the compiler enforce const correctness at
-    // every other call site.
+    // One-byte look-ahead cache for peekAppBuf(). Mutable so
+    // appBufAvailable() can stay const-honest: the cache is logically
+    // an internal detail of the pop/peek path, and all callers must
+    // already hold the protocol lock. Marking it mutable documents
+    // that contract and lets the compiler enforce const correctness
+    // at every other call site.
     mutable int peek_buf = -1;
+    // Extended peek buffer for peekAt(). read N bytes into peek_buf_,
+    // track valid range in peek_buf_len_, drain via pop/peek.
+    static constexpr int PEEK_BUF_CAP = 16;
+    mutable uint8_t peek_buf_[PEEK_BUF_CAP];
+    mutable int     peek_buf_len_ = 0;
+    mutable int     peek_buf_pos_ = 0;
+    // One-shot guard for the pushAppBuf-when-NULL diagnostic log so
+    // the operator sees one error line per session, not a flood.
+    mutable bool appBufNullLogged_ = false;
     
     uart_config_t uart_config;
 
@@ -117,11 +125,21 @@ class EspHal : public ILink {
     }
 
 public:
-    EspHal(uart_port_t u_num, int rx_pin, int tx_pin, const AutoLinkConfig& config) 
+    EspHal(uart_port_t u_num, int rx_pin, int tx_pin, const AutoLinkConfig& config)
         : uart_num(u_num), rx_pin(rx_pin), tx_pin(tx_pin), cfg(config) {
         mutex = xSemaphoreCreateMutex();
         task_exit_sem = xSemaphoreCreateBinary();
+        // xStreamBufferCreate returns NULL on heap fragmentation. The
+        // symptom is "app buffer full" on the first data frame after
+        // link-up — because pushAppBuf returns 0 when stream_buf is
+        // NULL — which blames the wire instead of the real cause.
         stream_buf = xStreamBufferCreate(cfg.streamBufferSize, 1);
+        if (!stream_buf) {
+            Log::getLog().error(HAL_TAG,
+                "xStreamBufferCreate failed: requested %u bytes, app buffer disabled. "
+                "Increase configSUPPORT_DYNAMIC_ALLOCATION or reduce streamBufferSize.",
+                (unsigned)cfg.streamBufferSize);
+        }
         
         // Zero first so fields added/removed across ESP-IDF versions start known.
         memset(&uart_config, 0, sizeof(uart_config_t));
@@ -191,14 +209,9 @@ public:
         }
         timer_handle = xTimerCreate("alink_tmr", pdMS_TO_TICKS(50), pdFALSE, this, timer_callback);
         if (timer_handle == NULL) {
-            // xTimerCreate failed. The UART event task is already running
-            // and the UART driver is installed, so we have to unwind the
-            // exact same teardown every other failure path runs. The
-            // v4.0.0..v4.0.2 code only flipped `running = false` here,
-            // which leaked both the UART driver and the event task:
-            // every later failure path calls cleanup_resources() (which
-            // deletes mutex / task_exit_sem / stream_buf) and
-            // uart_driver_delete() first.
+            // xTimerCreate failed. UART event task + driver already
+            // running — unwind the exact same teardown every other
+            // failure path runs.
             Log::getLog().error(HAL_TAG, "Failed to create FreeRTOS timer");
             uart_driver_delete(uart_num);
             cleanup_resources();
@@ -227,7 +240,16 @@ public:
         // Flush stale old-baud samples so they don't parse as garbage and
         // trip the err threshold on a clean re-negotiation.
         uart_flush_input(uart_num);
-        uart_set_baudrate(uart_num, spd);
+        esp_err_t e = uart_set_baudrate(uart_num, spd);
+        if (e != ESP_OK) {
+            // Next sweep tick will retry at a different baud; this is
+            // logged so the operator can tell setSpd failures apart
+            // from genuine wiring errors.
+            Log::getLog().error(HAL_TAG,
+                "uart_set_baudrate(%lu) failed (err=0x%X). UART driver may "
+                "not support this baud on the current clock config.",
+                (unsigned long)spd, (unsigned)e);
+        }
     }
     void sendBreak() override { uart_write_bytes_with_break(uart_num, " ", 1, 15); }
     int tx(const uint8_t* b, int n) override { return uart_write_bytes(uart_num, (const char*)b, n); }
@@ -281,7 +303,20 @@ public:
     }
     
     int pushAppBuf(const uint8_t* b, int n) override {
-        if (!stream_buf || n <= 0) return 0;
+        if (n <= 0) return 0;
+        // If xStreamBufferCreate failed at boot, every push silently
+        // returns 0. The caller would log "app buffer full" which
+        // blames the wire — log a one-shot error so the real cause
+        // is visible.
+        if (!stream_buf) {
+            if (!appBufNullLogged_) {
+                Log::getLog().error(HAL_TAG,
+                    "pushAppBuf: stream_buf is NULL (xStreamBufferCreate failed at boot). "
+                    "All RX payloads will be dropped. Check heap / streamBufferSize.");
+                appBufNullLogged_ = true;
+            }
+            return 0;
+        }
         // Returns bytes accepted; a shortfall means the app buffer is full
         // and the caller counts the loss as a link error.
         return (int)xStreamBufferSend(stream_buf, b, n, 0);
@@ -289,10 +324,19 @@ public:
 
     int popAppBuf(uint8_t* b, int max_len) override {
         int total = 0;
-        if (peek_buf != -1 && max_len > 0) {
-            b[0] = peek_buf;
+        // Drain from peek_buf_ (multi-byte) before falling through to
+        // the single-byte peek_buf legacy cache and the stream buffer.
+        while (total < max_len && peek_buf_pos_ < peek_buf_len_) {
+            b[total++] = peek_buf_[peek_buf_pos_++];
+        }
+        if (peek_buf_pos_ >= peek_buf_len_) {
+            peek_buf_len_ = 0;
+            peek_buf_pos_ = 0;
+        }
+        // peek_buf (single-byte legacy) is independent of peek_buf_.
+        if (total < max_len && peek_buf != -1) {
+            b[total++] = (uint8_t)peek_buf;
             peek_buf = -1;
-            total = 1;
         }
         if (total < max_len && stream_buf) {
             size_t recv = xStreamBufferReceive(stream_buf, b + total, max_len - total, 0);
@@ -300,22 +344,61 @@ public:
         }
         return total;
     }
-    
+
     int peekAppBuf() const override {
+        if (peek_buf_pos_ < peek_buf_len_) return peek_buf_[peek_buf_pos_];
         if (peek_buf == -1) {
             uint8_t b;
             if (stream_buf && xStreamBufferReceive(stream_buf, &b, 1, 0) == 1) peek_buf = b;
         }
         return peek_buf;
     }
-    int appBufAvailable() const override { 
-        int n = stream_buf ? xStreamBufferBytesAvailable(stream_buf) : 0; 
+
+    // Peek N bytes from the app buffer at offset. Bytes 0..peek_buf_len_-1
+    // are served from peek_buf_; the rest from the stream buffer via a
+    // 1-byte temporary read+cache loop. Callers MUST hold the ALink lock.
+    int peekAt(uint8_t* out, int n, int offset) const override {
+        if (n <= 0 || offset < 0) return 0;
+        int copied = 0;
+        int pos = offset;
+        // If the offset falls inside peek_buf_, start from there.
+        if (pos < peek_buf_len_) {
+            int fromBuf = std::min(n, peek_buf_len_ - pos);
+            memcpy(out, peek_buf_ + pos, fromBuf);
+            copied += fromBuf;
+            pos = 0;
+        } else {
+            pos -= peek_buf_len_;
+        }
+        // Drain the rest from the stream buffer. Each byte: receive
+        // 1 byte into `tmp`, then write it into out[copied]. The
+        // write to peek_buf_ (below) preserves the byte order.
+        while (copied < n) {
+            uint8_t tmp;
+            if (!stream_buf) break;
+            if (xStreamBufferReceive(stream_buf, &tmp, 1, 0) != 1) break;
+            out[copied++] = tmp;
+            // Cache the byte so subsequent pop/peek starts with it.
+            if (peek_buf_len_ < PEEK_BUF_CAP) {
+                peek_buf_[peek_buf_len_++] = tmp;
+            }
+        }
+        return copied;
+    }
+    int appBufAvailable() const override {
+        int n = stream_buf ? xStreamBufferBytesAvailable(stream_buf) : 0;
         if (peek_buf != -1) n++;
+        // Note: peek_buf_ contents are already counted by the
+        // xStreamBufferBytesAvailable call (the receive above
+        // removed them from the stream buffer). We don't add
+        // peek_buf_len_ separately here to avoid double-counting.
         return n;
     }
     void clearAppBuf() override {
         if(stream_buf) xStreamBufferReset(stream_buf);
         peek_buf = -1;
+        peek_buf_len_ = 0;
+        peek_buf_pos_ = 0;
     }
     // Flush the UART driver ring buffer so bytes already received by the
     // hardware but not yet pumped into the stream buffer are discarded.
