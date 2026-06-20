@@ -14,10 +14,20 @@
 # on the include path so headers resolve by the same names the firmware uses.
 
 CXX      = g++
-CXXFLAGS = -std=c++14 -Wall -Wextra -DAUTOLINK_HOST_TEST -I../../src -I../../src/util
+CXXFLAGS = -std=c++14 -Wall -Wextra -DAUTOLINK_HOST_TEST -I. -I../../src -I../../src/al
 SRC      = ../../src
-UTIL     = ../../src/util
-LINK_SRC = $(SRC)/ALink.cpp $(SRC)/Log.cpp $(UTIL)/UtilCrc.cpp $(UTIL)/UtilCobs.cpp $(UTIL)/UtilFrameRx.cpp $(UTIL)/UtilBaudSweep.cpp
+AL       = ../../src/al
+PROTO    = $(AL)/protocol
+HAL      = $(AL)/hal
+UTIL     = $(AL)/util
+WEB      = $(AL)/web
+PONG     = $(AL)/pingpong
+# Mirror the src/al/ layout in test/test_desktop/al/<sub>/
+TAL      = al
+TPROTO   = $(TAL)/protocol
+TUTIL    = $(TAL)/util
+TWEB     = $(TAL)/web
+LINK_SRC = $(PROTO)/ALink.cpp $(PROTO)/UtilBaudSweep.cpp $(PROTO)/UtilFrameRx.cpp $(UTIL)/Log.cpp $(UTIL)/UtilCrc.cpp $(UTIL)/UtilCobs.cpp
 AUTOLINK_SRC = $(SRC)/AutoLink.cpp $(LINK_SRC)
 
 # Each test binary: <name>Test.cpp + the protocol sources it needs.
@@ -88,32 +98,32 @@ test_alink_watchdog: run_test_alink_watchdog
 test_alink_cobsseq: run_test_alink_cobsseq
 	./run_test_alink_cobsseq
 
-run_test_alink_cobsseq: $(LINK_SRC) ALinkCobsSeqTest.cpp
-	$(CXX) $(CXXFLAGS) $(LINK_SRC) ALinkCobsSeqTest.cpp -o $@
+run_test_alink_cobsseq: $(LINK_SRC) $(TPROTO)/ALinkCobsSeqTest.cpp
+	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/ALinkCobsSeqTest.cpp -o $@
 
-run_test_alink_arq: $(LINK_SRC) ALinkArqTest.cpp
-	$(CXX) $(CXXFLAGS) $(LINK_SRC) ALinkArqTest.cpp -o $@
+run_test_alink_arq: $(LINK_SRC) $(TPROTO)/ALinkArqTest.cpp
+	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/ALinkArqTest.cpp -o $@
 
-run_test_alink_web: $(LINK_SRC) $(SRC)/AutoLinkWebCore.cpp AutoLinkWebTest.cpp
-	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(SRC)/AutoLinkWebCore.cpp AutoLinkWebTest.cpp -o $@
+run_test_alink_web: $(LINK_SRC) $(WEB)/AutoLinkWebCore.cpp $(TWEB)/AutoLinkWebTest.cpp
+	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(WEB)/AutoLinkWebCore.cpp $(TWEB)/AutoLinkWebTest.cpp -o $@
 
-run_test_crc: $(UTIL)/UtilCrc.cpp UtilCrcTest.cpp
-	$(CXX) $(CXXFLAGS) $(UTIL)/UtilCrc.cpp UtilCrcTest.cpp -o $@
+run_test_crc: $(UTIL)/UtilCrc.cpp $(TUTIL)/UtilCrcTest.cpp
+	$(CXX) $(CXXFLAGS) $(UTIL)/UtilCrc.cpp $(TUTIL)/UtilCrcTest.cpp -o $@
 
-run_test_cobs: $(UTIL)/UtilCobs.cpp UtilCobsTest.cpp
-	$(CXX) $(CXXFLAGS) $(UTIL)/UtilCobs.cpp UtilCobsTest.cpp -o $@
+run_test_cobs: $(UTIL)/UtilCobs.cpp $(TUTIL)/UtilCobsTest.cpp
+	$(CXX) $(CXXFLAGS) $(UTIL)/UtilCobs.cpp $(TUTIL)/UtilCobsTest.cpp -o $@
 
-run_test_blink: $(UTIL)/UtilBlink.h UtilBlinkTest.cpp
-	$(CXX) $(CXXFLAGS) UtilBlinkTest.cpp -o $@
+run_test_blink: $(UTIL)/UtilBlink.h $(TUTIL)/UtilBlinkTest.cpp
+	$(CXX) $(CXXFLAGS) $(TUTIL)/UtilBlinkTest.cpp -o $@
 
-run_test_framerx: $(UTIL)/UtilFrameRx.cpp UtilFrameRxTest.cpp
-	$(CXX) $(CXXFLAGS) $(UTIL)/UtilFrameRx.cpp $(UTIL)/UtilCobs.cpp $(UTIL)/UtilCrc.cpp UtilFrameRxTest.cpp -o $@
+run_test_framerx: $(PROTO)/UtilFrameRx.cpp $(TPROTO)/UtilFrameRxTest.cpp
+	$(CXX) $(CXXFLAGS) $(PROTO)/UtilFrameRx.cpp $(UTIL)/UtilCobs.cpp $(UTIL)/UtilCrc.cpp $(TPROTO)/UtilFrameRxTest.cpp -o $@
 
-run_test_baudsweep: $(UTIL)/UtilBaudSweep.cpp UtilBaudSweepTest.cpp
-	$(CXX) $(CXXFLAGS) $(UTIL)/UtilBaudSweep.cpp UtilBaudSweepTest.cpp -o $@
+run_test_baudsweep: $(PROTO)/UtilBaudSweep.cpp $(TPROTO)/UtilBaudSweepTest.cpp
+	$(CXX) $(CXXFLAGS) $(PROTO)/UtilBaudSweep.cpp $(TPROTO)/UtilBaudSweepTest.cpp -o $@
 
-run_test_log: $(SRC)/Log.cpp LogTest.cpp
-	$(CXX) $(CXXFLAGS) $(SRC)/Log.cpp LogTest.cpp -o $@
+run_test_log: $(UTIL)/Log.cpp $(TUTIL)/LogTest.cpp
+	$(CXX) $(CXXFLAGS) $(UTIL)/Log.cpp $(TUTIL)/LogTest.cpp -o $@
 
 run_test_mockhal: $(LINK_SRC) MockHalTest.cpp
 	$(CXX) $(CXXFLAGS) $(LINK_SRC) MockHalTest.cpp -o $@
@@ -121,11 +131,11 @@ run_test_mockhal: $(LINK_SRC) MockHalTest.cpp
 run_test_autolink: $(AUTOLINK_SRC) AutoLinkTest.cpp
 	$(CXX) $(CXXFLAGS) $(AUTOLINK_SRC) AutoLinkTest.cpp -o $@
 
-run_test_alink_io: $(LINK_SRC) ALinkIOTest.cpp
-	$(CXX) $(CXXFLAGS) $(LINK_SRC) ALinkIOTest.cpp -o $@
+run_test_alink_io: $(LINK_SRC) $(TPROTO)/ALinkIOTest.cpp
+	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/ALinkIOTest.cpp -o $@
 
-run_loopback: $(LINK_SRC) loopback_test.cpp
-	$(CXX) $(CXXFLAGS) $(LINK_SRC) loopback_test.cpp -o $@ -pthread
+run_loopback: $(LINK_SRC) $(TPROTO)/loopback_test.cpp
+	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/loopback_test.cpp -o $@ -pthread
 
 loopback: run_loopback
 	./run_loopback 30
@@ -153,17 +163,17 @@ loopback_all: run_loopback
 test_loopback: run_loopback
 	@./run_loopback 10 >/dev/null 2>&1 && echo 'PASS' || echo 'FAIL'
 
-run_test_alink_message: $(LINK_SRC) ALinkMessageTest.cpp
-	$(CXX) $(CXXFLAGS) $(LINK_SRC) ALinkMessageTest.cpp -o $@
+run_test_alink_message: $(LINK_SRC) $(TPROTO)/ALinkMessageTest.cpp
+	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/ALinkMessageTest.cpp -o $@
 
-run_test_alink_negotiation: $(LINK_SRC) ALinkNegotiationTest.cpp
-	$(CXX) $(CXXFLAGS) $(LINK_SRC) ALinkNegotiationTest.cpp -o $@
+run_test_alink_negotiation: $(LINK_SRC) $(TPROTO)/ALinkNegotiationTest.cpp
+	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/ALinkNegotiationTest.cpp -o $@
 
-run_test_alink_error: $(LINK_SRC) ALinkErrorTest.cpp
-	$(CXX) $(CXXFLAGS) $(LINK_SRC) ALinkErrorTest.cpp -o $@
+run_test_alink_error: $(LINK_SRC) $(TPROTO)/ALinkErrorTest.cpp
+	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/ALinkErrorTest.cpp -o $@
 
-run_test_alink_watchdog: $(LINK_SRC) ALinkWatchdogTest.cpp
-	$(CXX) $(CXXFLAGS) $(LINK_SRC) ALinkWatchdogTest.cpp -o $@
+run_test_alink_watchdog: $(LINK_SRC) $(TPROTO)/ALinkWatchdogTest.cpp
+	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/ALinkWatchdogTest.cpp -o $@
 
 # ---- integration: AddressSanitizer + UBSan ----------------------------------
 # Catches the same categories valgrind would catch (out-of-bounds, use-after-
