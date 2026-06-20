@@ -124,6 +124,19 @@ bool AutoLink::arqCache_retx(uint8_t seq) {
             "the link will drop", (unsigned)seq);
         return true;  // drop
     }
+    // v5.1.37 (closed-loop test): capture the original base seq +
+    // chunk count BEFORE takeRetxBuffer clears the slot. We need
+    // these to clean up the protocol's pending state for the
+    // ORIGINAL chunks after the retx succeeds. Without this cleanup,
+    // the protocol's retransmit timer keeps firing for the original
+    // chunk cobsSeqs (which are now stale — the new chunks use
+    // different cobsSeqs), the cache miss fires again, the link
+    // drops within 100ms of every successful retx on a noisy wire.
+    // This is the cache-miss loop the WireSim closed-loop test
+    // surfaces: pre-v5.1.37, every retx on a lossy link was
+    // followed by a forced link drop.
+    uint8_t origBase = pending_[idx].seq;
+    uint8_t origChunks = pending_[idx].chunks_left;
     Log::log().warning("AutoLink",
         "ARQ retransmit cobsSeq=%u (%d bytes, slot=%d)",
         (unsigned)seq, pending_[idx].len, (int)idx);
@@ -148,6 +161,35 @@ bool AutoLink::arqCache_retx(uint8_t seq) {
     int      len = 0;
     arqCache_takeRetxBuffer(seq, &buf, &len);
     retx_resend(buf, len);
+    // v5.1.37 (closed-loop test): clean up the protocol's pending
+    // state for the original chunks. The retx created new chunks
+    // with new cobsSeqs (via sendMsg -> sendCobsFrameAcked_unlocked
+    // inside retx_resend), but the OLD chunks still have
+    // ackedPending_[oldChunkSeq]=true. If we don't clear those, the
+    // retransmit timer keeps firing every 100ms for each old
+    // chunk, the cache misses (the cache entry is under the new
+    // base seq now), the protocol drops the link 100ms after every
+    // successful retx. On a noisy wire this means the link drops
+    // every 100ms — completely broken.
+    //
+    // We call link->onAck for the base seq and each chunk seq of
+    // the original message. onAck clears ackedPending_[s]=false
+    // and calls back into the facade (no-op because the cache
+    // entry was already taken above). The link is left in a clean
+    // state where only the NEW chunks' pending state exists.
+    if (link && origChunks > 0) {
+        // v5.1.37: capture the link pointer from the trampoline
+        // context. The protocol layer doesn't expose a direct
+        // getter; we use linkForTest() which is the same pointer
+        // the protocol layer holds.
+        ALink* lk = linkForTest();
+        if (lk) {
+            for (int i = 0; i < origChunks; i++) {
+                uint8_t chunkSeq = (uint8_t)(origBase + i);
+                lk->onAck(chunkSeq);
+            }
+        }
+    }
     return false;
 }
 
