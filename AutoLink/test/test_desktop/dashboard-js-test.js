@@ -11,7 +11,7 @@
 //   * After 3 fetch failures, the alert element becomes visible
 //   * tfetch aborts at the timeout (we verify via fake timers)
 //   * Log level radio POSTs to /level with the right body
-//   * Pause/Resume toggles the text on the button
+//   * Pause/Start toggles the text on the button
 //   * Boot-time log backlog is NOT rendered (lastSeq = d2.head)
 //
 // What this test does NOT cover:
@@ -362,16 +362,20 @@ async function test_three_failures_show_alert() {
 }
 
 async function test_pause_toggle() {
-    console.log('\n=== Test: Pause/Resume button toggles label ===');
+    console.log('\n=== Test: Pause/Start button toggles label ===');
     const dom = await setup();
-    // The header button starts with "▶ Resume" (paused) and toggles
-    // to "▪▪ Pause" when clicked. Pin the initial state and the
-    // toggled state.
+    // The header button starts with "▶ Start" (paused, ready to
+    // begin sending) and toggles to "▪▪ Pause" when clicked.
+    // Pin the initial state and the toggled state.
     const topPbtn = dom.window.document.getElementById('topPbtn');
     truthy(topPbtn, 'topPbtn should exist');
     const initial = topPbtn.innerHTML;
+    truthy(initial.indexOf('Start') !== -1,
+        'button should start as "Start" (device is paused at boot), got: ' + initial);
     dom.window.toggleMsgPause();
     const toggled = topPbtn.innerHTML;
+    truthy(toggled.indexOf('Pause') !== -1,
+        'first toggle (Start -> Pause) should show "Pause", got: ' + toggled);
     assert(initial !== toggled, 'toggle should change the button text');
     dom.window.toggleMsgPause();
     const back = topPbtn.innerHTML;
@@ -694,27 +698,30 @@ async function test_pause_toggle_posts_to_pausemsg_endpoint() {
         return Promise.resolve(jsonResp({ head: 0, lines: [] }));
     };
     // Click — toggleMsgPause is async; await it so the POST lands
-    // before we inspect calls.
+    // before we inspect calls. msgPaused starts true (button reads
+    // "Start", device is paused). First click flips it to false,
+    // sends p=0 (resume sending), button flips to "Pause".
     await dom.window.toggleMsgPause();
     // Settle microtasks (the await chain inside tfetch).
     await new Promise(r => setTimeout(r, 20));
     const pauseCalls = calls.filter(c => c.url.startsWith('/pausemsg'));
     eq(pauseCalls.length, 1,
         'toggleMsgPause should issue exactly one /pausemsg POST, got ' + pauseCalls.length);
-    eq(pauseCalls[0].url, '/pausemsg?p=1',
-        'first click should send p=1 (paused), got ' + pauseCalls[0].url);
+    eq(pauseCalls[0].url, '/pausemsg?p=0',
+        'first click (Start) should send p=0 (resume sending), got ' + pauseCalls[0].url);
     eq(pauseCalls[0].opts && pauseCalls[0].opts.method, 'POST',
         'should be POST, got ' + JSON.stringify(pauseCalls[0].opts));
 
-    // Click again — should flip back to p=0 (resumed).
+    // Click again — should flip back to p=1 (pause sending), button
+    // flips back to "Start".
     calls.length = 0;
     await dom.window.toggleMsgPause();
     await new Promise(r => setTimeout(r, 20));
     const resumeCalls = calls.filter(c => c.url.startsWith('/pausemsg'));
     eq(resumeCalls.length, 1,
         'second toggle should issue another /pausemsg POST, got ' + resumeCalls.length);
-    eq(resumeCalls[0].url, '/pausemsg?p=0',
-        'second click should send p=0 (resumed), got ' + resumeCalls[0].url);
+    eq(resumeCalls[0].url, '/pausemsg?p=1',
+        'second click (Pause) should send p=1 (pause sending), got ' + resumeCalls[0].url);
 
     console.log('  PASS');
 }
@@ -772,14 +779,14 @@ async function test_pause_label_reconciles_with_stats_msgpaused() {
         return Promise.resolve(jsonResp({ head: 0, lines: [] }));
     };
     // Pre-set the local state to 'paused' to simulate the user
-    // clicking Resume once (so local JS says paused but device says
+    // clicking Start once (so local JS says paused but device says
     // not paused — a clear mismatch).
     dom.window.msgPaused = true;
     dom.window.applyMsgPauseLabel();
     const topPbtn = dom.window.document.getElementById('topPbtn');
     const beforeLabel = topPbtn.innerHTML;
-    truthy(beforeLabel.indexOf('Resume') !== -1,
-        'before poll, button should say Resume (msgPaused=true local), got: ' + beforeLabel);
+    truthy(beforeLabel.indexOf('Start') !== -1,
+        'before poll, button should say Start (msgPaused=true local), got: ' + beforeLabel);
     await dom.window.poll();
     const afterLabel = topPbtn.innerHTML;
     truthy(afterLabel.indexOf('Pause') !== -1,
