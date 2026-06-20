@@ -954,6 +954,81 @@ async function test_reset_logs_request_and_result() {
     console.log('  PASS');
 }
 
+// v5.1.34: the user reported "reset button doesn't reset counters".
+// This test verifies the full end-to-end flow:
+//   1. /stats initially returns non-zero counters.
+//   2. User clicks Reset.
+//   3. /reset POST is issued.
+//   4. Subsequent /stats poll reflects the zeroed counters.
+//   5. The dashboard DOM updates to show "0" for txTotal, rxTotal,
+//      errTotal, lostMsgs, errCount.
+async function test_reset_button_updates_dashboard_counters() {
+    console.log('\n=== Test: Reset button updates dashboard counters (v5.1.34) ===');
+    const dom = await setup();
+    dom.window.deviceRole = 'Ping';
+    // Mock that simulates the device: counters are non-zero until
+    // /reset is called, after which /stats returns zeros.
+    let countersReset = false;
+    __mockFetch = (url, opts) => {
+        if (url.startsWith('/stats')) {
+            var stats = countersReset
+                ? { state: 'OK', errCount: 0, errTotal: 0,
+                    lostMsgs: 0, txBps: 0, rxBps: 0,
+                    txTotal: 0, rxTotal: 0,
+                    rssi: -65, freeHeap: 200000, uptimeS: 0,
+                    baudRate: 115200, lvl: 3, mode: 0,
+                    msgPaused: 1, role: 'Ping', version: '5.1.34' }
+                : { state: 'OK', errCount: 5, errTotal: 3,
+                    lostMsgs: 7, txBps: 1024, rxBps: 2048,
+                    txTotal: 99999, rxTotal: 88888,
+                    rssi: -65, freeHeap: 200000, uptimeS: 0,
+                    baudRate: 115200, lvl: 3, mode: 0,
+                    msgPaused: 1, role: 'Ping', version: '5.1.34' };
+            return Promise.resolve(jsonResp(stats));
+        }
+        if (url === '/reset' || url.startsWith('/reset?')) {
+            countersReset = true;
+            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}), text: () => Promise.resolve('') });
+        }
+        return Promise.resolve(jsonResp({ head: 0, lines: [] }));
+    };
+    // Prime with the non-zero stats so the DOM has values to compare.
+    await dom.window.poll();
+    var txtotBefore = dom.window.document.getElementById('txtot').textContent;
+    var disconBefore = dom.window.document.getElementById('discon').textContent;
+    // Sanity: the dashboard should show the non-zero values we returned.
+    // txTotal=99999 -> displayed as "97.7 KB" or similar humanized form.
+    truthy(txtotBefore.indexOf('total') === 0,
+        'txtot should start with "total" before reset (was: "' + txtotBefore + '")');
+    truthy(txtotBefore !== 'total 0 B' && txtotBefore !== 'total \u2014',
+        'txtot should be non-zero before reset (was: "' + txtotBefore + '")');
+    eq(disconBefore, '3', 'discon should be 3 before reset');
+
+    // Click Reset.
+    await dom.window.resetAll();
+    // Reset completes; mock will return zeros on next /stats.
+    // Run another poll() to refresh the DOM.
+    await dom.window.poll();
+
+    // DOM should now show zeros.
+    var txtotAfter = dom.window.document.getElementById('txtot').textContent;
+    var rxtotAfter = dom.window.document.getElementById('rxtot').textContent;
+    var disconAfter = dom.window.document.getElementById('discon').textContent;
+    var lostAfter = dom.window.document.getElementById('lostmsgs').textContent;
+    var errcntAfter = dom.window.document.getElementById('errcnt').textContent;
+    truthy(txtotAfter.indexOf('0') !== -1 && txtotAfter.indexOf('total') !== -1,
+        'txtot should be "total 0 B" after reset (was: "' + txtotAfter + '")');
+    eq(rxtotAfter, 'total 0 B',
+        'rxtot should be total 0 B after reset (was: "' + rxtotAfter + '")');
+    eq(disconAfter, '0',
+        'discon should be 0 after reset (was: "' + disconAfter + '")');
+    eq(lostAfter, '0 lost msgs',
+        'lostmsgs should be 0 lost msgs after reset (was: "' + lostAfter + '")');
+    eq(errcntAfter, '0 frame errors',
+        'errcnt should be 0 frame errors after reset (was: "' + errcntAfter + '")');
+    console.log('  PASS');
+}
+
 async function test_clear_log_logs_count() {
     console.log('\n=== Test: clearLog logs the number of entries cleared ===');
     const dom = await setup();
@@ -1052,6 +1127,7 @@ async function test_log_overlay_open_close_logged() {
         await test_level_change_logs_request_and_result();
         await test_reboot_logs_progress();
         await test_reset_logs_request_and_result();
+        await test_reset_button_updates_dashboard_counters();
         await test_clear_log_logs_count();
         await test_log_overlay_open_close_logged();
     } catch (e) {
