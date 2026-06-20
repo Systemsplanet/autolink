@@ -29,18 +29,18 @@ The dashboard updates once per second and shows:
 | **State pill** (header) | Green `OK` / amber `LCK` / red `SWP` — animates on transition |
 | **TX Rate** | Bytes/s + cumulative total since power-on |
 | **RX Rate** | Bytes/s + cumulative total since power-on |
-| **Errors (lifetime)** | Cumulative frame-error count + lifetime disconnect count |
+| **Errors** | Big red number = lifetime disconnect count (OK→SWP transitions). Hint lines underneath show `N lost msgs` (wire loss) and `N frame errors` (bad CRC / malformed COBS / overflow). |
 | **WiFi RSSI** | Signal strength in dBm + free heap + current baud |
 | **Live Log** | Scrolling `[E]`/`[I]`/`[D]` log panel, color-coded by severity |
 
 ## Errors vs. Disconnects
 
-These two numbers measure different things:
+The **Errors** card now leads with the big number: the lifetime disconnect count (cumulative `OK → SWP` transitions since the last reset). One bumped wire or one noise burst that trips the error threshold equals one disconnect. Two smaller hint lines underneath break out the related but distinct counters:
 
-- **Errors (lifetime)** is the cumulative count of every frame-level error — bad CRC, malformed COBS, buffer overflow — since the last reset. On a clean link this stays at 0. It is *not* the internal rolling counter (which resets to 0 after every good frame and so almost never appears to move); it is a true running total.
-- **Disconnects** counts how many times the link dropped from `OK` back into a re-sweep (`OK → SWP`). One bumped wire or one noise burst that trips the error threshold equals one disconnect.
+- **`N lost msgs`** — total messages physically lost on the wire. Derived from out-of-order sequence gaps; a single 4-seq burst loss is one disconnect with three lost messages.
+- **`N frame errors`** — cumulative count of every frame-level error (bad CRC, malformed COBS, buffer overflow). On a clean link this stays at 0. It is *not* the internal rolling counter (which resets to 0 after every good frame and so almost never appears to move); it is a true running total.
 
-A link can accumulate errors without disconnecting (occasional noise that stays under the threshold), and the two counters are independent.
+A link can accumulate frame errors and lost messages without disconnecting (occasional noise that stays under the threshold), and the three counters are independent. Disconnects is the most important number — it's the headline — and frame errors is the diagnostic one sitting quietly below.
 
 ## Controls
 
