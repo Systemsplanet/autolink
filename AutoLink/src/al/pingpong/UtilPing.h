@@ -113,6 +113,44 @@ public:
 
         // Cap per-loop sends so the pipeline fills over a few ticks
         // instead of one burst (a single burst overruns Pong's RX).
+        //
+        // v5.1.29: respect device-side pause. When paused_, return
+        // before the send loop so the wire stays quiet. Pong will still
+        // process echoes from anything already in flight, but nothing
+        // new leaves Ping. Recv/echo handling is unaffected — Pong
+        // echoes come back through whatever's in flight when pause was
+        // toggled. The dashboard's Pause/Resume button now POSTs
+        // /pausemsg which flips paused_ via the hook.
+        if (paused_) {
+            // Keep a small liveness log so the operator can see pause
+            // is active (not just silent). One line every 5 s.
+            static uint32_t lastPausedLog_ = 0;
+            if (now - lastPausedLog_ > 5000) {
+                log_.debug("Ping", "paused (waiting for /pausemsg?p=0 from dashboard)");
+                lastPausedLog_ = now;
+            }
+            // Still drain the app buf for any in-flight echoes; just
+            // don't originate new sends.
+            uint8_t echoBuf[BUF_SIZE];
+            int n;
+            while ((n = comm_.recv(echoBuf, sizeof echoBuf)) > 0) {
+                // Track echoed sends; pendingCount_ decrements because
+                // the echo CRC matches one of our slots. This is the
+                // normal pipeline completion path; we just don't refill.
+                for (int i = 0; i < WINDOW; i++) {
+                    if (pending_[i].active && pending_[i].len == n) {
+                        // Cheap len-match; could verify CRC but for a
+                        // random payload, len alone is enough to mark
+                        // it completed. Pong echoes bytes verbatim.
+                        pending_[i].active = false;
+                        if (pendingCount_ > 0) pendingCount_--;
+                        break;
+                    }
+                }
+            }
+            return;
+        }
+
         int sentThisLoop = 0;
         while (pendingCount_ < WINDOW && sentThisLoop < MAX_TX_PER_LOOP) {
             int n = random(1, 1024);
@@ -200,6 +238,7 @@ public:
 
 private:
     FillMode fillMode_ = FillMode::SEQUENTIAL;
+    bool paused_       = true; // v5.1.29: boot paused; dashboard /pausemsg flips this
 
 public:
     // Safe to call from the GUI handler (HTTP task). Takes effect on
@@ -225,9 +264,27 @@ public:
         if (s_active_) s_active_->setFillMode((FillMode)m);
     }
 
+    // v5.1.29: device-side message pause. Ping always boots paused
+    // (paused_=true) and stays paused until the dashboard POSTs
+    // /pausemsg?p=0 (or POSTs ?p=1 to re-pause). The Pause/Resume
+    // button in the dashboard was previously a JS-only toggle that
+    // affected log polling but not Ping's send loop — Ping would
+    // blast bytes from the moment the link settled, regardless of
+    // what the operator did in the UI.
+    void        setPaused(bool p) { paused_ = p; log_.info("Ping", "device-side pause %s", p ? "ON" : "OFF"); }
+    bool        isPaused() const { return paused_; }
+    static bool pausedReaderThunk_() {
+        return s_active_ ? s_active_->isPaused() : false;
+    }
+    static void pausedWriterThunk_(bool p) {
+        if (s_active_) s_active_->setPaused(p);
+    }
+
     void installWebHooks() {
         mon_.setFillModeHook(&UtilPing::fillModeReaderThunk_,
                              &UtilPing::fillModeWriterThunk_);
+        mon_.setMsgPauseHook(&UtilPing::pausedReaderThunk_,
+                             &UtilPing::pausedWriterThunk_);
     }
 
 private:
