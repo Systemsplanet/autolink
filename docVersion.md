@@ -4,33 +4,407 @@ All releases, most recent first.
 
 ---
 
-## v5.1.45
+## v5.1.48
 
-**Wire format break + comprehensive audit response. 4 pre-existing failures root-caused: 2 test bugs deleted/updated, 2 real source bugs fixed by wire format change.**
+**Cache-miss cascade fix + ACK_RTO_MS 100→500 + transient tolerance. Three bugs that all surface as Ping pipeline stalls and runaway BREAKs.**
 
-### WIRE FORMAT BREAK (incompatible with 5.0–5.1.44 peers)
+### The primary disease: cache-miss cleanup crosses message boundaries
 
-`ACK_TYPE` moved from `0x33` to `0xFF`. The sender's `cobsSeq`
-counter now skips `0xFF` (the value is reserved as the ACK
-discriminator). Effective wrap is `LD_SEQ_WRAP=255`, not 256.
-This eliminates a collision: a data frame with `cobsSeq=0x33`
-was previously misidentified as `ACK_TYPE=0x33` and silently
-dropped by `UtilFrameRx::feed`. Both 5.1.45-only peers can
-talk to each other; **mixed v5.0–5.1.44 / v5.1.45+ fleets
-will fail to ACK each other.**
+`AutoLink::arqCache_retx` had two cleanup loops. The success
+path (cache hit, message to retransmit) correctly used
+`chunks_total` to clear `ackedPending_[]` for the original
+chunks. The miss path (cache empty, message already
+retransmitted) ran `for i<8 onAck(seq+i)` — a fixed width-8
+sweep. Most messages have far fewer than 8 chunks. A 2-chunk
+message at base=8 would call `onAck(10..15)` — seqs belonging
+to later, still-in-flight messages (e.g. base=10, base=13).
+Each `onAck` fires `arqAckHookTrampoline` which decrements or
+frees the neighbour's cache slot. The next chunk of those
+neighbour messages then missed its cache on retx → another
+width-8 sweep → cascade. This is what produced the
+"RX ACK ... DROPPED (not in pending map)" bursts and the
+multi-second ACK ages — the cascade wedged the pipeline, which
+produced the "Ping pipeline stall — WINDOW=32 full for 3001 ms"
+and the eventual BREAK.
 
-| Field | 5.0–5.1.44 | 5.1.45 |
+### The fix
+
+`arqCache_retx`'s miss branch now returns false without
+touching neighbour state:
+
+```cpp
+Log::log().warning("AutoLink",
+    "ARQ retransmit cache miss at cobsSeq=%u; not clearing "
+    "neighbour state to avoid v5.1.45 cascade",
+    (unsigned)seq);
+return false;  // do not drop, do not touch neighbours
+```
+
+The protocol's `ackedPending_[s]=true` for the single chunk
+will persist; the retransmit timer will eventually time it out
+again and we'll see another miss, which is the right thing —
+the message was successfully delivered, no further action
+needed.
+
+### Secondary: ACK_RTO_MS 100 → 500
+
+Observed ACK latency under full-duplex load tops out around
+260 ms. Every timeout at 100 ms was spurious — the real ACK
+landed a few ms after the timer fired (e.g. cobsSeq=9/base=8
+times out at 117 ms, then its ACK lands at 14.742). 500 ms
+gives ~2x margin over the worst observed 260 ms while staying
+well under the idle watchdog (5000 ms default) and the
+link-drop timeline. Fixed constant rather than baud-derived:
+simpler, and the cascade fix is what actually matters — the
+multi-second ACK ages were a consequence of the cascade, not
+the short RTO.
+
+### Tertiary: tolerate transient events before dropLink
+
+`UtilPing::resetPending_("stall", dropLink=true)` and
+`resetPending_("recv reject", dropLink=true)` both fired
+immediately on a single event, triggering a 5-baud re-sweep
+(10+ seconds of no data) for what was often a lone hiccup.
+New: `consecTransient_` counter, dropped only when it reaches
+`STALL_TOLERANCE=2` (consecutive stalls) or
+`REJECT_TOLERANCE=3` (consecutive recv rejects). Counter
+resets on healthy TX or healthy recv, and on link-up. A lone
+hiccup clears the pipeline and continues; only sustained
+failure forces the expensive re-sweep.
+
+### Regression guard
+
+`AutoLinkFacadeTest::test_facade_cache_miss_does_not_clear_neighbours`:
+fills the cache with three adjacent messages, takes the
+middle one's slot out (mimicking the successful-retx path),
+swaps the ack hook for a tracer, plants `ackedPending_[s]=true`
+for seqs 16..23 (so `onAck` actually fires), then calls
+`arqCache_retx(16)` to trigger the cache-miss branch. Asserts:
+`ackCalls == 0` (no neighbour cleared) and `cacheAfter == 2`
+(target slot was the only one removed).
+
+**Toggle-verified**: reverting to the v5.1.45 buggy behavior
+makes the test fail with "ackTracer 8 times with bases:
+0 0 0 0 0 0 0 0" — the 8-wide sweep fires, the assertion
+fires. With the v5.1.48 fix: `PASS (cache-miss cleared
+nothing; base=22 neighbour intact)`.
+
+Test hook additions:
+- `AutoLink::test_arqCache_findBySeq(uint8_t)` — public lookup
+- `AutoLink::test_markAckedPending(uint8_t)` — plant the
+  protocol's pending flag (the test plants seqs the miss
+  branch will sweep against, since `sendCobsFrameAcked_unlocked`
+  is the production-only setter)
+- `ALink::test_markAckedPending(uint8_t)` — `ackedPending_[s] = true`
+  (host-only; empty inline on device per the v5.1.42 pattern)
+
+### Disclosed limitations
+
+- Host tests can't drive real UART behavior
+- No ESP32 hardware in this environment — the v5.1.47
+  `AutoLink::begin()` fix and the v5.1.48 cascade/RTO/tolerance
+  fixes are all reasoned about from code review, not verified
+  on a real board. Each is mechanical (delete a for-loop, raise
+  a constant, add a counter) and the rationale is sound, but
+  the user should flash and confirm the cascade no longer
+  fires under full-duplex load.
+- Wire format break (carried from v5.1.45 fix-2)
+- Smoke compile: 1007183 bytes (76%), 45732 bytes global (13%)
+
+---
+
+## v5.1.47
+
+**The UART driver was never installed. Ping spin in SWP→BREAK forever — the whole failure mode, finally root-caused.**
+
+### The bug
+
+`AutoLink::begin()` (`src/AutoLink.h:365`) only called
+`link->begin()`. It never called `hal->begin()`. On host that's
+fine — `MockHal::begin()` is empty, no UART to install. On
+Arduino it's catastrophic: `EspHal::begin()` is the ONLY
+thing that runs `uart_driver_install()`, `uart_set_pin()`,
+`uart_param_config()`, the event-task create, the
+`gpio_set_pull_mode()` on the RX pin, and the timer handle
+setup. With `hal->begin()` skipped, `p_uart_obj[UART2]` stays
+NULL, every `uart_flush_input()` and
+`uart_write_bytes_with_break()` returns a driver error, tx/rx
+move zero bytes, the sweep can't progress, and Ping spins in
+SWP→BREAK forever. Tells: no `UART2 ready: tx=GPIO… rx=GPIO…`
+log line, no `Failed to install UART driver` log line — the
+HAL `begin()` simply never ran.
+
+### The cause
+
+v5.1.40 ("drive begin() on host too") rewrote
+`AutoLink::begin()` to call `link->begin()` directly so
+clock-injection tests would arm the SWP timer. The Arduino
+path used to be `hal->begin(); link->begin();` (where
+`EspHal::begin()` itself calls `link->begin()` at its tail —
+single-entry on Arduino). Collapsing to one line was correct
+for host, wrong for Arduino: `link->begin()` ran, the SWP
+state machine ticked, but the UART underneath it was never
+installed. **Five releases shipped like this** (v5.1.40 →
+v5.1.46). The v5.1.46 boot-loop fix (EspHal ctor → begin)
+was the right shape but didn't reach this because
+`AutoLink::begin()` is the gate; the v5.1.46 fix made
+`EspHal::begin()` safe to call but didn't actually call it.
+
+### The fix
+
+```cpp
+void begin() {
+#ifdef ARDUINO
+    hal->begin();  // installs UART + event task, then link->begin() at its tail
+#else
+    link->begin(); // host: MockHal::begin() is empty, drive protocol directly
+#endif
+}
+```
+
+Arduino path now goes through `hal->begin()`, which runs
+`uart_driver_install()` etc. and itself calls `link->begin()`
+at its tail (`EspHal.h:249`) — single-entry on Arduino. Host
+path stays as-is (`link->begin()` directly) so the SWP timer
+gets armed for clock-injection tests.
+
+### AGENTS.md
+
+Rule 9d added: "When collapsing two `#ifdef ARDUINO / #else`
+branches to a shared body, verify BOTH paths get every
+required call." Includes the audit check: any `#ifdef ARDUINO`
+block that contains a call the `#else` block omits is a
+candidate for the same trap.
+
+### Disclosed limitations
+
+- This fix is verified on host (clock injection tests still
+  pass — the host `#else` branch is unchanged) and via the
+  ESP32 cross-compile. Not verified on a real ESP32 board in
+  this environment. The fix is mechanical (route through
+  `hal->begin()` on Arduino) and the rationale is sound
+  (it's exactly what v5.1.40 was before the begin() rewrite
+  collapsed both paths). The user should flash and confirm
+  the `UART2 ready` log line appears and Ping/Pong lock.
+
+---
+
+## v5.1.46
+
+**Boot-loop fix: EspHal ctor no longer touches FreeRTOS. RTOS primitives (mutex, binary semaphore, stream buffer) moved to `EspHal::begin()`, which fires from `setup()` — after the scheduler is up. Closes the static-init-before-FreeRTOS crash class (same shape as the v5.1.17 `Log&` bug, recurring).**
+
+### The bug
+
+`EspHal::EspHal` (the production HAL inside `AutoLink`) was
+doing three FreeRTOS allocations in its constructor:
+
+```cpp
+mutex         = xSemaphoreCreateMutex();
+task_exit_sem = xSemaphoreCreateBinary();
+stream_buf    = xStreamBufferCreate(cfg.streamBufferSize, 1);
+```
+
+User sketches declare `PingPong upp(...)` at namespace scope.
+Arduino's startup hoists namespace-scope objects into
+`.init_array` and runs their ctors before `app_main` /
+`setup()` — i.e. before the FreeRTOS scheduler is initialized.
+The ctor called `xSemaphoreCreateMutex()` etc. on a kernel that
+wasn't up. The very first timer tick fired into
+`vApplicationGetTimerTaskMemory` with `pxTCBBufferTemp == NULL`
+— abort loop. Identical backtrace on every boot, no log output
+from library code.
+
+### The fix
+
+`EspHal::EspHal` ctor now only stores config + zero-fills the
+`uart_config_t` struct (cheap, no RTOS, no heap). The three
+allocations moved to `EspHal::begin()`, which is called from
+`AutoLink::begin()` → `PingPong::setup()` → Arduino `setup()`,
+i.e. after the scheduler is running. `begin()` is idempotent
+(`if (running) return;`) and per-primitive guards
+(`if (!mutex) mutex = xSemaphoreCreateMutex();`) keep the
+cleanup path safe — primitives can be freed by `~EspHal` and
+the next `begin()` will recreate them.
+
+### Same shape, different code — lesson is the same
+
+The v5.1.17 `Log& log` static-init bug had the identical shape:
+a namespace-scope reference bound to a singleton whose ctor
+touched the heap before RTOS was up. The fix there was a
+Meyers singleton (`static Log inst;` inside `Log::log()`),
+which defers construction to first call. This v5.1.46 fix uses
+the other safe shape (config-in-ctor / alloc-in-begin) because
+the EspHal needs to be a normal owned object inside
+`AutoLink`, not a singleton.
+
+### Audit grep
+
+Two greps would have caught this on the v5.1.45 diff:
+
+```
+grep -rn "^[A-Z][A-Za-z_]* [a-z][A-Za-z_]* *;" src/ \
+    --include='*.cpp' --include='*.h'
+grep -rn "xSemaphore\|xQueue\|xTask\|xTimer\|xStreamBuffer" \
+    src/ --include='*.h' --include='*.cpp'
+```
+
+The first lists namespace-scope globals; the second lists RTOS
+call sites. Cross-reference: any RTOS call inside a ctor whose
+object can be at namespace scope is a static-init hazard. Both
+greps now return clean results — no RTOS calls inside ctors.
+
+### AGENTS.md
+
+Rule 9c added: "Never do RTOS work in a constructor that might
+run before the scheduler is up." Two safe shapes documented
+(Meyers singleton, config-in-ctor / alloc-in-begin). The audit
+grep is appended to rule 10 so a future contributor can run it
+before adding new globals or new ctor work.
+
+### Other changes (carried from v5.1.45)
+
+- Sender-side cobsSeq skip `254 → 0` (`ALink.cpp:sendCobsFrame_unlocked`)
+- Regression guard `ALinkIOTest::test_txSeq_wraps_254_to_0_without_dropping_0xFF`
+  (toggle-verified)
+- `LinkDecision.h` contract comment updated to point at the
+  sender-side skip and the regression-guard test
+- `test_wraparound_then_gap` seed corrected from `255` (which
+  the receiver discards as ACK_TYPE) to `254` (the actual
+  wraparound boundary) — toggle-verified by removing the
+  intermediate `seq=0` frame
+- `docTests.md` suite table: 21 `TEST_BINS` / 199 test functions
+- AGENTS.md 7a (README must match `examples/`), 9b
+  (composition over inheritance), 14a (no version numbers in
+  zip paths)
+- README Ping example: `#include <pingpong/PingPong.h>` →
+  `#include "PingPong.h"`
+
+### Disclosed limitations (carried + new)
+
+- Host tests can't drive real UART behavior
+- No ESP32 hardware in this environment — the v5.1.46 boot-loop
+  fix is reasoned about from the static-init order, not
+  verified on a real board. The fix is mechanical (move
+  allocations out of ctor into begin()) and the rationale is
+  sound, but the user should flash and confirm the boot no
+  longer loops in `vApplicationGetTimerTaskMemory`.
+- WIRE FORMAT BREAK (from v5.1.45 fix-2): ACK_TYPE `0xFF`,
+  cobsSeq counter skips `0xFF`. 5.0–5.1.45 peers cannot
+  communicate with 5.1.46 peers.
+- `MockHal::pumpClock` safety bound at 16 iterations
+- Smoke compile: 1007183 bytes (76%), 45732 bytes global (13%)
+  — unchanged from v5.1.45
+
+---
+
+## v5.1.45 (fix-2)
+
+**Sender-side skip finally landed. Wire format break is now actually enforced on both ends. Regression guard added for the 254→0 wrap.**
+
+### Half-implementation disclosed
+
+v5.1.45 (fix-1) shipped the receiver side of the wire format
+break — `ACK_TYPE` moved to `0xFF`, `classifyGap` honors the
+expected-254→0 wrap, `COBS_SEQ_MAX = 0xFE` was defined as a
+constant. But the sender's `txSeq` counter at
+`ALink.cpp:sendCobsFrame_unlocked` was never updated. It was
+still the plain `txSeq = (uint8_t)(txSeq + 1)` from v5.1.44.
+The collision was relocated from `0x33` to `0xFF`, not
+eliminated: a frame stamped `cobsSeq=0xFF` on the wire would
+still be read by `UtilFrameRx::feed` as `ACK_TYPE=0xFF` and
+silently discarded.
+
+The coverage gap that let this ship: the throughput sweep tops
+out near cumulative seq ~138, the cascade test stops at 143,
+the message sweep caps at 128 chunks. Nothing drove `txSeq` to
+`255` on a clean wire — exactly the boundary the wire format
+break needed to pin.
+
+Also closed: a latent second collision where `NO_BASE = 0xFF`
+(ALink.h:268) shares its value with the cobsSeq space. Today
+every `baseSeq` argument is captured from a stamped chunk, so
+no caller passes `0xFF`; but if a future caller passed
+`baseSeq=0xFF` intending a real base, the existing
+`(baseSeq == NO_BASE) ? seq : baseSeq` ternary would misread it
+as the single-frame sentinel. The skip closes this too — no
+real base can land on `0xFF` anymore.
+
+### The fix
+
+`ALink.cpp:sendCobsFrame_unlocked` now wraps `254 → 0`:
+
+```cpp
+txSeq = (txSeq == COBS_SEQ_MAX) ? 0 : (uint8_t)(txSeq + 1);
+```
+
+`COBS_SEQ_MAX = 0xFE` (formerly dead — no callers) is now
+live. The sender's effective counter range is `0..254` (255
+slots), matching `LD_SEQ_WRAP=255` and the receiver's
+expected-seq math in `LinkDecision.h::classifyGap`.
+
+### Regression guard
+
+`ALinkIOTest::test_txSeq_wraps_254_to_0_without_dropping_0xFF`:
+drives 260 contiguous single-byte writes through a clean,
+lossless pipe and asserts `got == 260`, zero gaps, zero stale.
+**Toggle-verified**: reverting the fix to plain `+1` makes
+`got == 259` (the seq-254 frame is stamped with cobsSeq=255
+on the wire, dropped by the receiver as ACK_TYPE) and the
+assertion fires. Before this test, no suite exercised the
+254→0 boundary, which is exactly where the collision lived.
+
+### Full wire format table
+
+| Field | 5.0–5.1.44 | 5.1.45 (fix-1) | 5.1.45 (fix-2) |
+|---|---|---|---|
+| `ACK_TYPE` | `0x33` | `0xFF` | `0xFF` |
+| Sender `cobsSeq` counter | 0..255 wrap | **0..255 wrap (bug — unchanged)** | 0..254 then 0 (skip 255) |
+| Receiver expected `rxSeq + 1` | unconditional | honors skip at 254 | honors skip at 254 |
+| `LD_SEQ_WRAP` | 256 | 255 | 255 |
+| Mixed fleet compatibility | — | broken (both directions) | broken (both directions) |
+
+### Doc count corrections
+
+- `docTests.md`: 199 test functions is correct (was previously
+  stated as 198). `run_loopback_noise` is the 21st `TEST_BINS`
+  entry (was previously stated as 20 binaries).
+- `docVersion.md` v5.1.45 (fix-1): the line "Both 5.1.45-only
+  peers can talk to each other" was **wrong** for streams that
+  crossed 255 frames between resets. The fix-1 fleet would
+  drop the seq-255 frame, identical to a mixed fleet. Now true
+  on both ends.
+
+---
+
+## v5.1.45 (fix-1)
+
+**Wire format break + comprehensive audit response. 4 pre-existing failures root-caused: 2 test bugs deleted/updated, 2 real source bugs fixed by wire format change. SUPERSEDED by v5.1.45 (fix-2) — the wire format break was only half-implemented; the sender skip was missing.**
+
+### WIRE FORMAT BREAK (intended but incomplete)
+
+`ACK_TYPE` moved from `0x33` to `0xFF`. Effective wrap was
+intended to be `LD_SEQ_WRAP=255`, not 256. This was meant to
+eliminate a collision: a data frame with `cobsSeq=0x33` was
+previously misidentified as `ACK_TYPE=0x33` and silently
+dropped by `UtilFrameRx::feed`. **In practice the wire format
+break only landed on the receiver side**; the sender's
+`txSeq` counter was not updated and continued to wrap
+`0..255`. See v5.1.45 (fix-2) for the proper fix and the
+regression guard that pins it.
+
+| Field | 5.0–5.1.44 | 5.1.45 (fix-1) |
 |---|---|---|
 | `ACK_TYPE` | `0x33` | `0xFF` |
-| `cobsSeq` counter | 0..255 wrap | 0..254 then 0 (skip 255) |
+| `cobsSeq` counter (sender) | 0..255 wrap | **0..255 wrap (UNCHANGED — bug)** |
+| `cobsSeq` expected (receiver) | unconditional | honors skip at 254 |
 | `LD_SEQ_WRAP` | 256 | 255 |
 
 ### 4 audit failures root-caused
 
 | Suite | Symptom | Root cause | Fix |
 |---|---|---|---|
-| `ALinkIOTest::test_throughput_and_sizes` | sz=8000 fails, exactly one 250B frame dropped | `cobsSeq=0x33` misidentified as `ACK_TYPE=0x33` | **Wire format break** |
-| `ALinkCobsSeqTest::test_single_corruption_does_not_cascade` | `gaps==1` fails, was 2 | Same root cause: `cobsSeq=0x33` consumed as ACK, second gap detected | **Wire format break** |
+| `ALinkIOTest::test_throughput_and_sizes` | sz=8000 fails, exactly one 250B frame dropped | `cobsSeq=0x33` misidentified as `ACK_TYPE=0x33` | **Wire format break (intended)** |
+| `ALinkCobsSeqTest::test_single_corruption_does_not_cascade` | `gaps==1` fails, was 2 | Same root cause: `cobsSeq=0x33` consumed as ACK, second gap detected | **Wire format break (intended)** |
 | `ALinkErrorTest::test_app_buffer_overflow_does_not_drop_link` | `d.gaps > 0` fails | Test config invalid: `streamBufferSize=256` with `maxMsg=1024` | **Deleted** (dup of `ALinkCobsSeqTest::test_app_buffer_full_does_not_drop_link`) |
 | `ALinkMessageTest::test_message_roundtrip` | 65535-byte sweep fails | 65535 bytes = 263 chunks, exceeds `ARQ_CACHE_CAP=240` | **Capped sweep at ≤60000 bytes** (240 chunks × 250B); added `test_message_chunk_boundary_carries_then_rejects` |
 
@@ -41,13 +415,13 @@ will fail to ACK each other.**
 - `ALinkMessageTest::test_corrupt_msg_header_*`: removed `errCount == errsBefore + 1` assertion — `findMsgHeaderResync` doesn't bump `errCount` (only `err_unlocked` and CRC rejects do). Primary invariant (m1 + m2 still recoverable) preserved
 - `ClockInjectionTest::test_ack_timeout_retransmits`: uses `idleTimeoutMs=300` so `okTickMs()=100` (RTO rate) instead of default 1666ms. v5.1.45 wire format fix eliminated the 3 link drops that were producing ~64 bytes of BREAK/SWP traffic to mask the test's absence of `sendMsg`
 - `ClockInjectionTest`: merged `test_sender_cobsSeq_wraparound` + `test_cache_survives_cobsSeq_wraparound` → `test_cobsSeq_wraparound_does_not_pollute_cache`
-- `docTests.md`: regenerated suite table from actual TEST_BINS (20 binaries, 199 test functions). Replaces the stale "All 13 test suites PASS" claim
+- `docTests.md`: regenerated suite table from actual TEST_BINS
 - `Makefile`: added `run_test_linkdecision` to `TEST_BINS` (was orphaned)
 - `test_dashboard_js`: gated on jsdom presence (skip with SKIP message if `node`/`jsdom` missing)
 
 ### Test count
 
-20 binaries, 199 test functions (was 13 / 105 in v5.1.36, 20 / 198 in v5.1.44).
+21 `TEST_BINS` entries (incl. `run_loopback_noise`), 199 test functions.
 
 ---
 
