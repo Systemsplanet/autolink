@@ -297,6 +297,36 @@ for context.**
     smoke / construction tests; behavioral regressions belong in
     the facade test, named after the bug they pin.
 
+19a. **The AutoLink facade must have CLOSED-LOOP coverage across
+    link drops on host.** v5.1.35-36 had a class of bugs that the
+    unit tests missed: the facade ARQ cache being orphaned by a
+    link drop, with the cache-full gate weaponizing the leak into
+    a self-deadlock. These bugs only manifest when a real ARQ
+    state machine is running under the facade across a re-sweep.
+    The unit tests in `AutoLinkFacadeTest.cpp` exercise the cache
+    helpers in isolation (bypassing the protocol) and the loopback
+    test in `loopback_test.cpp` exercises the protocol in isolation
+    (bypassing the facade). Neither met in the middle. v5.1.37
+    fixed this by adding `WireSim` — a first-class in-process wire
+    model that connects two full `AutoLink` instances back-to-back
+    with a pipe, frame-drop, forced drops, and a closed-loop
+    `TwoNodeFixture` driving the real send/recv/window logic from
+    `UtilPing`/`UtilPong`. `WireSimClosedLoopTest.cpp` is the
+    canonical test for any future bug in the facade's interaction
+    with the protocol across drops.
+
+    The WireSim is built on a host-only `AutoLink(ILink*,
+    isMasterNode, cfg)` injection constructor (gated to
+    `AUTOLINK_HOST_TEST`). The ILink is BORROWED, not owned
+    (WireSim heap-allocates the MockHals and uses a `NoOpDeleter`
+    on the facade's `unique_ptr<ILink>` to avoid double-free). Any
+    future bug that involves the closed loop (e.g., "link drops
+    when it shouldn't", "cache grows across drops", "bytes stop
+    moving after a noise event") MUST be pinned to a test in
+    `WireSimClosedLoopTest.cpp`. Don't put such tests in
+    `AutoLinkFacadeTest.cpp` — those test the cache in isolation;
+    the closed loop is the missing dimension.
+
 ## Gotchas (things that bit me, do not re-discover)
 
 ### `portYIELD()` location
