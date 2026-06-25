@@ -9,7 +9,11 @@ Read this, then `README.md`, then `docs/Version.md`. History is the source of tr
 - `test/test_embedded/` — reserved, empty (see its README).
 - `test/itest/test_desktop/` — host integration (two-Link loopback).
 - `test/itest/test_embedded/` — Arduino-sketch integration, cross-compiled.
-- `test/common/` — shared (`MockHal.h`, `WireSim.h`, `peak_rss.py`).
+- `test/common/` — shared (`MockHal.h`, `WireSim.h`).
+- `test/scripts/` — all test-side scripts, grouped by role:
+  - `common/` — helpers shared across unit + integration (`peak_rss.py`, `summarize.py`).
+  - `coverage/` — gcov coverage pipeline (`coverage_manifest.py`, `coverage_merge.sh`, `test_coverage_manifest.py`).
+  - `env/` — host test environment setup (`install_system_stubs.py`, `arduino_stub_template.h`).
 - `test/Makefile` — `test`, `itest`, `all`, `clean`.
 - `build/build_env.sh` — installs `arduino-cli` + esp32 toolchain.
 - `build/verify_build.sh` — cross-compile sketch. Run before declaring done. Host tests skip `AutoLinkWeb.cpp`.
@@ -25,7 +29,7 @@ Read this, then `README.md`, then `docs/Version.md`. History is the source of tr
 1. Read `README.md`, this file, `docs/Version.md` first.
 2. Push back once on requests that break the wire format without a major bump, remove an ACK/retransmit path, hide a failure mode, ship something board-specific, or trade a real fix for cosmetic cleanup. Then do what's asked.
 3. Bump `AUTOLINK_VERSION` in `include/AutoLink.h` AND `version=` in `library.properties` in lockstep. The version is the contract.
-4. Verify before done: `cd test && make test`, `make itest`, `./build/verify_build.sh`. For protocol changes (`Link.cpp`), also `make loopback`.
+4. Verify before done: `cd test && make test`, `make itest`, `./build/verify_build.sh`. For protocol changes (`Link.cpp`), also `make loopback`. Allow at least a 60 s timeout for `make itest` — the host integration suite takes seconds of wall time and the sandbox / CI 30 s ceiling truncates the run before completion. The ESP32 cross-compile (`build/verify_build.sh`) is not optional: it must run on every change, not just protocol changes, because host tests skip `AutoLinkWeb.cpp` and any library API surface that only manifests in the Arduino build path. The wrapper `build/arduino-cli-cmd.sh` installs `esp32:esp32` on first use; that install is a one-time multi-minute cost (large toolchain download + board index), so give `verify_build.sh` at least a 10 minute timeout (600 s) on a clean cache and 5 minutes (300 s) once the core is installed. If the sandbox truncates below that, treat the build as unverified, surface it in the delivery summary, and re-run in a longer-lived environment.
 5. Update `docs/Version.md` (newest on top, one-line summary + fix + regression test + limitations). `build/version.py add --version <X.Y.Z> --title "..."` scaffolds; `trim --keep 20` enforces the cap. `check` is the pre-zip gate.
 6. README example code must match `examples/` and `src/`. Diff line-by-line before zipping. A non-compiling snippet is a 100% reproducible install failure.
 7. Never delete `build/`. It hosts `verify_build.sh`, `arduino-cli-cmd.sh`, `pretty_print.py`, `test_pretty_print.py`, and the verify sketch. If missing, restore from git or the last good zip before anything else.
