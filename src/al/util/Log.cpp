@@ -1,6 +1,5 @@
-// Logger sink fan-out. On ESP-IDF defers to ESP_LOG*;
-// on host prints to stdout and forwards to the
-// optional sink (web log).
+// Logger emit: ESP_LOG* on device,
+// stdout on host, optional sink cb.
 #include "al/util/Log.h"
 #include <stdio.h>
 #include <string.h>
@@ -12,8 +11,8 @@
 
 namespace autolink
 {
-void Log::emit(const char *sev, const char *tag,
-               const char *fmt, va_list ap) const
+void Log::emit(const char *sev, const char *tag, const char *fmt,
+               va_list ap) const
 {
     if (lvl == NONE)
         return;
@@ -23,13 +22,10 @@ void Log::emit(const char *sev, const char *tag,
     if (needed > (int)sizeof(msg) - 1) {
         static bool truncWarned_ = false;
         if (!truncWarned_) {
-            fprintf(stderr,
-                    "E [%s] Log::emit: line truncated "
-                    "(needed %d bytes, buffer %u). "
-                    "Shorten the format string or "
-                    "raise the buffer size.\n",
-                    tag, needed,
-                    (unsigned)sizeof(msg));
+            fprintf(
+                stderr,
+                "E [%s] Log::emit: line truncated (needed %d bytes, buffer %u). Shorten the format string or raise the buffer size.\n",
+                tag, needed, (unsigned)sizeof(msg));
             truncWarned_ = true;
         }
     }
