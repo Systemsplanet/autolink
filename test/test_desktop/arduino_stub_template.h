@@ -13,30 +13,14 @@ typedef bool boolean;
 #    define OUTPUT 1
 inline void pinMode(int, int) {}
 inline void digitalWrite(int, int) {}
-inline int digitalRead(int)
-{
-    return 0;
-}
-inline unsigned long millis()
-{
-    return 0;
-}
-inline unsigned long micros()
-{
-    return 0;
-}
+inline int digitalRead(int) { return 0; }
+inline unsigned long millis() { return 0; }
+inline unsigned long micros() { return 0; }
 inline void delay(int) {}
-inline long random(long)
-{
-    return 0;
-}
-inline long random(long, long)
-{
-    return 0;
-}
+inline long random(long) { return 0; }
+inline long random(long, long) { return 0; }
 inline void randomSeed(unsigned long) {}
-class Serial_t
-{
+class Serial_t {
 public:
     void begin(unsigned long) {}
     int available() { return 0; }
@@ -48,8 +32,7 @@ public:
 };
 extern Serial_t Serial;
 
-class Stream
-{
+class Stream {
 public:
     virtual int available() = 0;
     virtual int read() = 0;
@@ -57,8 +40,7 @@ public:
     virtual size_t write(uint8_t) = 0;
     virtual size_t write(const uint8_t *, size_t) = 0;
     virtual void flush() {}
-    int readBytes(char *buf, int len)
-    {
+    int readBytes(char *buf, int len) {
         int n = 0;
         while (n < len && available())
             buf[n++] = (char)read();
@@ -71,10 +53,7 @@ typedef int esp_err_t;
 #    define ESP_FAIL -1
 #    define ESP_ERR_INVALID_ARG 0x102
 #    define ESP_ERR_NO_MEM 0x101
-inline const char *esp_err_to_name(esp_err_t)
-{
-    return "?";
-}
+inline const char *esp_err_to_name(esp_err_t) { return "?"; }
 
 typedef int esp_log_level_t;
 #    define ESP_LOG_VERBOSE 5
@@ -86,10 +65,7 @@ inline void esp_log_level_set(const char *, esp_log_level_t) {}
 
 #    include <sys/time.h>
 #    include <time.h>
-inline int gettimeofday(struct timeval *, void *)
-{
-    return 0;
-}
+inline int gettimeofday(struct timeval *, void *) { return 0; }
 struct tm *localtime_r(const time_t *, struct tm *);
 
 #endif
