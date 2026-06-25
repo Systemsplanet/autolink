@@ -11,8 +11,7 @@
 
 using namespace autolink;
 
-void test_basic_io()
-{
+void test_basic_io() {
     std::cout << "\n=== Test: Basic Write/Read/Peek/Flush/Available ==="
               << std::endl;
     MockHal mHal, sHal;
@@ -39,8 +38,7 @@ void test_basic_io()
     std::cout << "PASS" << std::endl;
 }
 
-void test_reliable_mode()
-{
+void test_reliable_mode() {
     AutoLinkConfig cfg;
     std::cout << "\n=== Test: Reliable Mode (COBS) ===" << std::endl;
     MockHal mHal, sHal;
@@ -64,8 +62,7 @@ void test_reliable_mode()
     std::cout << "PASS" << std::endl;
 }
 
-void test_throughput_and_sizes()
-{
+void test_throughput_and_sizes() {
     std::cout << "\n=== Test: Payloads & Throughput (Reliable Mode) ==="
               << std::endl;
     MockHal mHal, sHal;
@@ -128,8 +125,7 @@ void test_throughput_and_sizes()
     std::cout << "\nPASS" << std::endl;
 }
 
-void test_stats()
-{
+void test_stats() {
     AutoLinkConfig cfg;
     std::cout << "\n=== Test: Throughput Counters ===" << std::endl;
     MockHal mHal, sHal;
@@ -160,8 +156,7 @@ void test_stats()
     std::cout << "PASS" << std::endl;
 }
 
-void test_readme_usage()
-{
+void test_readme_usage() {
     std::cout << "\n=== Test: Real-world README Usage Simulation ==="
               << std::endl;
 
@@ -180,18 +175,19 @@ void test_readme_usage()
     txNode.begin();
     link.begin();
 
-    txHal.pumpClock(50);
-    txNode.onTimer();
-    pipe_data(txHal, rxHal);
-    txHal.pumpClock(50);
-    txNode.onTimer();
-    pipe_data(txHal, rxHal);
-    txHal.pumpClock(50);
-    txNode.onTimer();
-    pipe_data(txHal, rxHal);
-    pipe_data(rxHal, txHal);
-
-    pipe_data(txHal, rxHal);
+    // Pump the master timer + pipe data until both sides converge.
+    // The P1->P2->P3 sweep takes more iterations than the
+    // old lock-on-first-PONG path; let the negotiation play out.
+    for (int i = 0; i < 200; i++) {
+        txHal.pumpClock(50);
+        txNode.onTimer();
+        pipe_data(txHal, rxHal);
+        pipe_data(rxHal, txHal);
+        if (txNode.getState() == State::OK && link.getState() != State::OK)
+            rxHal.setSpd(cfg.allowedBauds[txNode.getCurrentSpdIndex()]);
+        if (txNode.getState() == State::OK && link.getState() == State::OK)
+            break;
+    }
 
     assert(txNode.getState() == State::OK);
     assert(link.getState() == State::OK);
@@ -213,8 +209,7 @@ void test_readme_usage()
     std::cout << "PASS" << std::endl;
 }
 
-void test_io_coverage()
-{
+void test_io_coverage() {
     AutoLinkConfig cfg;
     std::cout << "\n=== Test: Link Public API Coverage ===" << std::endl;
 
@@ -526,8 +521,7 @@ void test_io_coverage()
     std::cout << "PASS (full public-API surface covered)" << std::endl;
 }
 
-void test_txSeq_wraps_254_to_0_without_dropping_0xFF()
-{
+void test_txSeq_wraps_254_to_0_without_dropping_0xFF() {
     std::cout
         << "\n=== Test: cobsSeq wraps 254→0 (no 0xFF collision) (the fix) ==="
         << std::endl;
@@ -587,8 +581,7 @@ void test_txSeq_wraps_254_to_0_without_dropping_0xFF()
         << std::endl;
 }
 
-int main()
-{
+int main() {
     std::cout << "=== Running ALinkIO Tests ===" << std::endl;
     test_basic_io();
     test_reliable_mode();
