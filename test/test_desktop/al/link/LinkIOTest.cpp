@@ -1,7 +1,4 @@
-// Link IO contract: send/recv round-trip, Stream
-// adapter, full handshake.
-
-
+// Link IO: send/recv round-trip, stream.
 #ifndef ARDUINO
 
 #    include <iostream>
@@ -16,14 +13,12 @@ using namespace autolink;
 
 void test_basic_io()
 {
-    std::cout << "\n=== Test: Basic "
-                 "Write/Read/Peek/Flush/Available ==="
+    std::cout << "\n=== Test: Basic Write/Read/Peek/Flush/Available ==="
               << std::endl;
     MockHal mHal, sHal;
     AutoLinkConfig cfg;
     Link ping(mHal, true, cfg);
     Link pong(sHal, false, cfg);
-
 
     uint8_t data[] = { 0x11, 0x22 };
     ping.write(data, 2);
@@ -47,8 +42,7 @@ void test_basic_io()
 void test_reliable_mode()
 {
     AutoLinkConfig cfg;
-    std::cout << "\n=== Test: Reliable Mode (COBS) ==="
-              << std::endl;
+    std::cout << "\n=== Test: Reliable Mode (COBS) ===" << std::endl;
     MockHal mHal, sHal;
     Link ping(mHal, true, cfg);
     Link pong(sHal, false, cfg);
@@ -63,8 +57,7 @@ void test_reliable_mode()
     assert(rb_arr[0] == 0xAA);
     assert(rb_arr[1] == 0xBB);
 
-    uint8_t bad_crc_frame[] = { 0x00, 0x04, 0x01,
-                                0x02, 0xFF, 0x00 };
+    uint8_t bad_crc_frame[] = { 0x00, 0x04, 0x01, 0x02, 0xFF, 0x00 };
     pong.onRx(bad_crc_frame, sizeof(bad_crc_frame));
     assert(pong.getErrCount() > 0);
 
@@ -73,8 +66,7 @@ void test_reliable_mode()
 
 void test_throughput_and_sizes()
 {
-    std::cout << "\n=== Test: Payloads & Throughput "
-                 "(Reliable Mode) ==="
+    std::cout << "\n=== Test: Payloads & Throughput (Reliable Mode) ==="
               << std::endl;
     MockHal mHal, sHal;
     AutoLinkConfig cfg;
@@ -82,15 +74,11 @@ void test_throughput_and_sizes()
     Link ping(mHal, true, cfg);
     Link pong(sHal, false, cfg);
 
-    std::vector<int> sizes = { 0,    1,    2,    4,
-                               8,    16,   32,   64,
-                               128,  512,  1024, 2048,
-                               4096, 8000, 16000 };
+    std::vector<int> sizes = { 0,   1,   2,    4,    8,    16,   32,   64,
+                               128, 512, 1024, 2048, 4096, 8000, 16000 };
 
-    std::cout << std::left << std::setw(15)
-              << "Payload Size" << std::setw(20)
-              << "Time Taken (s)" << std::setw(20)
-              << "Bytes/Sec" << std::endl;
+    std::cout << std::left << std::setw(15) << "Payload Size" << std::setw(20)
+              << "Time Taken (s)" << std::setw(20) << "Bytes/Sec" << std::endl;
     std::cout << std::string(55, '-') << std::endl;
 
     for (int sz : sizes) {
@@ -100,8 +88,7 @@ void test_throughput_and_sizes()
         for (int i = 0; i < sz; i++)
             txData[i] = i & 0xFF;
 
-        auto start =
-            std::chrono::high_resolution_clock::now();
+        auto start = std::chrono::high_resolution_clock::now();
 
         if (sz > 0)
             ping.write(txData.data(), sz);
@@ -111,39 +98,31 @@ void test_throughput_and_sizes()
         int bytesRead = 0;
         if (sz > 0) {
             int chunk;
-            while ((chunk = pong.read(
-                        rxData.data() + bytesRead,
-                        sz - bytesRead)) > 0) {
+            while ((chunk = pong.read(rxData.data() + bytesRead,
+                                      sz - bytesRead)) > 0) {
                 bytesRead += chunk;
             }
         }
 
-        auto end =
-            std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double> diff =
-            end - start;
-        double bps =
-            sz > 0 ? (sz / diff.count()) : 0.0;
+        auto end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> diff = end - start;
+        double bps = sz > 0 ? (sz / diff.count()) : 0.0;
 
         assert(bytesRead == sz);
         if (sz > 0) {
             for (int i = 0; i < sz; i++) {
                 if (rxData[i] != txData[i]) {
-                    std::cerr
-                        << "Data mismatch at index "
-                        << i << " for size " << sz
-                        << std::endl;
+                    std::cerr << "Data mismatch at index " << i << " for size "
+                              << sz << std::endl;
                     assert(false);
                 }
             }
         }
 
-        std::cout << std::left << std::setw(15) << sz
-                  << std::setw(20) << std::fixed
-                  << std::setprecision(6)
-                  << diff.count() << std::setw(20)
-                  << std::fixed << std::setprecision(2)
-                  << bps << std::endl;
+        std::cout << std::left << std::setw(15) << sz << std::setw(20)
+                  << std::fixed << std::setprecision(6) << diff.count()
+                  << std::setw(20) << std::fixed << std::setprecision(2) << bps
+                  << std::endl;
     }
 
     std::cout << "\nPASS" << std::endl;
@@ -152,8 +131,7 @@ void test_throughput_and_sizes()
 void test_stats()
 {
     AutoLinkConfig cfg;
-    std::cout << "\n=== Test: Throughput Counters ==="
-              << std::endl;
+    std::cout << "\n=== Test: Throughput Counters ===" << std::endl;
     MockHal mHal, sHal;
     Link a(mHal, true, cfg);
     Link b(sHal, false, cfg);
@@ -170,7 +148,6 @@ void test_stats()
     a.getStats(as);
     b.getStats(bs);
 
-
     assert(as.tx == 100);
     assert(bs.rx == 100 + MSG_HDR);
     assert(as.discCount == 0);
@@ -185,13 +162,11 @@ void test_stats()
 
 void test_readme_usage()
 {
-    std::cout << "\n=== Test: Real-world README Usage "
-                 "Simulation ==="
+    std::cout << "\n=== Test: Real-world README Usage Simulation ==="
               << std::endl;
 
     AutoLinkConfig cfg;
     cfg.streamBufferSize = 2048;
-
 
     cfg.allowedBauds[0] = 115200;
     cfg.allowedBauds[1] = 9600;
@@ -205,7 +180,6 @@ void test_readme_usage()
     txNode.begin();
     link.begin();
 
-
     txHal.pumpClock(50);
     txNode.onTimer();
     pipe_data(txHal, rxHal);
@@ -216,7 +190,6 @@ void test_readme_usage()
     txNode.onTimer();
     pipe_data(txHal, rxHal);
     pipe_data(rxHal, txHal);
-
 
     pipe_data(txHal, rxHal);
 
@@ -230,10 +203,8 @@ void test_readme_usage()
     int bytes_processed = 0;
     while (link.available()) {
         int b = link.read();
-        std::cout << "Got: " << std::hex
-                  << std::uppercase << std::setw(2)
-                  << std::setfill('0') << b << std::dec
-                  << std::endl;
+        std::cout << "Got: " << std::hex << std::uppercase << std::setw(2)
+                  << std::setfill('0') << b << std::dec << std::endl;
         assert(b == payload[bytes_processed]);
         bytes_processed++;
     }
@@ -245,10 +216,7 @@ void test_readme_usage()
 void test_io_coverage()
 {
     AutoLinkConfig cfg;
-    std::cout
-        << "\n=== Test: Link Public API Coverage ==="
-        << std::endl;
-
+    std::cout << "\n=== Test: Link Public API Coverage ===" << std::endl;
 
     {
         MockHal mHal, sHal;
@@ -259,13 +227,11 @@ void test_io_coverage()
         negotiate_to_ok(a, b, mHal, sHal);
         b.flushRx();
 
-
         assert(b.available() == 0);
 
         assert(b.peek() == -1);
 
         assert(b.read() == -1);
-
 
         uint8_t m1[4] = { 0xDE, 0xAD, 0xBE, 0xEF };
         assert(a.sendMsg(m1, 4));
@@ -283,7 +249,6 @@ void test_io_coverage()
         int got = b.read(rest, sizeof(rest));
         assert(got >= 6 + 4 - 1);
     }
-
 
     {
         MockHal mHal, sHal;
@@ -309,7 +274,6 @@ void test_io_coverage()
         assert(got2 > 0);
     }
 
-
     {
         MockHal mHal, sHal;
         mHal.peer = &sHal;
@@ -320,7 +284,6 @@ void test_io_coverage()
 
         assert(a.write((const uint8_t *)"x", -1) == 0);
         assert(a.write((const uint8_t *)"x", 0) == 0);
-
 
         a.dropLink();
         assert(a.getState() == State::SWP);
@@ -335,19 +298,15 @@ void test_io_coverage()
         Link a(mHal, true, cfg);
         Link b(sHal, false, cfg);
         negotiate_to_ok(a, b, mHal, sHal);
-        assert(a.sendMsg((const uint8_t *)"", 0) ==
-               true);
+        assert(a.sendMsg((const uint8_t *)"", 0) == true);
 
         uint8_t big[64] = {};
         assert(a.sendMsg(big, 64) == false);
 
-
         a.dropLink();
         assert(a.getState() == State::SWP);
-        assert(a.sendMsg((const uint8_t *)"x", 1) ==
-               false);
+        assert(a.sendMsg((const uint8_t *)"x", 1) == false);
     }
-
 
     {
         MockHal mHal, sHal;
@@ -360,10 +319,8 @@ void test_io_coverage()
         int breaksBefore = mHal.sendBreakCalls;
         a.dropLink();
 
-        assert(mHal.sendBreakCalls ==
-               breaksBefore + 1);
+        assert(mHal.sendBreakCalls == breaksBefore + 1);
     }
-
 
     {
         MockHal mHal, sHal;
@@ -389,10 +346,8 @@ void test_io_coverage()
         Link b(sHal, false, cfg);
         negotiate_to_ok(a, b, mHal, sHal);
 
-
         size_t txBefore = mHal.txBuf.size();
-        int wrote =
-            a.write((const uint8_t *)"hello", 5);
+        int wrote = a.write((const uint8_t *)"hello", 5);
         assert(wrote == 5);
         assert(mHal.txBuf.size() > txBefore + 5);
 
@@ -402,7 +357,6 @@ void test_io_coverage()
         assert(got == 5);
         assert(memcmp(rx, "hello", 5) == 0);
     }
-
 
     {
         MockHal mHal, sHal;
@@ -428,7 +382,6 @@ void test_io_coverage()
         assert(d1.lostMsgs == 0);
     }
 
-
     {
         MockHal mHal, sHal;
         mHal.peer = &sHal;
@@ -438,13 +391,11 @@ void test_io_coverage()
         negotiate_to_ok(a, b, mHal, sHal);
         b.flushRx();
 
-
         uint8_t m1[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
         assert(a.sendMsg(m1, 8));
         pipe_data(mHal, sHal);
         uint8_t rx[16];
         b.recvMsg(rx, sizeof(rx));
-
 
         Stats sa;
         a.getStats(sa);
@@ -470,10 +421,8 @@ void test_io_coverage()
         Link a(mHal, true, cfg);
         const AutoLinkConfig &c = a.getConfig();
 
-
         assert(c.streamBufferSize == 2048);
     }
-
 
     {
         MockHal mHal, sHal;
@@ -485,7 +434,6 @@ void test_io_coverage()
         assert(a.getCurrentSpdIndex() >= 0);
     }
 
-
     {
         MockHal mHal, sHal;
         mHal.peer = &sHal;
@@ -495,14 +443,11 @@ void test_io_coverage()
         negotiate_to_ok(a, b, mHal, sHal);
         b.flushRx();
 
-
         mHal.txFailN = 1;
         uint8_t m1[4] = { 1, 2, 3, 4 };
 
-
         assert(a.sendMsg(m1, 4) == true);
     }
-
 
     {
         MockHal mHal, sHal;
@@ -510,11 +455,8 @@ void test_io_coverage()
         sHal.peer = &mHal;
         Link a(mHal, true, cfg);
 
-
-        assert(a.sendMsg((const uint8_t *)"x", -1) ==
-               false);
+        assert(a.sendMsg((const uint8_t *)"x", -1) == false);
     }
-
 
     {
         MockHal mHal, sHal;
@@ -535,17 +477,13 @@ void test_io_coverage()
         Link b(sHal, false, cfg);
         negotiate_to_ok(a, b, mHal, sHal);
 
-
         mHal.txFailN = 2;
         int errsBefore = a.getErrCount();
-        int wrote =
-            a.write((const uint8_t *)"hello", 5);
+        int wrote = a.write((const uint8_t *)"hello", 5);
         assert(wrote == 5);
-
 
         (void)errsBefore;
     }
-
 
     {
         MockHal mHal, sHal;
@@ -557,17 +495,13 @@ void test_io_coverage()
         negotiate_to_ok(a, b, mHal, sHal);
         b.flushRx();
 
-
         std::vector<uint8_t> big(1024, 0xAA);
-
 
         a.dropLink();
 
-        int wrote =
-            a.write(big.data(), (int)big.size());
+        int wrote = a.write(big.data(), (int)big.size());
         assert(wrote == 0);
     }
-
 
     {
         MockHal mHal, sHal;
@@ -575,11 +509,9 @@ void test_io_coverage()
         sHal.peer = &mHal;
         Link a(mHal, true, cfg);
 
-
         uint32_t b = a.getCurrentBaud();
         assert(b > 0);
     }
-
 
     {
         MockHal mHal, sHal;
@@ -588,21 +520,17 @@ void test_io_coverage()
         cfg.maxMsg = 1024;
         Link a(mHal, true, cfg);
 
-
         assert(a.getState() == State::OK);
     }
 
-
-    std::cout
-        << "PASS (full public-API surface covered)"
-        << std::endl;
+    std::cout << "PASS (full public-API surface covered)" << std::endl;
 }
 
 void test_txSeq_wraps_254_to_0_without_dropping_0xFF()
 {
-    std::cout << "\n=== Test: cobsSeq wraps 254→0 (no "
-                 "0xFF collision) (the fix) ==="
-              << std::endl;
+    std::cout
+        << "\n=== Test: cobsSeq wraps 254→0 (no 0xFF collision) (the fix) ==="
+        << std::endl;
     MockHal mHal, sHal;
     mHal.peer = &sHal;
     sHal.peer = &mHal;
@@ -610,13 +538,11 @@ void test_txSeq_wraps_254_to_0_without_dropping_0xFF()
     cfg.streamBufferSize = 32000;
     Link ping(mHal, true, cfg);
     Link pong(sHal, false, cfg);
-    while (ping.getState() != State::OK ||
-           pong.getState() != State::OK) {
+    while (ping.getState() != State::OK || pong.getState() != State::OK) {
         mHal.pumpClock(50);
         sHal.pumpClock(50);
         pipe_data(mHal, sHal);
     }
-
 
     const int N = 260;
     uint8_t payload = 0xAB;
@@ -641,12 +567,10 @@ void test_txSeq_wraps_254_to_0_without_dropping_0xFF()
         pipe_data(mHal, sHal);
     }
 
-
     uint8_t rx[N];
     int got = 0;
     int chunk;
-    while ((chunk = pong.read(rx + got, N - got)) >
-           0) {
+    while ((chunk = pong.read(rx + got, N - got)) > 0) {
         got += chunk;
     }
     assert(got == N);
@@ -654,21 +578,18 @@ void test_txSeq_wraps_254_to_0_without_dropping_0xFF()
         assert(rx[i] == 0xAB);
     }
 
-
     Diag d;
     pong.getDiag(d);
     assert(d.gaps == 0);
     assert(d.stale == 0);
-    std::cout << "PASS (260 frames round-trip across "
-                 "seq 254→0 wrap, "
-                 "zero loss, zero gaps)"
-              << std::endl;
+    std::cout
+        << "PASS (260 frames round-trip across seq 254→0 wrap, zero loss, zero gaps)"
+        << std::endl;
 }
 
 int main()
 {
-    std::cout << "=== Running ALinkIO Tests ==="
-              << std::endl;
+    std::cout << "=== Running ALinkIO Tests ===" << std::endl;
     test_basic_io();
     test_reliable_mode();
     test_throughput_and_sizes();
@@ -676,9 +597,7 @@ int main()
     test_readme_usage();
     test_io_coverage();
     test_txSeq_wraps_254_to_0_without_dropping_0xFF();
-    std::cout << "\n=== ALinkIO Tests Completed "
-                 "Successfully ==="
-              << std::endl;
+    std::cout << "\n=== ALinkIO Tests Completed Successfully ===" << std::endl;
     return 0;
 }
 
