@@ -1,6 +1,5 @@
-// Pong role: RX-driven echo. No local pending state —
-// the wire guarantees in-order delivery, so each recv
-// maps 1:1 to a send.
+// Pong role: RX-driven echo.
+// Holds PingPongBase by composition.
 #pragma once
 #ifdef ARDUINO
 
@@ -8,17 +7,14 @@
 
 namespace autolink
 {
-class Pong : public PingPongBase
+class Pong
 {
 public:
-    Pong(uint32_t debugBaud, uart_port_t uartNum,
-         int rxPin, int txPin,
-         const char *ssid = nullptr,
-         const char *password = nullptr,
+    Pong(uint32_t debugBaud, uart_port_t uartNum, int rxPin, int txPin,
+         const char *ssid = nullptr, const char *password = nullptr,
          uint16_t webPort = 8765)
-        : PingPongBase(debugBaud, uartNum, rxPin,
-                       txPin, false, ssid, password,
-                       webPort)
+        : base_(debugBaud, uartNum, rxPin, txPin, false, ssid, password,
+                webPort)
     {
     }
 
@@ -27,87 +23,80 @@ public:
 
     void setup()
     {
-        log_.debug("Pong",
-                   "setup: calling setupCommon");
-        setupCommon();
-        log_.info("Pong", "mode=Pong  ready");
+        base_.log_.debug("Pong", "setup: calling setupCommon");
+        base_.setupCommon();
+        base_.log_.info("Pong", "mode=Pong  ready");
     }
 
     void loop()
     {
-        if (!comm_.ready()) {
-            if (wasReady_) {
-                log_.info("Pong",
-                          "link lost  echoes_sent=%lu",
-                          (unsigned long)echoCount_);
-                wasReady_ = false;
+        if (!base_.comm_.ready()) {
+            if (base_.wasReady_) {
+                base_.log_.info("Pong", "link lost  echoes_sent=%lu",
+                                (unsigned long)echoCount_);
+                base_.wasReady_ = false;
                 tNotReady_ = millis();
 
-
-                resetStatBaseline();
+                base_.resetStatBaseline();
             } else {
                 uint32_t now = millis();
                 if (now - tNotReady_ >= 1000) {
-                    log_.debug("Pong", "not ready");
+                    base_.log_.debug("Pong", "not ready");
                     tNotReady_ = now;
                 }
             }
-            comm_.blinkWait(3, 100, 100, 0);
+            base_.comm_.blinkWait(3, 100, 100, 0);
             return;
         }
-        if (!wasReady_) {
+        if (!base_.wasReady_) {
             int drained = 0;
             {
-                uint8_t tmp[BUF_SIZE];
+                uint8_t tmp[PingPongBase::BUF_SIZE];
                 int n;
-                while ((n = comm_.recv(
-                            tmp, sizeof tmp)) > 0)
+                while ((n = base_.comm_.recv(tmp, sizeof tmp)) > 0)
                     drained++;
             }
-            log_.debug(
-                "Pong",
-                "drained %d stale bytes pre-blink",
-                drained);
-            comm_.blinkWait(4);
-            wasReady_ = true;
+            base_.log_.debug("Pong", "drained %d stale bytes pre-blink",
+                             drained);
+            base_.comm_.blinkWait(4);
+            base_.wasReady_ = true;
         }
 
         int n;
         int recvThisLoop = 0;
-        while ((n = comm_.recv(buf_, sizeof buf_)) >
-                   0 &&
-               recvThisLoop < MAX_TX_PER_LOOP) {
+        const int maxEcho = (base_.comm_.mode() == AutoLinkConfig::Mode::SYNC)
+            ? 1
+            : MAX_TX_PER_LOOP;
+        while ((n = base_.comm_.recv(base_.buf_, sizeof base_.buf_)) > 0 &&
+               recvThisLoop < maxEcho) {
             recvThisLoop++;
-            if (comm_.send(buf_, n)) {
+            if (base_.comm_.send(base_.buf_, n)) {
                 echoCount_++;
-                log_.debug(
-                    "Pong", "echo #%lu  %d bytes  ok",
-                    (unsigned long)echoCount_, n);
+                base_.log_.debug("Pong", "echo #%lu  %d bytes  ok",
+                                 (unsigned long)echoCount_, n);
             } else {
-                log_.error("Pong",
-                           "echo #%lu  %d bytes  SEND "
-                           "FAILED (link dropped)",
-                           (unsigned long)echoCount_,
-                           n);
+                base_.log_.error(
+                    "Pong", "echo #%lu  %d bytes  SEND FAILED (link dropped)",
+                    (unsigned long)echoCount_, n);
             }
-            comm_.blinkWait(1);
+            base_.comm_.blinkWait(1);
         }
         if (n < 0) {
-            log_.error("Pong",
-                       "recv rejected (CRC/desync)  "
-                       "echoCount=%lu",
-                       (unsigned long)echoCount_);
+            base_.log_.error("Pong",
+                             "recv rejected (CRC/desync)  echoCount=%lu",
+                             (unsigned long)echoCount_);
         }
 
-        logStats("Pong");
+        base_.logStats("Pong", echoCount_, 0);
     }
 
 private:
     uint64_t echoCount_ = 0;
     uint32_t tNotReady_ = 0;
 
-
     static constexpr int MAX_TX_PER_LOOP = 16;
+
+    PingPongBase base_;
 };
 
 } // namespace autolink
