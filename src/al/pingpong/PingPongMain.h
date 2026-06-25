@@ -1,12 +1,12 @@
-// PingPong role-selector wrapper. User-facing API:
-// instantiate at namespace scope, call setup()/loop().
-// Carries both Ping and Pong and dispatches by role at
-// compile-time-free runtime branch.
+// User-facing role selector.
+// std::variant holds only the active role;
+// inactive role is never constructed.
 #pragma once
 #ifdef ARDUINO
 
 #    include "al/pingpong/Ping.h"
 #    include "al/pingpong/Pong.h"
+#    include <variant>
 
 namespace autolink
 {
@@ -15,16 +15,18 @@ class PingPong
 public:
     enum Role { PING, PONG };
 
-    PingPong(Role role, uint32_t debugBaud,
-             uart_port_t uartNum, int rxPin, int txPin,
-             const char *ssid = nullptr,
-             const char *password = nullptr,
-             uint16_t webPort = 8765)
-        : role_(role),
-          ping_(debugBaud, uartNum, rxPin, txPin, ssid,
-                password, webPort),
-          pong_(debugBaud, uartNum, rxPin, txPin, ssid,
-                password, webPort)
+    PingPong(Role role, uint32_t debugBaud, uart_port_t uartNum, int rxPin,
+             int txPin, const char *ssid = nullptr,
+             const char *password = nullptr, uint16_t webPort = 8765)
+        : role_id_(role),
+          active_(role == PING
+                      ? std::variant<std::monostate, Ping,
+                                     Pong>{ std::in_place_index<1>, debugBaud,
+                                            uartNum, rxPin, txPin, ssid,
+                                            password, webPort }
+                      : std::variant<std::monostate, Ping, Pong>{
+                            std::in_place_index<2>, debugBaud, uartNum, rxPin,
+                            txPin, ssid, password, webPort })
     {
     }
 
@@ -33,39 +35,43 @@ public:
 
     void setup()
     {
-        if (role_ == PING)
-            ping_.setup();
-        else
-            pong_.setup();
+        std::visit(
+            [](auto &r) {
+                if constexpr (!std::is_same_v<std::decay_t<decltype(r)>,
+                                              std::monostate>)
+                    r.setup();
+            },
+            active_);
     }
 
     void loop()
     {
-        if (role_ == PING)
-            ping_.loop();
-        else
-            pong_.loop();
+        std::visit(
+            [](auto &r) {
+                if constexpr (!std::is_same_v<std::decay_t<decltype(r)>,
+                                              std::monostate>)
+                    r.loop();
+            },
+            active_);
     }
 
-    Role role() const { return role_; }
-
+    Role role() const { return role_id_; }
 
     void setFillMode(Ping::FillMode m)
     {
-        if (role_ == PING)
-            ping_.setFillMode(m);
+        if (auto *p = std::get_if<Ping>(&active_))
+            p->setFillMode(m);
     }
     Ping::FillMode fillMode() const
     {
-        return role_ == PING
-            ? ping_.fillMode()
-            : Ping::FillMode::SEQUENTIAL;
+        if (auto *p = std::get_if<Ping>(&active_))
+            return p->fillMode();
+        return Ping::FillMode::SEQUENTIAL;
     }
 
 private:
-    Role role_;
-    Ping ping_;
-    Pong pong_;
+    Role role_id_;
+    std::variant<std::monostate, Ping, Pong> active_;
 };
 
 } // namespace autolink
