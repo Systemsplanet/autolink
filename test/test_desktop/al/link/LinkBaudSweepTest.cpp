@@ -5,8 +5,7 @@
 
 using namespace autolink;
 
-static void test_no_scores_picks_nothing()
-{
+static void test_no_scores_picks_nothing() {
     std::cout << "\n=== Test: No Scores -> -1 ===" << std::endl;
     UtilBaudSweep s(5);
     s.configure({ 4, 0.5f, -1 });
@@ -14,8 +13,7 @@ static void test_no_scores_picks_nothing()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_one_perfect_baud_wins()
-{
+static void test_one_perfect_baud_wins() {
     std::cout << "\n=== Test: Single Perfect Baud Wins ===" << std::endl;
     UtilBaudSweep s(5);
     s.configure({ 4, 0.5f, -1 });
@@ -25,8 +23,7 @@ static void test_one_perfect_baud_wins()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_fastest_baud_above_threshold_wins()
-{
+static void test_fastest_baud_above_threshold_wins() {
     std::cout << "\n=== Test: Fastest Baud Above Threshold Wins ==="
               << std::endl;
 
@@ -40,8 +37,7 @@ static void test_fastest_baud_above_threshold_wins()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_baud_below_threshold_falls_back()
-{
+static void test_baud_below_threshold_falls_back() {
     std::cout << "\n=== Test: Flaky Top Baud Falls Back to Reliable One ==="
               << std::endl;
 
@@ -62,8 +58,7 @@ static void test_baud_below_threshold_falls_back()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_strict_threshold()
-{
+static void test_strict_threshold() {
     std::cout << "\n=== Test: Strict Threshold (80%) ===" << std::endl;
 
     UtilBaudSweep s(5);
@@ -83,8 +78,7 @@ static void test_strict_threshold()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_lenient_threshold_picks_flaky_top()
-{
+static void test_lenient_threshold_picks_flaky_top() {
     std::cout << "\n=== Test: Lenient Threshold (10%) Picks Flaky Top ==="
               << std::endl;
 
@@ -103,8 +97,7 @@ static void test_lenient_threshold_picks_flaky_top()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_zero_threshold_legacy_behavior()
-{
+static void test_zero_threshold_legacy_behavior() {
     std::cout << "\n=== Test: Zero Threshold = First-Wins Legacy ==="
               << std::endl;
     UtilBaudSweep s(5);
@@ -115,8 +108,7 @@ static void test_zero_threshold_legacy_behavior()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_reset_all_clears_scores()
-{
+static void test_reset_all_clears_scores() {
     std::cout << "\n=== Test: resetAll() Clears Scores ===" << std::endl;
     UtilBaudSweep s(5);
     s.configure({ 4, 0.5f, -1 });
@@ -131,8 +123,7 @@ static void test_reset_all_clears_scores()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_score_at_out_of_range_is_safe()
-{
+static void test_score_at_out_of_range_is_safe() {
     std::cout << "\n=== Test: Out-of-Range score()/scoreAt() Are Safe ==="
               << std::endl;
     UtilBaudSweep s(3);
@@ -146,8 +137,7 @@ static void test_score_at_out_of_range_is_safe()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_configure_sets_defaults()
-{
+static void test_configure_sets_defaults() {
     std::cout << "\n=== Test: configure() Fills in expectedSamples ==="
               << std::endl;
 
@@ -162,8 +152,7 @@ static void test_configure_sets_defaults()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_explicit_expected_samples_overrides()
-{
+static void test_explicit_expected_samples_overrides() {
     std::cout << "\n=== Test: Explicit expectedSamples Overrides ==="
               << std::endl;
 
@@ -175,8 +164,7 @@ static void test_explicit_expected_samples_overrides()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_realistic_cable_scenario()
-{
+static void test_realistic_cable_scenario() {
     std::cout << "\n=== Test: Realistic Cable Scenario ===" << std::endl;
     UtilBaudSweep s(5);
     s.configure({ 4, 0.5f, -1 });
@@ -195,8 +183,7 @@ static void test_realistic_cable_scenario()
     std::cout << "PASS" << std::endl;
 }
 
-int main()
-{
+int main() {
     std::cout << "=== Running UtilBaudSweep Tests ===" << std::endl;
     test_no_scores_picks_nothing();
     test_one_perfect_baud_wins();
