@@ -8,7 +8,7 @@ ColumnLimit: 80
 Standard: c++14
 
 # Braces
-BreakBeforeBraces: Linux
+BreakBeforeBraces: Attach
 Cpp11BracedListStyle: false
 
 # Pointer / reference alignment: `int* p`, `int& r` (right side)
@@ -46,7 +46,7 @@ AlignOperands: false
 AlignTrailingComments: true
 
 # Allow short functions on a single line
-AllowShortFunctionsOnASingleLine: Inline
+AllowShortFunctionsOnASingleLine: All
 AllowShortBlocksOnASingleLine: Never
 AllowShortCaseLabelsOnASingleLine: false
 AllowShortIfStatementsOnASingleLine: Never
