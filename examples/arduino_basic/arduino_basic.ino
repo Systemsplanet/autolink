@@ -52,13 +52,9 @@ static uint32_t msgNum = 0;
 // (the longer flash wins if called twice in quick
 // succession).
 
-static void ledOffCb(void *)
-{
-    digitalWrite(LED_PIN, LOW);
-}
+static void ledOffCb(void *) { digitalWrite(LED_PIN, LOW); }
 
-static void ledOn(uint32_t ms)
-{
+static void ledOn(uint32_t ms) {
     digitalWrite(LED_PIN, HIGH);
     esp_timer_stop(ledTimer);
     esp_timer_start_once(ledTimer, (uint64_t)ms * 1000ULL);
@@ -67,8 +63,7 @@ static void ledOn(uint32_t ms)
 // ── timestamp
 // ─────────────────────────────────────────────────────────────────
 
-static void ts(char *buf, size_t len)
-{
+static void ts(char *buf, size_t len) {
     uint32_t s = millis() / 1000;
     snprintf(buf, len, "%02lu:%02lu:%02lu", (unsigned long)(s / 3600),
              (unsigned long)(s % 3600 / 60), (unsigned long)(s % 60));
@@ -77,8 +72,7 @@ static void ts(char *buf, size_t len)
 // ── setup
 // ─────────────────────────────────────────────────────────────────────
 
-void setup()
-{
+void setup() {
     // LED
     pinMode(LED_PIN, OUTPUT);
     digitalWrite(LED_PIN, LOW);
@@ -137,8 +131,7 @@ void setup()
 // ── loop
 // ──────────────────────────────────────────────────────────────────────
 
-void loop()
-{
+void loop() {
     char tsBuf[12];
     ts(tsBuf, sizeof(tsBuf));
 
