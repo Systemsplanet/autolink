@@ -4,10 +4,8 @@
 #include "al/util/UtilCrc.h"
 #include <string.h>
 
-namespace autolink
-{
-int UtilFrameRx::feed(const uint8_t *data, int len)
-{
+namespace autolink {
+int UtilFrameRx::feed(const uint8_t *data, int len) {
     for (int i = 0; i < len; i++) {
         uint8_t b = data[i];
         if (b == 0x00) {
@@ -51,8 +49,7 @@ int UtilFrameRx::feed(const uint8_t *data, int len)
     return len;
 }
 
-void UtilFrameRx::reset()
-{
+void UtilFrameRx::reset() {
     idx = 0;
     memset(buf, 0, sizeof(buf));
 }
