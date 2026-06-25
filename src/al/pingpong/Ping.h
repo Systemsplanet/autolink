@@ -1,7 +1,5 @@
-// Ping role: drives the wire, matches echoes against a
-// local pending table. Stalls/rejects clear local
-// state only — never flushRx or BREAK the peer (would
-// reset preferredBaud_ on every drop).
+// Ping role: drives wire, verifies echoes.
+// Holds PingPongBase by composition.
 #pragma once
 #ifdef ARDUINO
 
@@ -11,29 +9,16 @@
 
 namespace autolink
 {
-class Ping : public PingPongBase
+class Ping
 {
 public:
-    enum class FillMode : uint8_t {
-        SEQUENTIAL = 0,
-        RANDOM = 1
-    };
+    enum class FillMode : uint8_t { SEQUENTIAL = 0, RANDOM = 1 };
 
-    Ping(uint32_t debugBaud, uart_port_t uartNum,
-         int rxPin, int txPin,
-         const char *ssid = nullptr,
-         const char *password = nullptr,
+    Ping(uint32_t debugBaud, uart_port_t uartNum, int rxPin, int txPin,
+         const char *ssid = nullptr, const char *password = nullptr,
          uint16_t webPort = 8765)
-        : PingPongBase(debugBaud, uartNum, rxPin,
-                       txPin, true, ssid, password,
-                       webPort)
+        : base_(debugBaud, uartNum, rxPin, txPin, true, ssid, password, webPort)
     {
-        s_active_ = this;
-    }
-    ~Ping()
-    {
-        if (s_active_ == this)
-            s_active_ = nullptr;
     }
 
     Ping(const Ping &) = delete;
@@ -41,57 +26,47 @@ public:
 
     void setup()
     {
-        log_.debug(
-            "Ping",
-            "setup: seeding RNG, calling setupCommon");
+        base_.log_.debug("Ping", "setup: seeding RNG, calling setupCommon");
         randomSeed(esp_random());
-        if (ssid_)
+        if (base_.ssid_)
             installWebHooks();
-        setupCommon();
-        comm_.setLinkPaused(paused_);
-        log_.info("Ping", "mode=Ping  ready");
+        base_.setupCommon();
+        base_.comm_.setLinkPaused(paused_);
+        base_.log_.info("Ping", "mode=Ping  ready");
     }
 
     void loop()
     {
         uint32_t now = millis();
 
-        if (!comm_.ready()) {
-            if (wasReady_) {
-                log_.info("Ping",
-                          "link lost  pending=%d",
-                          count_);
-                wasReady_ = false;
+        if (!base_.comm_.ready()) {
+            if (base_.wasReady_) {
+                base_.log_.info("Ping", "link lost  pending=%d", count_);
+                base_.wasReady_ = false;
                 clearQueue_();
                 tSweepStall_ = now;
-                resetStatBaseline();
+                base_.resetStatBaseline();
             } else {
                 if (now - tNotReady_ >= 1000) {
-                    log_.debug(
-                        "Ping",
-                        "not ready  swpAge=%lu ms",
-                        (unsigned long)(now -
-                                        tSweepStall_));
+                    base_.log_.debug("Ping", "not ready  swpAge=%lu ms",
+                                     (unsigned long)(now - tSweepStall_));
                     tNotReady_ = now;
                 }
             }
-            comm_.blinkWait(3, 100, 100, 0);
+            base_.comm_.blinkWait(3, 100, 100, 0);
             return;
         }
 
-        if (!wasReady_) {
+        if (!base_.wasReady_) {
             int drained = 0;
-            while (comm_.recv(recvBuf_,
-                              sizeof recvBuf_) > 0)
+            while (base_.comm_.recv(recvBuf_, sizeof recvBuf_) > 0)
                 drained++;
             if (drained)
-                log_.debug("Ping",
-                           "drained %d stale echo(s) "
-                           "pre-settle",
-                           drained);
-            comm_.blinkWait(4);
+                base_.log_.debug("Ping", "drained %d stale echo(s) pre-settle",
+                                 drained);
+            base_.comm_.blinkWait(4);
             tReady_ = now;
-            wasReady_ = true;
+            base_.wasReady_ = true;
             consecTransient_ = 0;
         }
 
@@ -99,21 +74,14 @@ public:
             return;
         }
 
-
         if (count_ == WINDOW) {
             if (tStall_ == 0)
                 tStall_ = now;
             if (now - tStall_ > STALL_MS) {
-                log_.error(
+                base_.log_.error(
                     "Ping",
-                    "pipeline stall — WINDOW=%d full "
-                    "for %lu ms. "
-                    "Clearing local pending table "
-                    "only (NO flushRx, NO BREAK). "
-                    "pending=%d  consec=%lu",
-                    WINDOW,
-                    (unsigned long)(now - tStall_),
-                    count_,
+                    "pipeline stall — WINDOW=%d full for %lu ms. Clearing local pending table only (NO flushRx, NO BREAK). pending=%d  consec=%lu",
+                    WINDOW, (unsigned long)(now - tStall_), count_,
                     (unsigned long)consecTransient_);
                 clearQueue_();
                 consecTransient_++;
@@ -123,28 +91,27 @@ public:
         }
 
         if (paused_) {
-            uint8_t echoBuf[BUF_SIZE];
+            uint8_t echoBuf[PingPongBase::BUF_SIZE];
             int n;
-            while ((n = comm_.recv(echoBuf,
-                                   sizeof echoBuf)) >
-                   0) {
+            while ((n = base_.comm_.recv(echoBuf, sizeof echoBuf)) > 0) {
                 matchEcho_(n, echoBuf);
             }
             return;
         }
 
         int sentThisLoop = 0;
-        while (count_ < WINDOW &&
-               sentThisLoop < MAX_TX_PER_LOOP) {
+        const int maxTx = (base_.comm_.mode() == AutoLinkConfig::Mode::SYNC)
+            ? 1
+            : MAX_TX_PER_LOOP;
+        while (count_ < WINDOW && sentThisLoop < maxTx) {
             int n = random(1, 1024);
             fillBuf_(sendBuf_, n);
             uint16_t crc = UtilCrc::crc16(sendBuf_, n);
 
-            if (!comm_.send(sendBuf_, n)) {
-                log_.debug(
+            if (!base_.comm_.send(sendBuf_, n)) {
+                base_.log_.debug(
                     "Ping",
-                    "send failed (ARQ cache full or "
-                    "link not OK)  n=%d  pending=%d",
+                    "send failed (ARQ cache full or link not OK)  n=%d  pending=%d",
                     n, count_);
                 break;
             }
@@ -157,19 +124,15 @@ public:
         }
 
         int got;
-        while ((got = comm_.recv(
-                    recvBuf_, sizeof recvBuf_)) > 0) {
+        while ((got = base_.comm_.recv(recvBuf_, sizeof recvBuf_)) > 0) {
             matchEcho_(got, recvBuf_);
         }
         if (got < 0) {
             Diag d;
-            comm_.getDiag(d);
-            log_.error(
+            base_.comm_.getDiag(d);
+            base_.log_.error(
                 "Ping",
-                "recv rejected (CRC/desync)  "
-                "pending=%d  gap=%llu stale=%llu "
-                "— clearing local pending only (NO "
-                "flushRx, NO BREAK)",
+                "recv rejected (CRC/desync)  pending=%d  gap=%llu stale=%llu — clearing local pending only (NO flushRx, NO BREAK)",
                 count_, (unsigned long long)d.gaps,
                 (unsigned long long)d.stale);
             clearQueue_();
@@ -178,69 +141,32 @@ public:
             consecTransient_ = 0;
         }
 
-        logStats("Ping");
+        base_.logStats("Ping", successEchoCount_, mismatchCount_);
     }
 
-private:
-    FillMode fillMode_ = FillMode::SEQUENTIAL;
-    bool paused_ = true;
-
-public:
     void setFillMode(FillMode m) { fillMode_ = m; }
     FillMode fillMode() const { return fillMode_; }
-
-    static Ping *s_active_;
-    static uint8_t fillModeReaderThunk_()
-    {
-        return s_active_
-            ? (uint8_t)s_active_->fillMode()
-            : 0;
-    }
-    static void fillModeWriterThunk_(uint8_t m)
-    {
-        if (s_active_)
-            s_active_->setFillMode((FillMode)m);
-    }
 
     void setPaused(bool p)
     {
         paused_ = p;
-        comm_.setLinkPaused(p);
+        base_.comm_.setLinkPaused(p);
         if (!p)
-            resetStatBaseline();
-        log_.info("Ping", "device-side pause %s",
-                  p ? "ON" : "OFF");
+            base_.resetStatBaseline();
+        base_.log_.info("Ping", "device-side pause %s", p ? "ON" : "OFF");
     }
     bool isPaused() const { return paused_; }
-    static bool pausedReaderThunk_()
-    {
-        return s_active_ ? s_active_->isPaused()
-                         : false;
-    }
-    static void pausedWriterThunk_(bool p)
-    {
-        if (s_active_)
-            s_active_->setPaused(p);
-    }
-    static uint64_t echoCountReaderThunk_()
-    {
-        return s_active_ ? s_active_->successEchoCount_
-                         : 0;
-    }
-    static uint64_t mismatchCountReaderThunk_()
-    {
-        return s_active_ ? s_active_->mismatchCount_
-                         : 0;
-    }
+
+    uint64_t successEchoCount() const { return successEchoCount_; }
+    uint64_t mismatchCount() const { return mismatchCount_; }
 
     void installWebHooks()
     {
-        mon_.setFillModeHook(
-            &Ping::fillModeReaderThunk_,
-            &Ping::fillModeWriterThunk_);
-        mon_.setMsgPauseHook(
-            &Ping::pausedReaderThunk_,
-            &Ping::pausedWriterThunk_);
+        base_.mon_.setFillModeHook(
+            [this]() -> uint8_t { return (uint8_t)fillMode(); },
+            [this](uint8_t m) { setFillMode((FillMode)m); });
+        base_.mon_.setMsgPauseHook([this]() -> bool { return isPaused(); },
+                                   [this](bool p) { setPaused(p); });
     }
 
 private:
@@ -254,8 +180,7 @@ private:
 
     void fillSequential_(uint8_t *b, int n)
     {
-        static const char HEX_DIGITS[] =
-            "0123456789abcdefghijklmnopqrstuvwxyz";
+        static const char HEX_DIGITS[] = "0123456789abcdefghijklmnopqrstuvwxyz";
         for (int i = 0; i < n; i++)
             b[i] = (uint8_t)HEX_DIGITS[i % 36];
     }
@@ -266,15 +191,13 @@ private:
             b[i] = (uint8_t)random(256);
     }
 
-
     void matchEcho_(int got, const uint8_t *buf)
     {
-        comm_.blinkWait(1);
+        base_.comm_.blinkWait(1);
         if (count_ == 0) {
-            log_.error(
+            base_.log_.error(
                 "Ping",
-                "recv %d bytes with empty pending "
-                "queue (stale echo?) — discarding",
+                "recv %d bytes with empty pending queue (stale echo?) — discarding",
                 got);
             return;
         }
@@ -282,25 +205,18 @@ private:
         uint16_t gotCrc = UtilCrc::crc16(buf, got);
         if (head.len == got && head.crc == gotCrc) {
             successEchoCount_++;
-            log_.debug("Ping",
-                       "echo ok  %d bytes  pending=%d",
-                       got, count_ - 1);
+            base_.log_.debug("Ping", "echo ok  %d bytes  pending=%d", got,
+                             count_ - 1);
             head_ = (head_ + 1) % WINDOW;
             count_--;
         } else {
             Diag d;
-            comm_.getDiag(d);
-            log_.error(
+            base_.comm_.getDiag(d);
+            base_.log_.error(
                 "Ping",
-                "echo MISMATCH: got len=%d "
-                "crc=0x%04X, expected len=%d "
-                "crc=0x%04X "
-                "(pending=%d gap=%llu stale=%llu) — "
-                "clearing local pending",
-                got, (unsigned)gotCrc, head.len,
-                (unsigned)head.crc, count_,
-                (unsigned long long)d.gaps,
-                (unsigned long long)d.stale);
+                "echo MISMATCH: got len=%d crc=0x%04X, expected len=%d crc=0x%04X (pending=%d gap=%llu stale=%llu) — clearing local pending",
+                got, (unsigned)gotCrc, head.len, (unsigned)head.crc, count_,
+                (unsigned long long)d.gaps, (unsigned long long)d.stale);
             mismatchCount_++;
             clearQueue_();
             consecTransient_++;
@@ -310,16 +226,13 @@ private:
     void clearQueue_()
     {
         if (count_ > 0) {
-            log_.error("Ping",
-                       "pending cleared  dropped=%d",
-                       count_);
+            base_.log_.error("Ping", "pending cleared  dropped=%d", count_);
         }
         head_ = 0;
         tail_ = 0;
         count_ = 0;
         tStall_ = 0;
     }
-
 
     static constexpr int WINDOW = 32;
     static constexpr int MAX_TX_PER_LOOP = 16;
@@ -344,11 +257,14 @@ private:
     uint64_t successEchoCount_ = 0;
     uint64_t mismatchCount_ = 0;
 
-    uint8_t sendBuf_[BUF_SIZE];
-    uint8_t recvBuf_[BUF_SIZE];
-};
+    uint8_t sendBuf_[PingPongBase::BUF_SIZE];
+    uint8_t recvBuf_[PingPongBase::BUF_SIZE];
 
-Ping *Ping::s_active_ = nullptr;
+    FillMode fillMode_ = FillMode::SEQUENTIAL;
+    bool paused_ = false;
+
+    PingPongBase base_;
+};
 
 } // namespace autolink
 #endif
