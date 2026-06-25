@@ -1,14 +1,12 @@
-// COBS encode/decode. See UtilCobs.h.
+// COBS encode/decode implementation.
 #include "al/util/UtilCobs.h"
 #include <string.h>
 
 namespace autolink
 {
-size_t UtilCobs::encode(const uint8_t *src, size_t len,
-                        uint8_t *dst)
+size_t UtilCobs::encode(const uint8_t *src, size_t len, uint8_t *dst)
 {
-    size_t read_index = 0, write_index = 1,
-           code_index = 0;
+    size_t read_index = 0, write_index = 1, code_index = 0;
     uint8_t code = 1;
     while (read_index < len) {
         if (src[read_index] == 0) {
@@ -30,8 +28,7 @@ size_t UtilCobs::encode(const uint8_t *src, size_t len,
     return write_index;
 }
 
-size_t UtilCobs::decode(const uint8_t *src, size_t len,
-                        uint8_t *dst)
+size_t UtilCobs::decode(const uint8_t *src, size_t len, uint8_t *dst)
 {
     size_t read_index = 0, write_index = 0;
     while (read_index < len) {
@@ -42,8 +39,7 @@ size_t UtilCobs::decode(const uint8_t *src, size_t len,
         if (read_index + run > len)
             return 0;
         if (run > 0) {
-            memcpy(dst + write_index, src + read_index,
-                   run);
+            memcpy(dst + write_index, src + read_index, run);
             write_index += run;
             read_index += run;
         }
