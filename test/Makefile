@@ -21,22 +21,34 @@
 #   cd test/itest/test_embedded && make
 # explicitly when you want the ESP32 cross-compile gate.
 
-.PHONY: test itest all clean help
+.PHONY: test itest all clean pretty help
 
 help:
 	@echo "Targets:"
 	@echo "  test    - run unit tests (test/test_desktop/)"
 	@echo "  itest   - run host integration tests (test/itest/test_desktop/)"
 	@echo "  all     - run both, print combined summary"
+	@echo "  pretty  - run build/pretty_print.py over every .cpp/.h"
 	@echo "  clean   - clean both subdirs"
 	@echo ""
 	@echo "For ESP32 sketch cross-compile:"
 	@echo "  cd test/itest/test_embedded && make"
 
-test:
+# Run the canonical pretty-printer over every C/C++ source
+# file in the project. AGENTS.md rule 14a says this MUST
+# run before zipping. `test` and `all` depend on it so it
+# happens automatically before any verification.
+# Note: PRETTY_FILES runs from the project ROOT (../),
+# not from the test/ directory, so it picks up src/ +
+# include/ + test/ source files all in one pass.
+PRETTY_FILES := $(shell cd .. && find . -name '*.cpp' -o -name '*.h' -o -name '*.ino' | grep -v staging)
+pretty:
+	@cd .. && python3 build/pretty_print.py $(PRETTY_FILES) 2>&1 | tail -3
+
+test: pretty
 	@$(MAKE) -C test_desktop all
 
-itest:
+itest: pretty
 	@$(MAKE) -C itest/test_desktop all
 
 # 'all' runs the unit + host integration suites in sequence,
@@ -44,7 +56,7 @@ itest:
 # tests passed, total bytes (sum of every suite binary on disk),
 # peak RSS (largest single-suite resident set observed across
 # both suites).
-all:
+all: pretty
 	@start_ns=$$(date +%s%N); \
 	echo "--- Running unit tests (test/test_desktop/) ---"; \
 	$(MAKE) -C test_desktop all 2>&1 | tee /tmp/unit.out; \
