@@ -1,7 +1,4 @@
-// MockHal: pipe wiring, clock pump, drop model,
-// peek/pop semantics.
-
-
+// MockHal: pipe wiring, clock, drop model.
 #ifndef ARDUINO
 
 #    include <iostream>
@@ -12,9 +9,7 @@ using namespace autolink;
 
 void test_set_spd_records_history()
 {
-    std::cout << "\n=== Test: MockHal setSpd Records "
-                 "History ==="
-              << std::endl;
+    std::cout << "\n=== Test: MockHal setSpd Records History ===" << std::endl;
     MockHal hal;
     hal.setSpd(115200);
     hal.setSpd(9600);
@@ -27,8 +22,7 @@ void test_set_spd_records_history()
 
 void test_send_break_self_delivery_is_noop_without_peer()
 {
-    std::cout << "\n=== Test: sendBreak Without Peer "
-                 "Doesn't Self-Deliver ==="
+    std::cout << "\n=== Test: sendBreak Without Peer Doesn't Self-Deliver ==="
               << std::endl;
     MockHal hal;
     hal.bind(new Link(hal, true, AutoLinkConfig()));
@@ -43,14 +37,12 @@ void test_send_break_self_delivery_is_noop_without_peer()
 
 void test_send_break_delivers_to_peer()
 {
-    std::cout << "\n=== Test: sendBreak Delivers to "
-                 "Peer MockHal ==="
+    std::cout << "\n=== Test: sendBreak Delivers to Peer MockHal ==="
               << std::endl;
     MockHal a, b;
     a.peer = &b;
     a.bind(new Link(a, true, AutoLinkConfig()));
     b.bind(new Link(b, false, AutoLinkConfig()));
-
 
     assert(a.link->getState() == State::OK);
     assert(b.link->getState() == State::OK);
@@ -67,9 +59,7 @@ void test_send_break_delivers_to_peer()
 
 void test_tx_buffer_accumulates()
 {
-    std::cout << "\n=== Test: MockHal tx Accumulates "
-                 "Buffer ==="
-              << std::endl;
+    std::cout << "\n=== Test: MockHal tx Accumulates Buffer ===" << std::endl;
     MockHal hal;
     uint8_t a = 0xFF;
     hal.tx(&a, 1);
@@ -86,9 +76,7 @@ void test_tx_buffer_accumulates()
 
 void test_timer_state_transitions()
 {
-    std::cout << "\n=== Test: MockHal startTimer / "
-                 "stopTimer ==="
-              << std::endl;
+    std::cout << "\n=== Test: MockHal startTimer / stopTimer ===" << std::endl;
     MockHal hal;
     hal.startTimer(50);
     assert(hal.timerActive);
@@ -100,8 +88,7 @@ void test_timer_state_transitions()
 
 void test_lock_unlock_balanced()
 {
-    std::cout << "\n=== Test: MockHal lock / unlock "
-                 "Are Balanced ==="
+    std::cout << "\n=== Test: MockHal lock / unlock Are Balanced ==="
               << std::endl;
     MockHal hal;
     hal.lock();
@@ -114,8 +101,7 @@ void test_lock_unlock_balanced()
 
 void test_app_buffer_push_peek_pop_clear()
 {
-    std::cout << "\n=== Test: MockHal App Buffer "
-                 "Push/Peek/Pop/Clear ==="
+    std::cout << "\n=== Test: MockHal App Buffer Push/Peek/Pop/Clear ==="
               << std::endl;
     MockHal hal;
     uint8_t pb[] = { 0xAA, 0xBB };
@@ -142,9 +128,7 @@ void test_app_buffer_push_peek_pop_clear()
 
 void test_app_buffer_push_respects_capacity()
 {
-    std::cout << "\n=== Test: MockHal App Buffer "
-                 "Capacity Cap ==="
-              << std::endl;
+    std::cout << "\n=== Test: MockHal App Buffer Capacity Cap ===" << std::endl;
     MockHal hal;
     hal.appBufCap = 4;
     uint8_t big[] = { 1, 2, 3, 4, 5, 6, 7, 8 };
@@ -156,9 +140,7 @@ void test_app_buffer_push_respects_capacity()
 
 void test_now_ms_is_injectable()
 {
-    std::cout << "\n=== Test: MockHal nowMs Is "
-                 "Injectable ==="
-              << std::endl;
+    std::cout << "\n=== Test: MockHal nowMs Is Injectable ===" << std::endl;
     MockHal hal;
     hal.now = 0;
     assert(hal.nowMs() == 0);
@@ -169,8 +151,7 @@ void test_now_ms_is_injectable()
 
 int main()
 {
-    std::cout << "=== Running MockHal Tests ==="
-              << std::endl;
+    std::cout << "=== Running MockHal Tests ===" << std::endl;
     test_set_spd_records_history();
     test_send_break_self_delivery_is_noop_without_peer();
     test_send_break_delivers_to_peer();
@@ -180,9 +161,7 @@ int main()
     test_app_buffer_push_peek_pop_clear();
     test_app_buffer_push_respects_capacity();
     test_now_ms_is_injectable();
-    std::cout << "\n=== MockHal Tests Completed "
-                 "Successfully ==="
-              << std::endl;
+    std::cout << "\n=== MockHal Tests Completed Successfully ===" << std::endl;
     return 0;
 }
 
