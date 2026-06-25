@@ -8,8 +8,7 @@
 
 using namespace autolink;
 
-static uint8_t ref_crc8(const uint8_t *d, int len)
-{
+static uint8_t ref_crc8(const uint8_t *d, int len) {
     uint8_t crc = 0;
     for (int i = 0; i < len; i++) {
         crc ^= d[i];
@@ -19,8 +18,7 @@ static uint8_t ref_crc8(const uint8_t *d, int len)
     }
     return crc;
 }
-static uint16_t ref_crc16(const uint8_t *d, int len)
-{
+static uint16_t ref_crc16(const uint8_t *d, int len) {
     uint16_t crc = 0xFFFF;
     for (int i = 0; i < len; i++) {
         crc ^= (uint16_t)d[i] << 8;
@@ -31,8 +29,7 @@ static uint16_t ref_crc16(const uint8_t *d, int len)
     return crc;
 }
 
-void test_known_answers()
-{
+void test_known_answers() {
     std::cout << "\n=== Test: CRC Known-Answer Vectors ===" << std::endl;
     const uint8_t check[] = { '1', '2', '3', '4', '5', '6', '7', '8', '9' };
     assert(UtilCrc::crc8(check, 9) == 0xF4);
@@ -40,8 +37,7 @@ void test_known_answers()
     std::cout << "PASS" << std::endl;
 }
 
-void test_edges()
-{
+void test_edges() {
     std::cout << "\n=== Test: CRC Edge Cases ===" << std::endl;
     uint8_t b = 0x00;
     assert(UtilCrc::crc8(&b, 0) == 0x00);
@@ -53,8 +49,7 @@ void test_edges()
     std::cout << "PASS" << std::endl;
 }
 
-void test_lut_vs_reference()
-{
+void test_lut_vs_reference() {
     std::cout << "\n=== Test: LUT Agrees With Bitwise Reference ==="
               << std::endl;
     for (int v = 0; v < 256; v++) {
@@ -73,8 +68,7 @@ void test_lut_vs_reference()
     std::cout << "PASS" << std::endl;
 }
 
-void test_error_detection()
-{
+void test_error_detection() {
     std::cout << "\n=== Test: Single-Bit Errors Detected ===" << std::endl;
     uint8_t buf[64];
     for (int i = 0; i < 64; i++)
@@ -92,8 +86,7 @@ void test_error_detection()
     std::cout << "PASS" << std::endl;
 }
 
-int main()
-{
+int main() {
     std::cout << "=== Running UtilCrc Tests ===" << std::endl;
     test_known_answers();
     test_edges();
