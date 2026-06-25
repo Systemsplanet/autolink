@@ -1,9 +1,11 @@
-// Status-blink pattern: flashes an LED N times to
-// surface protocol state (link-down triple-blink,
-// link-up quadruple, etc). Pure software timer; HAL
-// abstracts the platform pin toggle.
+// LED blink pattern driver.
+// IBlinkHal abstracts pin + one-shot timer.
+// EspBlinkHal implements with esp_timer.
 #pragma once
 #include <stdint.h>
+#ifdef ARDUINO
+#    include <freertos/FreeRTOS.h>
+#endif
 
 namespace autolink
 {
@@ -15,7 +17,6 @@ public:
     virtual void startOnce(uint32_t ms) = 0;
     virtual void cancel() = 0;
     virtual void delayMs(uint32_t ms) = 0;
-
 
     virtual void yield() {}
 };
@@ -30,8 +31,7 @@ class UtilBlink
 public:
     explicit UtilBlink(IBlinkHal &h) : hal(h) {}
 
-    void start(int n, int onTimeMs = 60,
-               int offTimeMs = 60)
+    void start(int n, int onTimeMs = 60, int offTimeMs = 60)
     {
         if (n <= 0)
             return;
@@ -42,11 +42,9 @@ public:
         tick();
     }
 
-    void flashBlocking(int n, int onTimeMs,
-                       int offTimeMs, long delayMs)
+    void flashBlocking(int n, int onTimeMs, int offTimeMs, long delayMs)
     {
         cancel();
-
 
         hal.yield();
         for (int i = 0; i < n; i++) {
@@ -67,7 +65,6 @@ public:
         on = false;
         hal.writePin(false);
     }
-
 
     void tick()
     {
@@ -92,8 +89,7 @@ public:
 
 #    include <Arduino.h>
 
-#    if defined(ARDUINO) &&          \
-        !defined(ESP_IDF_VERSION) && \
+#    if defined(ARDUINO) && !defined(ESP_IDF_VERSION) && \
         !defined(AUTOLINK_USE_ESP_TIMER)
 #        include "al/util/UtilBlinkEspTimerShim.h"
 #    else
@@ -140,16 +136,12 @@ public:
     }
     void bind(UtilBlink *o) { owner = o; }
 
-    void writePin(bool on) override
-    {
-        digitalWrite(pin, on ? HIGH : LOW);
-    }
+    void writePin(bool on) override { digitalWrite(pin, on ? HIGH : LOW); }
     void startOnce(uint32_t ms) override
     {
         ensureTimer();
         esp_timer_stop(timer);
-        esp_timer_start_once(timer,
-                             (uint64_t)ms * 1000);
+        esp_timer_start_once(timer, (uint64_t)ms * 1000);
     }
     void cancel() override
     {
