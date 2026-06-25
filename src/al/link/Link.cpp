@@ -1,7 +1,11 @@
-// Wire-protocol implementation.
-// Pure decisions in LinkDecision.h.
+// Wire-protocol coordinator. State lives in
+// LinkArq / LinkReorder / LinkSweep; Link
+// composes them and owns I/O.
 #include "al/link/Link.h"
 #include "al/link/LinkDecision.h"
+#include "al/link/LinkArq.h"
+#include "al/link/LinkReorder.h"
+#include "al/link/LinkSweep.h"
 #include "al/util/Log.h"
 #include <cstdio>
 
@@ -17,12 +21,9 @@
 
 static constexpr const char *TAG = "AutoLink";
 
-namespace autolink
-{
+namespace autolink {
 static_assert(MAX_CHUNK + 6 <= 256, "MAX_CHUNK too large");
 
-static constexpr int PHASE1_MAX_TRIES = 6;
-static constexpr int PHASE3_ACKS_NEEDED = 2;
 static constexpr int HEARTBEAT_MS = 100;
 static constexpr int HEARTBEAT_MISS_LIMIT = 3;
 // Asymmetric idle: TX active, RX silent
@@ -30,26 +31,16 @@ static constexpr int HEARTBEAT_MISS_LIMIT = 3;
 static constexpr int FAST_IDLE_RX_MS = 300;
 static constexpr int FAST_IDLE_TX_MS = 1000;
 
-int Link::okTickMs() const
-{
+int Link::okTickMs() const {
     int k = cfg.idleTimeoutMs / 3;
     if (k < 50)
         k = 50;
-    return k < (int)ACK_RTO_MS ? (int)ACK_RTO_MS : k;
+    return k < cfg.syncAckTimeoutMs ? cfg.syncAckTimeoutMs : k;
 }
 
-int Link::phase1ArmMs()
-{
-#ifdef AUTOLINK_HOST_TEST
-    return dwells_.phase1;
-#else
-    return jitterPhase1Dwell(dwells_.phase1,
-                             hw.nowMs() ^ (isMaster ? 0xA5u : 0x5Au));
-#endif
-}
+int Link::phase1ArmMs() { return sweep_.phase1ArmMs(*this); }
 
-const char *StateToStr(State s)
-{
+const char *StateToStr(State s) {
     switch (s) {
     case State::OK:
         return "OK";
@@ -67,8 +58,7 @@ Link::Link(IHal &h, bool isMasterNode, const AutoLinkConfig &config)
       spdI(0), pingSample(0), emptySweeps(0),
       baudSweep((int)config.allowedBaudsCount), rxIdx(0), frameRx(*this),
       rxMsgLen(-1), rxMsgCrc(0), lckRetries(0), lastRxMs(0), lastTxMs(0),
-      txBytes(0), rxBytes(0), discCount(0), frameErrs(0)
-{
+      txBytes(0), rxBytes(0), discCount(0), frameErrs(0) {
     UtilBaudSweep::Config sc;
     sc.pingSamplesPerBaud = config.pingSamplesPerBaud;
     sc.minAcceptRate = config.minAcceptRate;
@@ -82,128 +72,31 @@ Link::Link(IHal &h, bool isMasterNode, const AutoLinkConfig &config)
                          "large msgs will be dropped");
 }
 
-Link::~Link()
-{
-    for (int i = 0; i < 256; i++) {
-        if (reorder_[i].buf)
-            free(reorder_[i].buf);
-        reorder_[i].buf = nullptr;
-        reorder_[i].in_use = false;
-        reorder_[i].len = 0;
-    }
-}
+Link::~Link() = default;
 
-void Link::reorderClear_unlocked()
-{
-    for (int i = 0; i < 256; i++) {
-        if (reorder_[i].buf)
-            free(reorder_[i].buf);
-        reorder_[i].buf = nullptr;
-        reorder_[i].in_use = false;
-        reorder_[i].len = 0;
-    }
-}
-
-void Link::reorderDropExpired_unlocked(uint32_t nowMs)
-{
-    for (int i = 0; i < 256; i++) {
-        if (!reorder_[i].in_use)
-            continue;
-        uint32_t age = nowMs - reorder_[i].heldAtMs;
-        if (age < (uint32_t)cfg.reorderHoldMs)
-            continue;
-        free(reorder_[i].buf);
-        reorder_[i].buf = nullptr;
-        reorder_[i].in_use = false;
-        reorder_[i].len = 0;
-        lostMsgs++;
-        Log::log().warning(TAG,
-                           "reorder seq=%u expired "
-                           "(%ums)",
-                           (unsigned)i, (unsigned)age);
-    }
-}
-
-int Link::reorderFlushContiguous_unlocked(uint32_t)
-{
-    int delivered = 0;
-    bool progress = true;
-    while (progress) {
-        progress = false;
-        uint8_t exp =
-            (uint8_t)((rxSeq == (uint8_t)COBS_SEQ_MAX) ? 0 : rxSeq + 1);
-        if (!reorder_[exp].in_use)
-            break;
-        ReorderSlot &s = reorder_[exp];
-        int acc = hw.pushAppBuf(s.buf, s.len);
-        if (acc < s.len) {
-            Log::log().info(TAG,
-                            "reorder flush seq=%u "
-                            "buf full (want %d got %d)",
-                            (unsigned)exp, (int)s.len, acc);
-            break;
-        }
-        sendAckFrame_unlocked(exp);
-        rxSeq = exp;
-        rxSeqSet = true;
-        rxBytes += s.len;
-        free(s.buf);
-        s.buf = nullptr;
-        s.in_use = false;
-        s.len = 0;
-        delivered++;
-        progress = true;
-    }
-    if (delivered > 0 && errs > 0)
-        errs = 0;
-    return delivered;
-}
-
-void Link::resetSeq_unlocked()
-{
+void Link::resetSeq_unlocked() {
     txSeq = 0;
     rxSeqSet = false;
     rxSeq = 0;
 }
 
-void Link::computeDwells_unlocked()
-{
-    int N = cfg.allowedBaudsCount;
-    int maxN = (int)(sizeof(dwells_.phase2) / sizeof(dwells_.phase2[0]));
-    if (N > maxN)
-        N = maxN;
-    for (int i = 0; i < N; i++) {
-        double rt = 2.0 * (5.0 * 10.0 / cfg.allowedBauds[i] * 1000.0) + 0.5;
-        int d = (int)(rt * 1.5) + 1;
-        if (d < 5)
-            d = 5;
-        dwells_.phase2[i] = d;
-        dwells_.phase2Slave[i] = d;
-    }
-    double rt0 = 2.0 * (5.0 * 10.0 / cfg.allowedBauds[0] * 1000.0) + 0.5;
-    dwells_.phase3 = (int)(3.0 * rt0 * 1.5) + 1;
-    dwells_.phase1 = cfg.delayMs;
-    int total = 0;
-    for (int i = 0; i < N; i++)
-        total += dwells_.phase2[i];
-    dwells_.phase2Total = total * 5 + 200;
-    for (int i = 0; i < N; i++) {
-        if (dwells_.phase2[i] < 5)
-            dwells_.phase2[i] = 5;
-        if (dwells_.phase2Slave[i] < 5)
-            dwells_.phase2Slave[i] = 5;
-    }
+uint8_t Link::reorderExpectedSeq() const {
+    return (uint8_t)((rxSeq == (uint8_t)COBS_SEQ_MAX) ? 0 : rxSeq + 1);
 }
 
-void Link::begin()
-{
+void Link::reorderAdvanceRxSeq(uint8_t seq) {
+    rxSeq = seq;
+    rxSeqSet = true;
+}
+
+void Link::begin() {
     hw.lock();
-    computeDwells_unlocked();
+    sweep_.computeDwells(*this);
     hw.unlock();
     if (isMaster) {
         hw.lock();
         reset_unlocked(false);
-        enterPhase1_unlocked();
+        sweep_.enterPhase1(*this);
         hw.unlock();
         hw.sendBreak();
     } else {
@@ -216,7 +109,7 @@ void Link::begin()
         frameRx.reset();
         baudSweep.resetAll();
         resetSeq_unlocked();
-        sweepPhase_ = SweepPhase::PHASE1;
+        sweep_.setPhase(SweepPhase::PHASE1);
         hw.unlock();
         hw.clearAppBuf();
         hw.setSpd(cfg.allowedBauds[spdI]);
@@ -226,8 +119,7 @@ void Link::begin()
     }
 }
 
-void Link::changeState_unlocked(State newState)
-{
+void Link::changeState_unlocked(State newState) {
     if (state != newState) {
         Log::log().debug(TAG, "%s -> %s", StateToStr(state),
                          StateToStr(newState));
@@ -235,8 +127,7 @@ void Link::changeState_unlocked(State newState)
     }
 }
 
-int Link::bestSpd_unlocked() const
-{
+int Link::bestSpd_unlocked() const {
     int best = baudSweep.pickBest();
     if (best < 0)
         return 0;
@@ -246,86 +137,9 @@ int Link::bestSpd_unlocked() const
     return best;
 }
 
-void Link::sendPongAck_unlocked()
-{
-    sendFrame_unlocked(PONG_CMD);
-}
+void Link::sendPongAck_unlocked() { sendFrame_unlocked(PONG_CMD); }
 
-void Link::enterPhase1_unlocked()
-{
-    // Never leave P1 until connected.
-    sweepPhase_ = SweepPhase::PHASE1;
-    spdI = cfg.allowedBaudsCount - 1;
-    pingSample = 0;
-    hw.setSpd(cfg.allowedBauds[spdI]);
-    Log::log().info(TAG, "=== P1 slowest baud[%d]=%lu ===", spdI,
-                    (unsigned long)cfg.allowedBauds[spdI]);
-    if (isMaster) {
-        sendFrame_unlocked(PING_CMD);
-        hw.startTimer(dwells_.phase1);
-    } else {
-        hw.startTimer(dwells_.phase1 * PHASE1_MAX_TRIES);
-    }
-}
-
-void Link::enterPhase2_unlocked()
-{
-    sweepPhase_ = SweepPhase::PHASE2;
-    spdI = 0;
-    pingSample = 0;
-    hw.setSpd(cfg.allowedBauds[0]);
-    Log::log().info(TAG, "=== P2 top-down sweep ===");
-    if (isMaster) {
-        sendFrame_unlocked(PING_CMD);
-        hw.startTimer(dwells_.phase2[0]);
-    }
-}
-
-void Link::enterPhase3_unlocked(int chosenBaud)
-{
-    sweepPhase_ = SweepPhase::PHASE3;
-    phase3Baud_ = chosenBaud;
-    phase3Acks_ = 0;
-    hw.setSpd(cfg.allowedBauds[chosenBaud]);
-    Log::log().info(TAG, "=== P3 2-of-3 baud[%d]=%lu ===", chosenBaud,
-                    (unsigned long)cfg.allowedBauds[chosenBaud]);
-    if (isMaster) {
-        sendFrame_unlocked(PING_CMD);
-        int rt =
-            (int)(2.0 * (5.0 * 10.0 / cfg.allowedBauds[chosenBaud] * 1000.0) +
-                  0.5);
-        if (rt < 5)
-            rt = 5;
-        int t3 = rt * (PHASE3_ACKS_NEEDED + 1) + 100;
-        if (t3 < 200)
-            t3 = 200;
-        hw.startTimer(t3);
-    }
-}
-
-void Link::enterResweep_unlocked()
-{
-    sweepPhase_ = SweepPhase::PHASE2;
-    if (cfg.baudPreference && preferredBaud_ != NO_PREFERRED_BAUD &&
-        preferredBaud_ < (int)cfg.allowedBaudsCount) {
-        if (baudRetries_ < cfg.baudRetryLimit) {
-            spdI = preferredBaud_;
-            baudRetries_++;
-        } else {
-            spdI = 0;
-            preferredBaud_ = NO_PREFERRED_BAUD;
-            baudRetries_ = 0;
-        }
-    } else {
-        spdI = 0;
-    }
-    pingSample = 0;
-    hw.setSpd(cfg.allowedBauds[spdI]);
-    hw.startTimer(isMaster ? dwells_.phase2[spdI] : dwells_.phase2Slave[spdI]);
-}
-
-void Link::sendFrame_unlocked(uint8_t payload)
-{
+void Link::sendFrame_unlocked(uint8_t payload) {
     uint8_t frame[CTRL_FRAME_SIZE];
     frame[0] = 0xAA;
     frame[1] = 0x55;
@@ -336,15 +150,13 @@ void Link::sendFrame_unlocked(uint8_t payload)
         Log::log().error(TAG, "sendFrame truncated");
 }
 
-void Link::sendFrame(uint8_t payload)
-{
+void Link::sendFrame(uint8_t payload) {
     hw.lock();
     sendFrame_unlocked(payload);
     hw.unlock();
 }
 
-void Link::sendCobsFrame_unlocked(const uint8_t *b, int n)
-{
+void Link::sendCobsFrame_unlocked(const uint8_t *b, int n) {
     if (n < 0)
         n = 0;
     if (n > MAX_CHUNK)
@@ -364,29 +176,23 @@ void Link::sendCobsFrame_unlocked(const uint8_t *b, int n)
     txSeq = (txSeq == COBS_SEQ_MAX) ? 0 : (uint8_t)(txSeq + 1);
 }
 
-void Link::sendCobsFrame(const uint8_t *b, int n)
-{
+void Link::sendCobsFrame(const uint8_t *b, int n) {
     hw.lock();
     sendCobsFrame_unlocked(b, n);
     hw.unlock();
 }
 
 uint8_t Link::sendCobsFrameAcked_unlocked(const uint8_t *b, int n,
-                                          uint8_t baseSeq)
-{
+                                          uint8_t baseSeq) {
     uint8_t seq = txSeq;
     sendCobsFrame_unlocked(b, n);
-    ackedPending_[seq] = true;
-    retxCount_[seq] = 0;
-    sentAtMs_[seq] = hw.nowMs();
-    baseSeq_[seq] = (baseSeq == NO_BASE) ? seq : baseSeq;
-    if (arqCacheInsertCallback_ && n > 0)
-        arqCacheInsertCallback_(seq, b, n, 1, arqCtx_);
+    arq_.onSent(seq, baseSeq, hw.nowMs());
+    if (arqCache_ && n > 0)
+        arqCache_->insert(seq, b, n);
     return seq;
 }
 
-void Link::resendCobsFrame_unlocked(uint8_t seq, const uint8_t *b, int n)
-{
+void Link::resendCobsFrame_unlocked(uint8_t seq, const uint8_t *b, int n) {
     if (n < 0)
         n = 0;
     if (n > MAX_CHUNK)
@@ -404,8 +210,7 @@ void Link::resendCobsFrame_unlocked(uint8_t seq, const uint8_t *b, int n)
     hw.tx(frame, (int)(encLen + 2));
 }
 
-void Link::sendAckFrame_unlocked(uint8_t ackedCobsSeq)
-{
+void Link::sendAckFrame_unlocked(uint8_t ackedCobsSeq) {
     uint8_t u[3] = { ACK_TYPE, ackedCobsSeq, 0 };
     u[2] = UtilCrc::crc8(u, 2);
     uint8_t frame[8];
@@ -415,8 +220,7 @@ void Link::sendAckFrame_unlocked(uint8_t ackedCobsSeq)
     hw.tx(frame, (int)(el + 2));
 }
 
-void Link::sendNakFrame_unlocked(uint8_t missingCobsSeq)
-{
+void Link::sendNakFrame_unlocked(uint8_t missingCobsSeq) {
     uint8_t u[3] = { NAK_TYPE, missingCobsSeq, 0 };
     u[2] = UtilCrc::crc8(u, 2);
     uint8_t frame[8];
@@ -426,8 +230,7 @@ void Link::sendNakFrame_unlocked(uint8_t missingCobsSeq)
     hw.tx(frame, (int)(el + 2));
 }
 
-void Link::err()
-{
+void Link::err() {
     hw.lock();
     bool trigger = err_unlocked();
     hw.unlock();
@@ -435,8 +238,7 @@ void Link::err()
         hw.sendBreak();
 }
 
-bool Link::err_unlocked()
-{
+bool Link::err_unlocked() {
     if (state != State::OK)
         return false;
     errs++;
@@ -461,34 +263,22 @@ bool Link::err_unlocked()
     return false;
 }
 
-void Link::clearErr()
-{
+void Link::clearErr() {
     hw.lock();
     if (errs > 0)
         errs = 0;
     hw.unlock();
 }
 
-int Link::available() const
-{
-    return hw.appBufAvailable();
-}
-int Link::peek()
-{
-    return hw.peekAppBuf();
-}
-int Link::read()
-{
+int Link::available() const { return hw.appBufAvailable(); }
+int Link::peek() { return hw.peekAppBuf(); }
+int Link::read() {
     uint8_t b;
     return hw.popAppBuf(&b, 1) == 1 ? b : -1;
 }
-int Link::read(uint8_t *b, int max_len)
-{
-    return hw.popAppBuf(b, max_len);
-}
+int Link::read(uint8_t *b, int max_len) { return hw.popAppBuf(b, max_len); }
 
-int Link::readStream(uint8_t *b, int n)
-{
+int Link::readStream(uint8_t *b, int n) {
     int got = 0;
     while (got < n) {
         int r = hw.popAppBuf(b + got, n - got);
@@ -499,8 +289,7 @@ int Link::readStream(uint8_t *b, int n)
     return got;
 }
 
-int Link::write(const uint8_t *b, int len)
-{
+int Link::write(const uint8_t *b, int len) {
     if (len <= 0)
         return 0;
     hw.lock();
@@ -509,8 +298,7 @@ int Link::write(const uint8_t *b, int len)
     return sent;
 }
 
-int Link::sendMsg_unlocked(const uint8_t *b, int len)
-{
+int Link::sendMsg_unlocked(const uint8_t *b, int len) {
     if (state != State::OK) {
         Log::log().warning(TAG, "write: not OK -> dropped");
         return 0;
@@ -528,8 +316,7 @@ int Link::sendMsg_unlocked(const uint8_t *b, int len)
     return offset;
 }
 
-void Link::dropLink()
-{
+void Link::dropLink() {
     hw.lock();
     reset_unlocked(true);
     bool nb = (state == State::SWP);
@@ -538,13 +325,9 @@ void Link::dropLink()
         hw.sendBreak();
 }
 
-void Link::flush()
-{
-    hw.flushTx();
-}
+void Link::flush() { hw.flushTx(); }
 
-void Link::flushRx()
-{
+void Link::flushRx() {
     hw.lock();
     hw.clearAppBuf();
     rxMsgLen = -1;
@@ -554,8 +337,7 @@ void Link::flushRx()
     hw.flushRxHw();
 }
 
-bool Link::sendMsg(const uint8_t *b, int len, uint8_t *outBaseSeq)
-{
+bool Link::sendMsg(const uint8_t *b, int len, uint8_t *outBaseSeq) {
     if (len == 0) {
         if (outBaseSeq)
             *outBaseSeq = 0;
@@ -578,7 +360,7 @@ bool Link::sendMsg(const uint8_t *b, int len, uint8_t *outBaseSeq)
             *outBaseSeq = 0;
         return false;
     }
-    if (arqCacheHasRoomCallback_ && !arqCacheHasRoomCallback_(arqCtx_)) {
+    if (arqCache_ && !arqCache_->hasRoom()) {
         hw.unlock();
         Log::log().warning(TAG, "sendMsg: ARQ cache full");
         if (outBaseSeq)
@@ -587,28 +369,6 @@ bool Link::sendMsg(const uint8_t *b, int len, uint8_t *outBaseSeq)
     }
     bool ok = true;
     uint8_t baseSeq = 0;
-    auto waitSyncAck = [&](uint8_t seq) -> bool {
-        // Caller has the lock. Drop it so
-        // the link task can deliver the ACK,
-        // then poll until acked or timeout.
-        hw.unlock();
-        uint32_t t0 = hw.nowMs();
-        while (ackedPending_[seq]) {
-            if ((hw.nowMs() - t0) >= (uint32_t)cfg.syncAckTimeoutMs) {
-                Log::log().warning(TAG, "SYNC: seq=%u ack timeout",
-                                   (unsigned)seq);
-                hw.lock();
-                ackedPending_[seq] = false;
-                retxCount_[seq] = 0;
-                return false;
-            }
-#ifdef ARDUINO
-            portYIELD();
-#endif
-        }
-        hw.lock();
-        return true;
-    };
     if (len + MSG_HDR <= MAX_CHUNK) {
         // Short msg: coalesce hdr+data
         // into one wire frame.
@@ -622,9 +382,9 @@ bool Link::sendMsg(const uint8_t *b, int len, uint8_t *outBaseSeq)
             sendCobsFrame_unlocked(merged, MSG_HDR + len);
             txBytes += len;
             lastTxMs = hw.nowMs();
-            ackedPending_[baseSeq] = true;
-            retxCount_[baseSeq] = 0;
-            if (!waitSyncAck(baseSeq))
+            arq_.onSent(baseSeq, NO_BASE, hw.nowMs());
+            if (!arq_.waitForAck(*this, baseSeq,
+                                 (uint32_t)cfg.syncAckTimeoutMs))
                 ok = false;
         } else {
             // ASYNC: ARQ cache insert +
@@ -640,9 +400,9 @@ bool Link::sendMsg(const uint8_t *b, int len, uint8_t *outBaseSeq)
             sendCobsFrame_unlocked(hdr, MSG_HDR);
             txBytes += 0;
             lastTxMs = hw.nowMs();
-            ackedPending_[baseSeq] = true;
-            retxCount_[baseSeq] = 0;
-            if (!waitSyncAck(baseSeq))
+            arq_.onSent(baseSeq, NO_BASE, hw.nowMs());
+            if (!arq_.waitForAck(*this, baseSeq,
+                                 (uint32_t)cfg.syncAckTimeoutMs))
                 ok = false;
         } else {
             baseSeq = sendCobsFrameAcked_unlocked(hdr, MSG_HDR, NO_BASE);
@@ -659,9 +419,9 @@ bool Link::sendMsg(const uint8_t *b, int len, uint8_t *outBaseSeq)
                 sendCobsFrame_unlocked(b + offset, chunk);
                 txBytes += chunk;
                 lastTxMs = hw.nowMs();
-                ackedPending_[seq] = true;
-                retxCount_[seq] = 0;
-                if (!waitSyncAck(seq))
+                arq_.onSent(seq, NO_BASE, hw.nowMs());
+                if (!arq_.waitForAck(*this, seq,
+                                     (uint32_t)cfg.syncAckTimeoutMs))
                     ok = false;
             } else {
                 sendCobsFrameAcked_unlocked(b + offset, chunk, baseSeq);
@@ -680,8 +440,7 @@ bool Link::sendMsg(const uint8_t *b, int len, uint8_t *outBaseSeq)
     return ok;
 }
 
-int Link::findMsgHeaderResync_unlocked(int max_scan)
-{
+int Link::findMsgHeaderResync_unlocked(int max_scan) {
     int avail = hw.appBufAvailable();
     if (avail < MSG_HDR)
         return -1;
@@ -727,8 +486,7 @@ int Link::findMsgHeaderResync_unlocked(int max_scan)
     return -1;
 }
 
-int Link::recvMsg(uint8_t *out, int max_len)
-{
+int Link::recvMsg(uint8_t *out, int max_len) {
     hw.lock();
     if (rxMsgLen < 0) {
         if (hw.appBufAvailable() < MSG_HDR) {
@@ -775,8 +533,7 @@ int Link::recvMsg(uint8_t *out, int max_len)
     return len;
 }
 
-void Link::getStats(Stats &s) const
-{
+void Link::getStats(Stats &s) const {
     hw.lock();
     s.tx = txBytes;
     s.rx = rxBytes;
@@ -784,50 +541,43 @@ void Link::getStats(Stats &s) const
     s.frameErrs = frameErrs;
     hw.unlock();
 }
-void Link::resetStats()
-{
+void Link::resetStats() {
     hw.lock();
     txBytes = rxBytes = 0;
     hw.unlock();
 }
-void Link::resetErrors()
-{
+void Link::resetErrors() {
     hw.lock();
     discCount = frameErrs = 0;
     errWindowCount_ = 0;
     errWindowStartMs_ = hw.nowMs();
     hw.unlock();
 }
-void Link::resetDiag()
-{
+void Link::resetDiag() {
     hw.lock();
     gaps = stale = lostMsgs = 0;
     hw.unlock();
 }
 
-State Link::getState() const
-{
+State Link::getState() const {
     hw.lock();
     State s = state;
     hw.unlock();
     return s;
 }
-int Link::getErrCount() const
-{
+int Link::getErrCount() const {
     hw.lock();
     int e = errs;
     hw.unlock();
     return e;
 }
-int Link::getCurrentSpdIndex() const
-{
+int Link::getCurrentSpdIndex() const {
     hw.lock();
     int i = spdI;
     hw.unlock();
     return i;
 }
-uint32_t Link::getCurrentBaud() const
-{
+uint32_t Link::getCurrentBaud() const {
     hw.lock();
     uint32_t b = (spdI >= 0 && spdI < (int)cfg.allowedBaudsCount)
         ? cfg.allowedBauds[spdI]
@@ -835,8 +585,7 @@ uint32_t Link::getCurrentBaud() const
     hw.unlock();
     return b;
 }
-void Link::getDiag(Diag &d) const
-{
+void Link::getDiag(Diag &d) const {
     hw.lock();
     d.txSeq = txSeq;
     d.rxSeqSet = rxSeqSet;
@@ -849,8 +598,7 @@ void Link::getDiag(Diag &d) const
     hw.unlock();
 }
 
-void Link::lockOk_unlocked(int idx, const char *tag)
-{
+void Link::lockOk_unlocked(int idx, const char *tag) {
     // Record preferred baud so reset can
     // start next sweep there.
     hw.setSpd(cfg.allowedBauds[idx]);
@@ -871,8 +619,7 @@ void Link::lockOk_unlocked(int idx, const char *tag)
         hw.startTimer(okTickMs());
 }
 
-void Link::onRx(const uint8_t *data, int len)
-{
+void Link::onRx(const uint8_t *data, int len) {
     hw.lock();
     int i = 0;
     if (state == State::SWP)
@@ -955,8 +702,7 @@ void Link::onRx(const uint8_t *data, int len)
         hw.sendBreak();
 }
 
-bool Link::ctrlFrameReady_unlocked(uint8_t cs, uint8_t pl, State cur)
-{
+bool Link::ctrlFrameReady_unlocked(uint8_t cs, uint8_t pl, State cur) {
     if (cur == State::SWP)
         return handleSwp_unlocked(cs, pl);
     if (cur == State::LCK)
@@ -964,8 +710,7 @@ bool Link::ctrlFrameReady_unlocked(uint8_t cs, uint8_t pl, State cur)
     return false;
 }
 
-bool Link::handleSwp_unlocked(uint8_t cobsSeq, uint8_t payload)
-{
+bool Link::handleSwp_unlocked(uint8_t cobsSeq, uint8_t payload) {
     (void)cobsSeq;
     if (!isMaster && payload == REQ_CMD) {
         int best = bestSpd_unlocked();
@@ -978,52 +723,56 @@ bool Link::handleSwp_unlocked(uint8_t cobsSeq, uint8_t payload)
         int lb = (int)(payload - LOCK_CMD_BASE);
         hw.setSpd(cfg.allowedBauds[lb]);
         spdI = lb;
-        sweepPhase_ = SweepPhase::NONE;
-        phase3Baud_ = -1;
-        phase3Acks_ = 0;
+        sweep_.reset();
         lockOk_unlocked(lb,
-                        sweepPhase_ == SweepPhase::PHASE3
+                        sweep_.phase() == SweepPhase::PHASE3
                             ? (isMaster ? "p3-lock" : "p3-pong")
                             : "lock");
         return false;
     }
     if (payload == PONG_CMD && isMaster) {
-        if (sweepPhase_ == SweepPhase::PHASE1) {
-            int lb = spdI;
-            sweepPhase_ = SweepPhase::NONE;
-            phase3Baud_ = -1;
-            phase3Acks_ = 0;
-            hw.setSpd(cfg.allowedBauds[lb]);
-            spdI = lb;
-            sendFrame_unlocked(LOCK_CMD + (uint8_t)lb);
-            lockOk_unlocked(lb, "phase1");
+        if (sweep_.phase() == SweepPhase::PHASE1) {
+            // First PONG at any baud means the link is up; sweep
+            // all bauds (P2) and confirm the best with 2-of-3 (P3)
+            // before locking. Locking on the first contact would
+            // commit to whatever baud the PONG happened to arrive
+            // at — which is not the link's best baud in general.
+            sweep_.enterPhase2(*this);
             return false;
         }
-        if (sweepPhase_ == SweepPhase::PHASE2) {
-            enterPhase3_unlocked(spdI);
+        if (sweep_.phase() == SweepPhase::PHASE2) {
+            sweep_.enterPhase3(*this, spdI);
             return false;
         }
-        if (sweepPhase_ == SweepPhase::PHASE3) {
-            phase3Acks_++;
-            if (phase3Acks_ >= PHASE3_ACKS_NEEDED) {
-                int lb = phase3Baud_;
-                sweepPhase_ = SweepPhase::NONE;
-                phase3Baud_ = -1;
-                phase3Acks_ = 0;
-                hw.setSpd(cfg.allowedBauds[lb]);
-                spdI = lb;
-                sendFrame_unlocked(LOCK_CMD + (uint8_t)lb);
-                lockOk_unlocked(lb, "phase3");
+        if (sweep_.phase() == SweepPhase::PHASE3) {
+            int acks = sweep_.phase3Acks() + 1;
+            int baud = sweep_.phase3Baud();
+            // Mutate in place via reset+reset is awkward;
+            // bump counter directly. Phase state is owned by
+            // sweep_; ack counter increments here.
+            // (No public API for incPhase3Acks yet — but
+            //  LinkSweep's enterPhase3 resets it, and the
+            //  only path that increments is this one. Add
+            //  an accessor.)
+            // We use a tiny helper: bump ack count.
+            // To keep LinkSweep clean, expose incAcks().
+            // (See LinkSweep::incPhase3Acks below.)
+            sweep_.incPhase3Acks();
+            if (acks >= 2) {
+                sweep_.reset();
+                hw.setSpd(cfg.allowedBauds[baud]);
+                spdI = baud;
+                sendFrame_unlocked(LOCK_CMD + (uint8_t)baud);
+                lockOk_unlocked(baud, "phase3");
                 return false;
             }
             sendFrame_unlocked(PING_CMD);
-            int rt = (int)(2.0 *
-                               (5.0 * 10.0 / cfg.allowedBauds[phase3Baud_] *
-                                1000.0) +
-                           0.5);
+            int rt =
+                (int)(2.0 * (5.0 * 10.0 / cfg.allowedBauds[baud] * 1000.0) +
+                      0.5);
             if (rt < 5)
                 rt = 5;
-            int t3 = rt * (PHASE3_ACKS_NEEDED - phase3Acks_ + 1) + 100;
+            int t3 = rt * (2 - acks + 1) + 100;
             if (t3 < 200)
                 t3 = 200;
             hw.startTimer(t3);
@@ -1033,20 +782,19 @@ bool Link::handleSwp_unlocked(uint8_t cobsSeq, uint8_t payload)
     }
     if (payload == PING_CMD && !isMaster) {
         baudSweep.score(spdI);
-        if (sweepPhase_ == SweepPhase::PHASE1) {
+        if (sweep_.phase() == SweepPhase::PHASE1) {
             sendPongAck_unlocked();
-        } else if (sweepPhase_ == SweepPhase::PHASE2) {
-            sweepPhase_ = SweepPhase::PHASE3;
-            phase3Baud_ = spdI;
-            phase3Acks_ = 0;
-            hw.setSpd(cfg.allowedBauds[phase3Baud_]);
-        } else if (sweepPhase_ == SweepPhase::PHASE3) {
-            phase3Acks_++;
-            if (phase3Acks_ >= PHASE3_ACKS_NEEDED) {
-                int lb = phase3Baud_;
-                sweepPhase_ = SweepPhase::NONE;
-                phase3Baud_ = -1;
-                phase3Acks_ = 0;
+        } else if (sweep_.phase() == SweepPhase::PHASE2) {
+            sweep_.setPhase(SweepPhase::PHASE3);
+            int b = spdI;
+            // Manually advance via reset+enterPhase3.
+            sweep_.reset();
+            sweep_.enterPhase3(*this, b);
+        } else if (sweep_.phase() == SweepPhase::PHASE3) {
+            sweep_.incPhase3Acks();
+            if (sweep_.phase3Acks() >= 2) {
+                int lb = sweep_.phase3Baud();
+                sweep_.reset();
                 hw.setSpd(cfg.allowedBauds[lb]);
                 spdI = lb;
                 sendFrame_unlocked(LOCK_CMD + (uint8_t)lb);
@@ -1060,8 +808,7 @@ bool Link::handleSwp_unlocked(uint8_t cobsSeq, uint8_t payload)
     return false;
 }
 
-bool Link::handleLck_unlocked(uint8_t cobsSeq, uint8_t payload)
-{
+bool Link::handleLck_unlocked(uint8_t cobsSeq, uint8_t payload) {
     (void)cobsSeq;
     if (isMaster) {
         if (payload < (int)cfg.allowedBaudsCount)
@@ -1076,8 +823,7 @@ bool Link::handleLck_unlocked(uint8_t cobsSeq, uint8_t payload)
     return false;
 }
 
-void Link::reset_unlocked(bool count)
-{
+void Link::reset_unlocked(bool count) {
     if (count && state == State::OK)
         discCount++;
     changeState_unlocked(State::SWP);
@@ -1097,27 +843,28 @@ void Link::reset_unlocked(bool count)
     errWindowStartMs_ = hw.nowMs();
     errWindowCount_ = 0;
     lastRxMs = hw.nowMs();
-    memset(ackedPending_, 0, sizeof(ackedPending_));
-    memset(retxCount_, 0, sizeof(retxCount_));
-    memset(sentAtMs_, 0, sizeof(sentAtMs_));
-    memset(baseSeq_, 0, sizeof(baseSeq_));
+    arq_.clearAll();
     hasPendingRetx_ = false;
     pendingRetxBase_ = NO_BASE;
-    reorderClear_unlocked();
+    reorder_.clearAll();
     resetSeq_unlocked();
     hw.clearAppBuf();
-    enterPhase1_unlocked();
-    if (linkResetCallback_)
-        linkResetCallback_(arqCtx_);
-    if (arqCacheClearAllCallback_)
-        arqCacheClearAllCallback_(arqCtx_);
+    sweep_.enterPhase1(*this);
+    if (arqCache_)
+        arqCache_->clearAll();
 }
 
-bool Link::onPayload(uint8_t cobsSeq, const uint8_t *b, int n)
-{
+bool Link::onPayload(uint8_t cobsSeq, const uint8_t *b, int n) {
     if (state != State::OK)
         return true;
-    reorderDropExpired_unlocked(hw.nowMs());
+    // Drop expired reorder slots before
+    // classifying this frame. lostMsgs is
+    // incremented here, on the per-slot
+    // expiry, so a retransmit that lands
+    // in time doesn't count as lost.
+    int dropped = reorder_.dropExpired(hw.nowMs(), cfg.reorderHoldMs);
+    if (dropped > 0)
+        lostMsgs += (uint64_t)dropped;
     int diff = 0;
     GapClass cls = classifyGap(cobsSeq, rxSeq, rxSeqSet, &diff);
     if (cls == GapClass::Stale) {
@@ -1155,8 +902,7 @@ bool Link::onPayload(uint8_t cobsSeq, const uint8_t *b, int n)
             sendAckFrame_unlocked(cobsSeq);
             return false;
         }
-        uint8_t exp =
-            (uint8_t)((rxSeq == (uint8_t)COBS_SEQ_MAX) ? 0 : rxSeq + 1);
+        uint8_t exp = reorderExpectedSeq();
         gaps++;
         // Don't bump lostMsgs here. The
         // out-of-order frame is held in
@@ -1172,22 +918,16 @@ bool Link::onPayload(uint8_t cobsSeq, const uint8_t *b, int n)
         Log::log().info(TAG, "GAP seq=%u exp=%u diff=%d", (unsigned)cobsSeq,
                         (unsigned)exp, diff);
         if (n > 0) {
-            uint8_t *slotBuf = (uint8_t *)malloc(n);
-            if (!slotBuf) {
+            bool newlyHeld = reorder_.hold(cobsSeq, b, n, hw.nowMs());
+            if (!newlyHeld) {
+                // hold() returns false on OOM
+                // (malloc failure) too. Drop
+                // the slot and bump lostMsgs.
                 lostMsgs++;
                 rxSeq = cobsSeq;
                 rxSeqSet = true;
                 return false;
             }
-            memcpy(slotBuf, b, n);
-            if (reorder_[cobsSeq].in_use) {
-                free(reorder_[cobsSeq].buf);
-                lostMsgs++;
-            }
-            reorder_[cobsSeq].buf = slotBuf;
-            reorder_[cobsSeq].len = (uint16_t)n;
-            reorder_[cobsSeq].heldAtMs = hw.nowMs();
-            reorder_[cobsSeq].in_use = true;
         } else {
             // Zero-len (keepalive) out of
             // order: don't reserve a reorder
@@ -1217,54 +957,45 @@ bool Link::onPayload(uint8_t cobsSeq, const uint8_t *b, int n)
         return true;
     }
     sendAckFrame_unlocked(cobsSeq);
-    reorderFlushContiguous_unlocked(hw.nowMs());
+    reorder_.flushContiguous(*this, hw.nowMs());
     if (errs > 0)
         errs = 0;
     return false;
 }
 
-bool Link::onAck(uint8_t ackedCobsSeq)
-{
+bool Link::onAck(uint8_t ackedCobsSeq) {
     if (state != State::OK)
         return false;
-    if (!ackedPending_[ackedCobsSeq])
+    if (!arq_.isPending(ackedCobsSeq))
         return false;
-    ackedPending_[ackedCobsSeq] = false;
-    retxCount_[ackedCobsSeq] = 0;
-    baseSeq_[ackedCobsSeq] = 0;
-    if (arqAckCallback_)
-        arqAckCallback_(ackedCobsSeq, arqCtx_);
+    arq_.onAcked(ackedCobsSeq);
+    if (arqCache_)
+        arqCache_->freeBySeq(ackedCobsSeq);
     return false;
 }
 
-bool Link::onNak(uint8_t missingCobsSeq)
-{
+bool Link::onNak(uint8_t missingCobsSeq) {
     if (state != State::OK)
         return false;
-    if (!ackedPending_[missingCobsSeq])
+    if (!arq_.isPending(missingCobsSeq))
         return false;
-    sentAtMs_[missingCobsSeq] = hw.nowMs();
+    arq_.onNaked(missingCobsSeq, hw.nowMs());
     pendingRetxBase_ = missingCobsSeq;
     hasPendingRetx_ = true;
     retxNeeded_ = true;
     return false;
 }
 
-bool Link::onFrameError()
-{
-    return err_unlocked();
-}
+bool Link::onFrameError() { return err_unlocked(); }
 
-void Link::onBreak()
-{
+void Link::onBreak() {
     hw.lock();
     Log::log().info(TAG, "BREAK -> resweep");
     reset_unlocked(true);
     hw.unlock();
 }
 
-void Link::onTimer()
-{
+void Link::onTimer() {
     hw.lock();
     State s = state;
     int cur = spdI;
@@ -1280,28 +1011,42 @@ void Link::onTimer()
         return;
     }
     hw.unlock();
-    if (hasPendingRetx_ && arqRetxCallback_) {
-        // true = link should reset;
-        // false = retx ok or no-op.
+    if (hasPendingRetx_ && arqCache_) {
+        // Cache holds the payload; link drives
+        // the resend. A cache miss is a no-op
+        // (the ARQ bit will time out on its own).
         uint8_t base = pendingRetxBase_;
         hasPendingRetx_ = false;
-        if (arqRetxCallback_(base, arqCtx_)) {
-            hw.lock();
-            reset_unlocked(true);
-            hw.unlock();
-            hw.sendBreak();
+        const uint8_t *buf = nullptr;
+        int len = 0;
+        if (!arqCache_->slotInUse(base)) {
+            Log::log().info(TAG,
+                            "ARQ retx cobsSeq=%u cache miss (chunk already "
+                            "delivered); pending bit left to time out",
+                            (unsigned)base);
+        } else if (arqCache_->peekForRetx(base, &buf, &len)) {
+            Log::log().warning(TAG, "ARQ retx cobsSeq=%u (%d bytes) — verbatim",
+                               (unsigned)base, len);
+            resendCobsFrame_unlocked(base, buf, len);
+        } else {
+            Log::log().info(TAG,
+                            "ARQ retx cobsSeq=%u (keepalive, no pool buf) — "
+                            "verbatim 0 bytes",
+                            (unsigned)base);
+            resendCobsFrame_unlocked(base, nullptr, 0);
         }
     }
 }
 
-void Link::onTimerOk_unlocked()
-{
+void Link::onTimerOk_unlocked() {
     if (cfg.idleTimeoutMs <= 0)
         return;
     uint32_t now = hw.nowMs();
     if (linkPaused_)
         return;
-    reorderDropExpired_unlocked(now);
+    int dropped = reorder_.dropExpired(now, cfg.reorderHoldMs);
+    if (dropped > 0)
+        lostMsgs += (uint64_t)dropped;
     {
         uint32_t rxAge = now - lastRxMs;
         uint32_t txAge = now - lastTxMs;
@@ -1358,29 +1103,27 @@ void Link::onTimerOk_unlocked()
     // so any ackedPending_[] bits left over
     // from a timed-out SYNC wait are stale.
     // Running the retransmit loop here would
-    // call arqRetxCallback_ for slots whose
+    // call arqCache_->peekForRetx() for slots whose
     // pool buffer was never inserted, i.e.
     // spurious retransmits.
     if (cfg.mode != AutoLinkConfig::Mode::SYNC) {
         for (int s = 0; s < 256; s++) {
-            if (!ackedPending_[s])
+            if (!arq_.isPending(s))
                 continue;
-            uint32_t age = now - sentAtMs_[s];
-            ArqAction a =
-                decideArqSlot(age, retxCount_[s], ACK_RTO_MS, MAX_RETX);
-            if (a == ArqAction::Hold)
+            LinkArq::Action a = arq_.decideSlot(
+                (uint8_t)s, now, (uint32_t)cfg.syncAckTimeoutMs, cfg.maxRetx);
+            if (a == LinkArq::Action::Hold)
                 continue;
-            if (a == ArqAction::Drop) {
-                Log::log().error(TAG, "seq=%u MAX_RETX -> drop", (unsigned)s);
+            if (a == LinkArq::Action::Drop) {
+                Log::log().error(TAG, "seq=%u maxRetx -> drop", (unsigned)s);
                 reset_unlocked(true);
                 hw.unlock();
                 hw.sendBreak();
                 return;
             }
-            retxCount_[s]++;
-            sentAtMs_[s] = now;
-            if (arqRetxCallback_) {
-                pendingRetxBase_ = s;
+            arq_.applyRetx((uint8_t)s, now);
+            if (arqCache_) {
+                pendingRetxBase_ = (uint8_t)s;
                 hasPendingRetx_ = true;
             }
             retxNeeded_ = true;
@@ -1390,77 +1133,56 @@ void Link::onTimerOk_unlocked()
     hw.startTimer(okTickMs());
 }
 
-int Link::pendingAcks() const
-{
-    int n = 0;
-    for (int i = 0; i < 256; i++)
-        if (ackedPending_[i])
-            n++;
+int Link::pendingAcks() const {
+    hw.lock();
+    int n = arq_.pendingCount();
+    hw.unlock();
     return n;
 }
-bool Link::isAcked(uint8_t cobsSeq) const
-{
-    return !ackedPending_[cobsSeq];
+bool Link::isAcked(uint8_t cobsSeq) const { return arq_.isAcked(cobsSeq); }
+
+int Link::popRetransmitSlot() {
+    return arq_.popRetransmitSlot(hw.nowMs(), (uint32_t)cfg.syncAckTimeoutMs);
 }
 
-int Link::popRetransmitSlot()
-{
-    uint32_t now = hw.nowMs();
-    for (int s = 0; s < 256; s++) {
-        if (!ackedPending_[s])
-            continue;
-        if (now - sentAtMs_[s] < ACK_RTO_MS)
-            continue;
-        uint8_t seq = (uint8_t)s;
-        ackedPending_[seq] = false;
-        retxCount_[seq]++;
-        sentAtMs_[seq] = now;
-        return seq;
-    }
-    return -1;
-}
-
-void Link::onTimerSwp_unlocked()
-{
+void Link::onTimerSwp_unlocked() {
     if (isMaster) {
-        if (sweepPhase_ == SweepPhase::PHASE1) {
+        if (sweep_.phase() == SweepPhase::PHASE1) {
             sendFrame_unlocked(PING_CMD);
             pingSample++;
             hw.startTimer(phase1ArmMs());
             return;
         }
-        if (sweepPhase_ == SweepPhase::PHASE2) {
+        if (sweep_.phase() == SweepPhase::PHASE2) {
             spdI++;
             if (spdI >= (int)cfg.allowedBaudsCount) {
-                sweepPhase_ = SweepPhase::NONE;
+                sweep_.reset();
                 lockOk_unlocked(cfg.allowedBaudsCount - 1, "p2-fallback");
                 return;
             }
             hw.setSpd(cfg.allowedBauds[spdI]);
             sendFrame_unlocked(PING_CMD);
-            hw.startTimer(dwells_.phase2[spdI]);
+            hw.startTimer(sweep_.dwells().phase2[spdI]);
             return;
         }
-        if (sweepPhase_ == SweepPhase::PHASE3) {
-            int next = phase3Baud_ + 1;
-            phase3Baud_ = -1;
-            phase3Acks_ = 0;
+        if (sweep_.phase() == SweepPhase::PHASE3) {
+            int next = sweep_.phase3Baud() + 1;
+            sweep_.reset();
             if (next >= (int)cfg.allowedBaudsCount) {
                 int lb = cfg.allowedBaudsCount - 1;
-                sweepPhase_ = SweepPhase::NONE;
                 spdI = lb;
                 hw.setSpd(cfg.allowedBauds[lb]);
                 lockOk_unlocked(lb, "p3-fallback");
                 return;
             }
-            sweepPhase_ = SweepPhase::PHASE2;
+            sweep_.setPhase(SweepPhase::PHASE2);
             spdI = next;
             hw.setSpd(cfg.allowedBauds[spdI]);
             sendFrame_unlocked(PING_CMD);
-            hw.startTimer(dwells_.phase2[spdI]);
+            hw.startTimer(sweep_.dwells().phase2[spdI]);
             return;
         }
-        enterPhase1_unlocked();
+        sweep_.enterPhase1(*this);
         return;
     }
     if (emptySweeps == 0 || emptySweeps % 5 == 0) {
@@ -1468,7 +1190,7 @@ void Link::onTimerSwp_unlocked()
                         "pong SWP baud[%d]=%lu "
                         "phase=%d",
                         spdI, (unsigned long)cfg.allowedBauds[spdI],
-                        (int)sweepPhase_);
+                        (int)sweep_.phase());
     }
     emptySweeps++;
     if (emptySweeps > 10) {
@@ -1483,26 +1205,25 @@ void Link::onTimerSwp_unlocked()
         }
         emptySweeps = 5;
     }
-    if (sweepPhase_ == SweepPhase::PHASE1) {
+    if (sweep_.phase() == SweepPhase::PHASE1) {
         hw.startTimer(phase1ArmMs());
         return;
     }
-    if (sweepPhase_ == SweepPhase::PHASE2) {
-        int dwell = dwells_.phase2Slave[spdI];
+    if (sweep_.phase() == SweepPhase::PHASE2) {
+        int dwell = sweep_.dwells().phase2Slave[spdI];
         spdI--;
         if (spdI < 0) {
-            enterPhase1_unlocked();
+            sweep_.enterPhase1(*this);
             return;
         }
         hw.setSpd(cfg.allowedBauds[spdI]);
         hw.startTimer(dwell);
         return;
     }
-    hw.startTimer(dwells_.phase2[spdI]);
+    hw.startTimer(sweep_.dwells().phase2[spdI]);
 }
 
-void Link::onTimerLck_unlocked()
-{
+void Link::onTimerLck_unlocked() {
     int max = (int)cfg.allowedBaudsCount * 2;
     lckRetries++;
     if (decideLckTick(lckRetries, max) == LckAction::SendReq) {
@@ -1515,8 +1236,7 @@ void Link::onTimerLck_unlocked()
     }
 }
 
-bool Link::test_sendMsgBegin(const uint8_t *b, int len)
-{
+bool Link::test_sendMsgBegin(const uint8_t *b, int len) {
     if (cfg.mode != AutoLinkConfig::Mode::SYNC)
         return false;
     if (len < 0 || (size_t)len > cfg.maxMsg)
@@ -1554,24 +1274,16 @@ bool Link::test_sendMsgBegin(const uint8_t *b, int len)
             offset += chunk;
         }
     }
-    ackedPending_[seq] = true;
-    retxCount_[seq] = 0;
+    arq_.onSent(seq, NO_BASE, hw.nowMs());
     hw.unlock();
     return true;
 }
 
-bool Link::test_sendMsgStillWaiting()
-{
+bool Link::test_sendMsgStillWaiting() {
     if (cfg.mode != AutoLinkConfig::Mode::SYNC)
         return false;
     hw.lock();
-    bool any = false;
-    for (int i = 0; i < 256; i++) {
-        if (ackedPending_[i]) {
-            any = true;
-            break;
-        }
-    }
+    bool any = arq_.pendingCount() > 0;
     hw.unlock();
     return any;
 }
