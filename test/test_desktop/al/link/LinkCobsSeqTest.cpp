@@ -1,6 +1,4 @@
-// cobsSeq wraparound + gap classification math.
-
-
+// cobsSeq wraparound + gap classification.
 #ifndef ARDUINO
 
 #    include <iostream>
@@ -12,20 +10,16 @@
 
 using namespace autolink;
 
-static std::vector<uint8_t>
-cobsFrame(uint8_t cobsSeq, int payloadLen = 16)
+static std::vector<uint8_t> cobsFrame(uint8_t cobsSeq, int payloadLen = 16)
 {
     std::vector<uint8_t> raw;
     raw.push_back(cobsSeq);
     for (int i = 0; i < payloadLen; i++)
         raw.push_back((uint8_t)(0xA0 + i));
-    raw.push_back(
-        UtilCrc::crc8(raw.data(), (int)raw.size()));
+    raw.push_back(UtilCrc::crc8(raw.data(), (int)raw.size()));
 
-    std::vector<uint8_t> enc(
-        UtilCobs::encodedMax(raw.size()) + 2);
-    size_t n = UtilCobs::encode(raw.data(), raw.size(),
-                                enc.data() + 1);
+    std::vector<uint8_t> enc(UtilCobs::encodedMax(raw.size()) + 2);
+    size_t n = UtilCobs::encode(raw.data(), raw.size(), enc.data() + 1);
     enc[0] = 0x00;
     enc[1 + n] = 0x00;
     enc.resize(n + 2);
@@ -35,8 +29,7 @@ cobsFrame(uint8_t cobsSeq, int payloadLen = 16)
 void test_first_frame_accepted()
 {
     AutoLinkConfig cfg;
-    std::cout << "\n=== Test: First Reliable Frame "
-                 "Sets cobsSeq ==="
+    std::cout << "\n=== Test: First Reliable Frame Sets cobsSeq ==="
               << std::endl;
     MockHal mHal, sHal;
     Link a(mHal, true, cfg);
@@ -58,8 +51,7 @@ void test_first_frame_accepted()
 void test_consecutive_frames_advance()
 {
     AutoLinkConfig cfg;
-    std::cout << "\n=== Test: Consecutive Frames "
-                 "Advance cobsSeq ==="
+    std::cout << "\n=== Test: Consecutive Frames Advance cobsSeq ==="
               << std::endl;
     MockHal mHal, sHal;
     Link a(mHal, true, cfg);
@@ -81,22 +73,16 @@ void test_consecutive_frames_advance()
 void test_gap_holds_frame_in_reorder_buffer()
 {
     AutoLinkConfig cfg;
-    std::cout << "\n=== Test: Forward Gap Holds Frame "
-                 "in Reorder Buffer ==="
+    std::cout << "\n=== Test: Forward Gap Holds Frame in Reorder Buffer ==="
               << std::endl;
     MockHal mHal, sHal;
     Link a(mHal, true, cfg);
     Link b(sHal, false, cfg);
 
-
-    b.onRx(cobsFrame(0).data(),
-           (int)cobsFrame(0).size());
-    b.onRx(cobsFrame(1).data(),
-           (int)cobsFrame(1).size());
+    b.onRx(cobsFrame(0).data(), (int)cobsFrame(0).size());
+    b.onRx(cobsFrame(1).data(), (int)cobsFrame(1).size());
     size_t availBefore = (size_t)b.available();
-    b.onRx(cobsFrame(3).data(),
-           (int)cobsFrame(3).size());
-
+    b.onRx(cobsFrame(3).data(), (int)cobsFrame(3).size());
 
     Diag d;
     b.getDiag(d);
@@ -111,23 +97,18 @@ void test_gap_holds_frame_in_reorder_buffer()
 void test_gap_then_retransmit_flushes_in_order()
 {
     AutoLinkConfig cfg;
-    std::cout << "\n=== Test: Held Gap Frame Flushes "
-                 "When Missing Seq Arrives ==="
-              << std::endl;
+    std::cout
+        << "\n=== Test: Held Gap Frame Flushes When Missing Seq Arrives ==="
+        << std::endl;
     MockHal mHal, sHal;
     Link a(mHal, true, cfg);
     Link b(sHal, false, cfg);
 
-    b.onRx(cobsFrame(0).data(),
-           (int)cobsFrame(0).size());
-    b.onRx(cobsFrame(1).data(),
-           (int)cobsFrame(1).size());
-    b.onRx(cobsFrame(3).data(),
-           (int)cobsFrame(3).size());
+    b.onRx(cobsFrame(0).data(), (int)cobsFrame(0).size());
+    b.onRx(cobsFrame(1).data(), (int)cobsFrame(1).size());
+    b.onRx(cobsFrame(3).data(), (int)cobsFrame(3).size());
 
-
-    b.onRx(cobsFrame(2).data(),
-           (int)cobsFrame(2).size());
+    b.onRx(cobsFrame(2).data(), (int)cobsFrame(2).size());
 
     Diag d;
     b.getDiag(d);
@@ -141,33 +122,24 @@ void test_gap_then_retransmit_flushes_in_order()
 void test_gap_then_late_duplicate_is_stale()
 {
     AutoLinkConfig cfg;
-    std::cout << "\n=== Test: Late Frame After Gap is "
-                 "STALE (not delivered) ==="
+    std::cout << "\n=== Test: Late Frame After Gap is STALE (not delivered) ==="
               << std::endl;
     MockHal mHal, sHal;
     Link a(mHal, true, cfg);
     Link b(sHal, false, cfg);
 
-    b.onRx(cobsFrame(0).data(),
-           (int)cobsFrame(0).size());
-    b.onRx(cobsFrame(1).data(),
-           (int)cobsFrame(1).size());
-    b.onRx(cobsFrame(3).data(),
-           (int)cobsFrame(3).size());
+    b.onRx(cobsFrame(0).data(), (int)cobsFrame(0).size());
+    b.onRx(cobsFrame(1).data(), (int)cobsFrame(1).size());
+    b.onRx(cobsFrame(3).data(), (int)cobsFrame(3).size());
 
+    cfg.reorderHoldMs = 0;
 
-    cfg.arqReorderHoldMs = 0;
-
-
-    b.onRx(cobsFrame(2).data(),
-           (int)cobsFrame(2).size());
-
+    b.onRx(cobsFrame(2).data(), (int)cobsFrame(2).size());
 
     Diag d;
     b.getDiag(d);
     assert(d.gaps == 1);
     assert(d.rxSeq == 3);
-
 
     (void)d.stale;
     std::cout << "PASS" << std::endl;
@@ -176,36 +148,29 @@ void test_gap_then_late_duplicate_is_stale()
 void test_single_corruption_does_not_cascade()
 {
     AutoLinkConfig cfg;
-    std::cout << "\n=== Test: Single Corruption Does "
-                 "Not Cascade (0 regression) ==="
-              << std::endl;
+    std::cout
+        << "\n=== Test: Single Corruption Does Not Cascade (0 regression) ==="
+        << std::endl;
     MockHal mHal, sHal;
     Link a(mHal, true, cfg);
     Link b(sHal, false, cfg);
 
-
-    cfg.arqReorderHoldMs = 10000;
-
+    cfg.reorderHoldMs = 10000;
 
     for (int s = 0; s <= 41; s++)
-        b.onRx(cobsFrame(s).data(),
-               (int)cobsFrame(s).size());
+        b.onRx(cobsFrame(s).data(), (int)cobsFrame(s).size());
 
     for (int s = 43; s <= 143; s++)
-        b.onRx(cobsFrame(s).data(),
-               (int)cobsFrame(s).size());
+        b.onRx(cobsFrame(s).data(), (int)cobsFrame(s).size());
 
     Diag d;
     b.getDiag(d);
-
 
     assert(d.lostMsgs == 0);
     assert(d.gaps >= 1);
     assert(d.stale == 0);
 
-
     assert(d.gaps + d.stale <= 102);
-
 
     assert(d.rxSeq == 41);
 
@@ -215,19 +180,14 @@ void test_single_corruption_does_not_cascade()
 void test_duplicate_is_stale()
 {
     AutoLinkConfig cfg;
-    std::cout
-        << "\n=== Test: Duplicate cobsSeq Is Stale ==="
-        << std::endl;
+    std::cout << "\n=== Test: Duplicate cobsSeq Is Stale ===" << std::endl;
     MockHal mHal, sHal;
     Link a(mHal, true, cfg);
     Link b(sHal, false, cfg);
 
-    b.onRx(cobsFrame(0).data(),
-           (int)cobsFrame(0).size());
-    b.onRx(cobsFrame(1).data(),
-           (int)cobsFrame(1).size());
-    b.onRx(cobsFrame(0).data(),
-           (int)cobsFrame(0).size());
+    b.onRx(cobsFrame(0).data(), (int)cobsFrame(0).size());
+    b.onRx(cobsFrame(1).data(), (int)cobsFrame(1).size());
+    b.onRx(cobsFrame(0).data(), (int)cobsFrame(0).size());
     Diag d;
     b.getDiag(d);
     assert(d.stale == 1);
@@ -239,20 +199,15 @@ void test_duplicate_is_stale()
 void test_wraparound_continuity()
 {
     AutoLinkConfig cfg;
-    std::cout << "\n=== Test: cobsSeq Wraparound Is "
-                 "Continuous ==="
+    std::cout << "\n=== Test: cobsSeq Wraparound Is Continuous ==="
               << std::endl;
     MockHal mHal, sHal;
     Link a(mHal, true, cfg);
     Link b(sHal, false, cfg);
 
-
-    b.onRx(cobsFrame(252).data(),
-           (int)cobsFrame(252).size());
-    b.onRx(cobsFrame(253).data(),
-           (int)cobsFrame(253).size());
-    b.onRx(cobsFrame(0).data(),
-           (int)cobsFrame(0).size());
+    b.onRx(cobsFrame(252).data(), (int)cobsFrame(252).size());
+    b.onRx(cobsFrame(253).data(), (int)cobsFrame(253).size());
+    b.onRx(cobsFrame(0).data(), (int)cobsFrame(0).size());
 
     Diag d;
     b.getDiag(d);
@@ -265,23 +220,16 @@ void test_wraparound_continuity()
 void test_wraparound_then_gap()
 {
     AutoLinkConfig cfg;
-    std::cout << "\n=== Test: Post-Wraparound Gap "
-                 "Holds Frame ==="
-              << std::endl;
+    std::cout << "\n=== Test: Post-Wraparound Gap Holds Frame ===" << std::endl;
     MockHal mHal, sHal;
     Link a(mHal, true, cfg);
     Link b(sHal, false, cfg);
 
+    b.onRx(cobsFrame(253).data(), (int)cobsFrame(253).size());
 
-    b.onRx(cobsFrame(253).data(),
-           (int)cobsFrame(253).size());
+    b.onRx(cobsFrame(0).data(), (int)cobsFrame(0).size());
 
-    b.onRx(cobsFrame(0).data(),
-           (int)cobsFrame(0).size());
-
-    b.onRx(cobsFrame(2).data(),
-           (int)cobsFrame(2).size());
-
+    b.onRx(cobsFrame(2).data(), (int)cobsFrame(2).size());
 
     Diag d;
     b.getDiag(d);
@@ -293,8 +241,7 @@ void test_wraparound_then_gap()
 
 void test_sender_cobsSeq_increments()
 {
-    std::cout << "\n=== Test: Sender cobsSeq "
-                 "Increments Per Data Frame ==="
+    std::cout << "\n=== Test: Sender cobsSeq Increments Per Data Frame ==="
               << std::endl;
     MockHal mHal, sHal;
     AutoLinkConfig cfg;
@@ -322,14 +269,12 @@ void test_sender_cobsSeq_increments()
     ping.getDiag(d);
     assert(d.txSeq == 2);
 
-
     std::cout << "PASS" << std::endl;
 }
 
 void test_drop_resets_cobsSeq()
 {
-    std::cout << "\n=== Test: dropLink() Resets "
-                 "cobsSeq on Both Sides ==="
+    std::cout << "\n=== Test: dropLink() Resets cobsSeq on Both Sides ==="
               << std::endl;
     MockHal mHal, sHal;
     mHal.peer = &sHal;
@@ -344,7 +289,6 @@ void test_drop_resets_cobsSeq()
     Link pong(sHal, false, cfg);
     negotiate_to_ok(ping, pong, mHal, sHal);
 
-
     uint8_t b = 0xAA;
     for (int i = 0; i < 5; i++)
         ping.write(&b, 1);
@@ -354,7 +298,6 @@ void test_drop_resets_cobsSeq()
     assert(d.txSeq >= 5);
     pong.getDiag(d);
     assert(d.rxSeq >= 0);
-
 
     ping.dropLink();
     pong.dropLink();
@@ -371,13 +314,11 @@ void test_drop_resets_cobsSeq()
 void test_wire_byte_shift_caught_at_cobsSeq()
 {
     AutoLinkConfig cfg;
-    std::cout << "\n=== Test: Wire-Byte Shift "
-                 "Accounted, Link Stays in OK ==="
+    std::cout << "\n=== Test: Wire-Byte Shift Accounted, Link Stays in OK ==="
               << std::endl;
     MockHal mHal, sHal;
     Link a(mHal, true, cfg);
     Link b(sHal, false, cfg);
-
 
     auto f0 = cobsFrame(0);
     auto f1 = cobsFrame(1);
@@ -388,13 +329,10 @@ void test_wire_byte_shift_caught_at_cobsSeq()
     Diag d;
     b.getDiag(d);
 
-    bool accounted = (d.gaps > 0) || (d.stale > 0) ||
-        (b.getErrCount() > 0);
+    bool accounted = (d.gaps > 0) || (d.stale > 0) || (b.getErrCount() > 0);
     assert(accounted);
 
-
     assert(d.rxSeqSet);
-
 
     assert(d.gaps + d.stale + b.getErrCount() <= 2);
     std::cout << "PASS" << std::endl;
@@ -403,8 +341,7 @@ void test_wire_byte_shift_caught_at_cobsSeq()
 void test_gap_stale_counters_accessible()
 {
     AutoLinkConfig cfg;
-    std::cout << "\n=== Test: Gap/Stale Counters Are "
-                 "Public API ==="
+    std::cout << "\n=== Test: Gap/Stale Counters Are Public API ==="
               << std::endl;
     MockHal mHal, sHal;
     Link a(mHal, true, cfg);
@@ -414,12 +351,9 @@ void test_gap_stale_counters_accessible()
     b.getDiag(d);
     assert(d.gaps == 0);
     assert(d.stale == 0);
-    b.onRx(cobsFrame(0).data(),
-           (int)cobsFrame(0).size());
-    b.onRx(cobsFrame(2).data(),
-           (int)cobsFrame(2).size());
-    b.onRx(cobsFrame(0).data(),
-           (int)cobsFrame(0).size());
+    b.onRx(cobsFrame(0).data(), (int)cobsFrame(0).size());
+    b.onRx(cobsFrame(2).data(), (int)cobsFrame(2).size());
+    b.onRx(cobsFrame(0).data(), (int)cobsFrame(0).size());
     b.getDiag(d);
     assert(d.gaps == 1);
     assert(d.stale == 1);
@@ -429,8 +363,7 @@ void test_gap_stale_counters_accessible()
 void test_app_buffer_full_does_not_drop_link()
 {
     AutoLinkConfig cfg;
-    std::cout << "\n=== Test: App Buffer Full Doesn't "
-                 "Trip errThreshold ==="
+    std::cout << "\n=== Test: App Buffer Full Doesn't Trip errThreshold ==="
               << std::endl;
     MockHal mHal, sHal;
     cfg.streamBufferSize = 256;
@@ -440,7 +373,6 @@ void test_app_buffer_full_does_not_drop_link()
 
     sHal.appBufCap = 16;
 
-
     negotiate_to_ok(a, b, mHal, sHal);
     assert(b.getState() == State::OK);
 
@@ -449,17 +381,13 @@ void test_app_buffer_full_does_not_drop_link()
     b.getDiag(d);
     uint64_t gapsBefore = d.gaps;
 
-
     for (int seq = 0; seq < 30; seq++) {
-        b.onRx(cobsFrame(seq).data(),
-               (int)cobsFrame(seq).size());
+        b.onRx(cobsFrame(seq).data(), (int)cobsFrame(seq).size());
     }
-
 
     assert(b.getState() == State::OK);
 
     assert(b.getErrCount() == errsBefore);
-
 
     b.getDiag(d);
     assert(d.gaps == gapsBefore);
@@ -469,50 +397,37 @@ void test_app_buffer_full_does_not_drop_link()
 void test_lost_msgs_burst_vs_single()
 {
     AutoLinkConfig cfg;
-    std::cout << "\n=== Test: lostMsgs Counts Held "
-                 "Frames on Staleness Expiry ==="
-              << std::endl;
+    std::cout
+        << "\n=== Test: lostMsgs Counts Held Frames on Staleness Expiry ==="
+        << std::endl;
     MockHal mHal, sHal;
     Link a(mHal, true, cfg);
     Link b(sHal, false, cfg);
 
+    cfg.reorderHoldMs = 10000;
 
-    cfg.arqReorderHoldMs = 10000;
-
-
-    b.onRx(cobsFrame(0).data(),
-           (int)cobsFrame(0).size());
-    b.onRx(cobsFrame(4).data(),
-           (int)cobsFrame(4).size());
+    b.onRx(cobsFrame(0).data(), (int)cobsFrame(0).size());
+    b.onRx(cobsFrame(4).data(), (int)cobsFrame(4).size());
     Diag d;
     b.getDiag(d);
     assert(d.gaps == 1);
     assert(d.lostMsgs == 0);
 
-
-    b.onRx(cobsFrame(5).data(),
-           (int)cobsFrame(5).size());
-    b.onRx(cobsFrame(7).data(),
-           (int)cobsFrame(7).size());
-    b.onRx(cobsFrame(9).data(),
-           (int)cobsFrame(9).size());
+    b.onRx(cobsFrame(5).data(), (int)cobsFrame(5).size());
+    b.onRx(cobsFrame(7).data(), (int)cobsFrame(7).size());
+    b.onRx(cobsFrame(9).data(), (int)cobsFrame(9).size());
     b.getDiag(d);
     assert(d.gaps == 4);
     assert(d.lostMsgs == 0);
 
-
     {
         AutoLinkConfig cfg2 = cfg;
-        cfg2.arqReorderHoldMs = 0;
+        cfg2.reorderHoldMs = 0;
         Link c(sHal, false, cfg2);
-        c.onRx(cobsFrame(0).data(),
-               (int)cobsFrame(0).size());
-        c.onRx(cobsFrame(4).data(),
-               (int)cobsFrame(4).size());
-        c.onRx(cobsFrame(5).data(),
-               (int)cobsFrame(5).size());
-        c.onRx(cobsFrame(7).data(),
-               (int)cobsFrame(7).size());
+        c.onRx(cobsFrame(0).data(), (int)cobsFrame(0).size());
+        c.onRx(cobsFrame(4).data(), (int)cobsFrame(4).size());
+        c.onRx(cobsFrame(5).data(), (int)cobsFrame(5).size());
+        c.onRx(cobsFrame(7).data(), (int)cobsFrame(7).size());
         Diag d2;
         c.getDiag(d2);
         assert(d2.gaps == 3);
@@ -520,8 +435,7 @@ void test_lost_msgs_burst_vs_single()
     }
 
     b.dropLink();
-    b.onRx(cobsFrame(0).data(),
-           (int)cobsFrame(0).size());
+    b.onRx(cobsFrame(0).data(), (int)cobsFrame(0).size());
     b.getDiag(d);
     assert(d.lostMsgs == 0);
     assert(d.gaps == 4);
@@ -530,8 +444,7 @@ void test_lost_msgs_burst_vs_single()
 
 int main()
 {
-    std::cout << "=== Running ALinkCobsSeq Tests "
-                 "(hold-on-gap) ==="
+    std::cout << "=== Running ALinkCobsSeq Tests (hold-on-gap) ==="
               << std::endl;
     test_first_frame_accepted();
     test_consecutive_frames_advance();
@@ -548,8 +461,7 @@ int main()
     test_gap_stale_counters_accessible();
     test_app_buffer_full_does_not_drop_link();
     test_lost_msgs_burst_vs_single();
-    std::cout << "\n=== ALinkCobsSeq Tests Completed "
-                 "Successfully ==="
+    std::cout << "\n=== ALinkCobsSeq Tests Completed Successfully ==="
               << std::endl;
     return 0;
 }
