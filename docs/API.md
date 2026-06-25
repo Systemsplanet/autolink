@@ -22,7 +22,7 @@ Most sketches never need anything below this line.
 
 ### Raw Byte Streaming
 
-If you don't need message boundaries, `AutoLink` is still a drop-in `Stream`. Set `cfg.reliableMode = false` for an unframed pass-through, or leave it on for COBS+CRC-8 framed bytes:
+If you don't need message boundaries, `AutoLink` exposes a byte-stream API (`available` / `read` / `peek` / `write` / `flush`) shaped after Arduino's `Stream` — but it does NOT inherit from `Stream`. Set `cfg.reliableMode = false` for an unframed pass-through, or leave it on for COBS+CRC-8 framed bytes:
 
 ```cpp
 const char* str = "Hello Pong!";
