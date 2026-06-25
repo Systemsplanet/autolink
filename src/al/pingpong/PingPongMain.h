@@ -8,10 +8,8 @@
 #    include "al/pingpong/Pong.h"
 #    include <variant>
 
-namespace autolink
-{
-class PingPong
-{
+namespace autolink {
+class PingPong {
 public:
     enum Role { PING, PONG };
 
@@ -26,15 +24,12 @@ public:
                                             password, webPort }
                       : std::variant<std::monostate, Ping, Pong>{
                             std::in_place_index<2>, debugBaud, uartNum, rxPin,
-                            txPin, ssid, password, webPort })
-    {
-    }
+                            txPin, ssid, password, webPort }) {}
 
     PingPong(const PingPong &) = delete;
     PingPong &operator=(const PingPong &) = delete;
 
-    void setup()
-    {
+    void setup() {
         std::visit(
             [](auto &r) {
                 if constexpr (!std::is_same_v<std::decay_t<decltype(r)>,
@@ -44,8 +39,7 @@ public:
             active_);
     }
 
-    void loop()
-    {
+    void loop() {
         std::visit(
             [](auto &r) {
                 if constexpr (!std::is_same_v<std::decay_t<decltype(r)>,
@@ -57,13 +51,11 @@ public:
 
     Role role() const { return role_id_; }
 
-    void setFillMode(Ping::FillMode m)
-    {
+    void setFillMode(Ping::FillMode m) {
         if (auto *p = std::get_if<Ping>(&active_))
             p->setFillMode(m);
     }
-    Ping::FillMode fillMode() const
-    {
+    Ping::FillMode fillMode() const {
         if (auto *p = std::get_if<Ping>(&active_))
             return p->fillMode();
         return Ping::FillMode::SEQUENTIAL;
