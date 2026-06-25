@@ -2,8 +2,7 @@
 #pragma once
 #include "AutoLink.h"
 
-namespace autolink
-{
+namespace autolink {
 static const char DASHBOARD_HTML[] =
     R"HTML(<!DOCTYPE html>
 <html lang="en">
@@ -82,7 +81,20 @@ main{padding:14px;max-width:540px;margin:0 auto}
     <label><input type="radio" name="mode" value="seq" id="modeSeq"><span>Sequential</span></label>
     <label><input type="radio" name="mode" value="rand" id="modeRand"><span>Random</span></label>
   </div>
-  <button class="btn pause ping-only" id="topPbtn" onclick="toggleMsgPause()">&#9654; Start</button>
+  <div class="ping-only" id="startGroup" style="display:flex;flex-direction:column;align-items:stretch;margin-right:8px">
+    <button class="btn pause ping-only" id="topPbtn" onclick="toggleMsgPause()">&#9654; Start</button>
+    <label class="delay-lbl ping-only" for="delayMs" style="font-size:11px;color:#6b7280;margin-top:4px;text-align:center">delay ms</label>
+    <select class="ping-only" id="delayMs" onchange="onDelayChange(this.value)" style="margin-top:2px;padding:2px 4px;font-size:12px;border-radius:4px;border:1px solid #d1d5db;background:#fff">
+      <option value="0">0</option>
+      <option value="10">10</option>
+      <option value="50">50</option>
+      <option value="100">100</option>
+      <option value="500">500</option>
+      <option value="1000">1000</option>
+      <option value="5000">5000</option>
+      <option value="10000">10000</option>
+    </select>
+  </div>
   <span class="pill swp" id="pill">SWP</span>
 </header>
 <main>
@@ -313,9 +325,31 @@ function clearLog(){
   updateFillBar();
   console.log('[autolink] button: clear log (cleared '+n+' entries)');
 }
+// Walk the live log's child nodes (each line
+// is a <div>) and join with \n + trailing
+// newline so Copy and Save emit unix-line-
+// delimited plain text. textContent on the
+// parent renders with no line breaks at all
+// (block boundaries collapse).
+function al_logAsText(){
+  var log=document.getElementById('log');
+  if(!log)return'';
+  var parts=[];
+  for(var i=0;i<log.children.length;i++){
+    var c=log.children[i];
+    if(c.textContent)parts.push(c.textContent);
+  }
+  return parts.join('\n')+(parts.length?'\n':'');
+}
 function copyLog(){
-  var t=document.getElementById('log').textContent;
+  var t=al_logAsText();
   var bytes=t.length;
+  // Even with an empty log we still attempt
+  // the clipboard write so the button label
+  // flips to "Copied" + reverts on the
+  // standard path. textContent alone is
+  // non-empty from inline-block whitespace;
+  // tests pin the label-revert behavior.
   if(navigator.clipboard){
     navigator.clipboard.writeText(t).then(function(){
       var b=document.getElementById('cbtn');
@@ -333,7 +367,7 @@ function copyLog(){
 }
 
 function saveLog(){
-  var t=document.getElementById('log').textContent;
+  var t=al_logAsText();
   if(!t.length){
     console.warn('[autolink] save log: log is empty, nothing to save');
     return;
@@ -386,6 +420,34 @@ function applyMsgPauseLabel(){
   if(b){
     if(msgPaused){b.innerHTML='\u25b6 Start';b.className='btn pause on';}
     else{b.innerHTML='\u25ae\u25ae Pause';b.className='btn pause';}
+  }
+}
+
+// Cookie helpers: persist the last delay-ms
+// choice across reloads.
+function al_cookie_set(name, val, days){
+  var d=new Date();
+  d.setTime(d.getTime()+(days||365)*24*60*60*1000);
+  document.cookie=name+'='+encodeURIComponent(val)+
+    ';expires='+d.toUTCString()+';path=/;SameSite=Lax';
+}
+function al_cookie_get(name){
+  var m=document.cookie.match(new RegExp('(?:^|; )'+name+'=([^;]*)'));
+  return m?decodeURIComponent(m[1]):null;
+}
+
+async function onDelayChange(val){
+  var ms=parseInt(val,10);
+  if(isNaN(ms)||ms<0)ms=0;
+  al_cookie_set('al_delay_ms', String(ms));
+  console.log('[autolink] delay widget: txDelayMs='+ms+' (sending /delay, cookie saved)');
+  try{
+    var r=await tfetch('/delay?ms='+ms,{method:'POST'},5000);
+    if(!r.ok){
+      console.warn('[autolink] /delay returned '+r.status+' — local UI shows last-known state until /stats reconciles');
+    }
+  }catch(e){
+    console.warn('[autolink] /delay fetch failed: '+(e&&e.message?e.message:e)+' — local UI shows last-known state until /stats reconciles');
   }
 }
 
@@ -535,6 +597,20 @@ async function poll(){
         console.log('[autolink] /stats msgPaused='+devPaused+' — reconciled button label');
       }
     }
+
+    if(d.txDelayMs!==undefined&&d.txDelayMs!==null){
+      var sel=document.getElementById('delayMs');
+      if(sel){
+        var devMs=String(d.txDelayMs);
+        // Don't fight the user: if they just clicked the dropdown,
+        // /stats will catch up next poll. Only update if it differs
+        // and the dropdown isn't currently focused.
+        if(devMs!==sel.value&&document.activeElement!==sel){
+          sel.value=devMs;
+          console.log('[autolink] /stats txDelayMs='+d.txDelayMs+' — synced dropdown (cookie unchanged)');
+        }
+      }
+    }
     fails=0;hide('alert');
     console.log('[autolink] /stats OK state='+d.state+' rxBps='+d.rxBps);
     }catch(e){
@@ -574,6 +650,20 @@ poll().then(function(){
   var _state=document.getElementById('pill')?document.getElementById('pill').textContent:'?';
   console.log('[autolink] startup OK — dashboard connected to firmware v)HTML" AUTOLINK_VERSION
     R"HTML( role='+_role+' state='+_state);
+  // Rehydrate delay widget: cookie value wins if set, else
+  // firmware's current txDelayMs (from /stats). Cookie is the
+  // user-sticky default so a reload restores the last choice.
+  var _sel=document.getElementById('delayMs');
+  if(_sel){
+    var _ck=al_cookie_get('al_delay_ms');
+    if(_ck!==null){
+      _sel.value=_ck;
+      onDelayChange(_ck);
+      console.log('[autolink] delay widget: rehydrated from cookie='+_ck);
+    } else {
+      console.log('[autolink] delay widget: no cookie, using firmware default');
+    }
+  }
 }).catch(function(e){
   console.error('[autolink] startup FAILED: '+(e&&e.message?e.message:e), '— dashboard will retry every 1 s');
 });
