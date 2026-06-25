@@ -36,7 +36,7 @@ WEB      = $(AL)/web
 # Mirror the src/al/ layout in test/itest/test_desktop/al/<sub>/
 TAL      = al
 TPROTO   = $(TAL)/link
-LINK_SRC = $(PROTO)/Link.cpp $(PROTO)/LinkBaudSweep.cpp $(PROTO)/LinkFrameRx.cpp $(UTIL)/Log.cpp $(UTIL)/UtilCrc.cpp $(UTIL)/UtilCobs.cpp
+LINK_SRC = $(PROTO)/Link.cpp $(PROTO)/LinkBaudSweep.cpp $(PROTO)/LinkFrameRx.cpp $(PROTO)/LinkArq.cpp $(PROTO)/LinkReorder.cpp $(PROTO)/LinkSweep.cpp $(PROTO)/ArqCache.cpp $(UTIL)/Log.cpp $(UTIL)/UtilCrc.cpp $(UTIL)/UtilCobs.cpp
 
 # Integration-test binaries. End-to-end smoke tests that wire
 # two Link instances together and verify protocol behaviour
@@ -137,8 +137,8 @@ test_loopback: run_loopback
 # per-mode summary. One driver, one
 # output, clear mode differentiation.
 #
-# SYNC mode is added in v5.3.46 as the new
-# default. The driver exists so a single
+# SYNC mode is the new default. The driver
+# exists so a single
 # 'make loopback_modes' command verifies
 # both code paths end-to-end before
 # shipping a release.
