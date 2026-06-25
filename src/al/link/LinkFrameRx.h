@@ -4,24 +4,20 @@
 #pragma once
 #include <stdint.h>
 
-namespace autolink
-{
+namespace autolink {
 constexpr uint8_t ACK_TYPE = 0xFF;
 constexpr uint8_t NAK_TYPE = 0xFE;
 // Data seq wraps at 0xFD; skip 0xFE/0xFF.
 constexpr uint8_t COBS_SEQ_MAX = 0xFD;
 
-class UtilFrameRx
-{
+class UtilFrameRx {
 public:
-    class Listener
-    {
+    class Listener {
     public:
         virtual ~Listener() {}
         virtual bool onPayload(uint8_t cobsSeq, const uint8_t *b, int n) = 0;
         virtual bool onAck(uint8_t ackedCobsSeq) = 0;
-        virtual bool onNak(uint8_t missingCobsSeq)
-        {
+        virtual bool onNak(uint8_t missingCobsSeq) {
             (void)missingCobsSeq;
             return false;
         }
