@@ -1,7 +1,4 @@
-// Frame-error path: bad CRC, oversize, malformed COBS,
-// err-rate window drop.
-
-
+// Frame-error path: bad CRC, oversize.
 #ifndef ARDUINO
 
 #    include <iostream>
@@ -13,9 +10,7 @@ using namespace autolink;
 
 void test_error_threshold()
 {
-    std::cout
-        << "\n=== Test: Custom Error Thresholding ==="
-        << std::endl;
+    std::cout << "\n=== Test: Custom Error Thresholding ===" << std::endl;
     MockHal mHal;
     AutoLinkConfig cfg;
     cfg.allowedBauds[0] = 9600;
@@ -47,9 +42,7 @@ void test_error_counter()
 {
     AutoLinkConfig cfg;
 
-
-    std::cout << "\n=== Test: Disconnect Counter = "
-                 "One Per Link Drop ==="
+    std::cout << "\n=== Test: Disconnect Counter = One Per Link Drop ==="
               << std::endl;
 
     {
@@ -76,7 +69,6 @@ void test_error_counter()
     }
     (void)0;
 
-
     {
         MockHal mHal, sHal;
         cfg.errThreshold = 2;
@@ -93,17 +85,14 @@ void test_error_counter()
         b.getStats(bs);
         assert(bs.discCount == 1);
 
-
         for (int i = 0; i < 100; i++)
             b.err();
         b.getStats(bs);
         assert(bs.discCount == 1);
 
-
         b.resetStats();
         b.getStats(bs);
         assert(bs.discCount == 1);
-
 
         b.resetErrors();
         b.getStats(bs);
@@ -124,9 +113,7 @@ void test_error_counter()
 
 void test_error_counter_during_swp()
 {
-    std::cout
-        << "\n=== Test: One Count Per Cable Bounce ==="
-        << std::endl;
+    std::cout << "\n=== Test: One Count Per Cable Bounce ===" << std::endl;
     MockHal mHal, sHal;
     AutoLinkConfig cfg;
     cfg.allowedBauds[0] = 9600;
@@ -167,10 +154,8 @@ void test_error_counter_during_swp()
 
 void test_error_counter_link_failures()
 {
-    std::cout << "\n=== Test: Error Counter Ticks on "
-                 "Link Failures ==="
+    std::cout << "\n=== Test: Error Counter Ticks on Link Failures ==="
               << std::endl;
-
 
     {
         MockHal mHal, sHal;
@@ -187,7 +172,6 @@ void test_error_counter_link_failures()
         ping.getStats(s0);
         assert(s0.discCount == 0);
     }
-
 
     {
         MockHal mHal, sHal;
@@ -211,7 +195,6 @@ void test_error_counter_link_failures()
         assert(s1.discCount == 1);
     }
 
-
     {
         MockHal mHal, sHal;
         AutoLinkConfig cfg;
@@ -231,7 +214,6 @@ void test_error_counter_link_failures()
         assert(s.discCount == 1);
     }
 
-
     {
         MockHal mHal, sHal;
         AutoLinkConfig cfg;
@@ -250,7 +232,6 @@ void test_error_counter_link_failures()
         Stats s;
         ping.getStats(s);
         assert(s.discCount == 1);
-
 
         for (int i = 0; i < 100; i++) {
             mHal.pumpClock(50);
@@ -284,7 +265,6 @@ void test_error_counter_link_failures()
         for (int i = 0; i < 5; i++)
             ping.err();
 
-
         mHal.pumpClock(50);
         ping.onTimer();
         pipe_data(mHal, sHal);
@@ -300,7 +280,6 @@ void test_error_counter_link_failures()
         ping.getStats(s);
         assert(s.discCount == 1);
     }
-
 
     {
         MockHal mHal, sHal;
@@ -321,7 +300,6 @@ void test_error_counter_link_failures()
         ping.getStats(s);
         assert(s.discCount == 1);
 
-
         for (int i = 0; i < 200; i++) {
             mHal.pumpClock(50);
             mHal.pumpClock(50);
@@ -337,8 +315,7 @@ void test_error_counter_link_failures()
 void test_scattered_errors_dont_drop()
 {
     AutoLinkConfig cfg;
-    std::cout << "\n=== Test: Scattered Errors Don't "
-                 "Drop a Working Link ==="
+    std::cout << "\n=== Test: Scattered Errors Don't Drop a Working Link ==="
               << std::endl;
     cfg.streamBufferSize = 8192;
     MockHal mHal, sHal;
@@ -355,8 +332,7 @@ void test_scattered_errors_dont_drop()
         pipe_data(mHal, sHal);
         assert(b.getState() == State::OK);
         uint8_t rx[16];
-        assert(b.recvMsg(rx, sizeof(rx)) ==
-               (int)sizeof(msg));
+        assert(b.recvMsg(rx, sizeof(rx)) == (int)sizeof(msg));
         assert(b.getErrCount() == 0);
     }
 
@@ -369,8 +345,7 @@ void test_scattered_errors_dont_drop()
 void test_parser_yields_after_drop()
 {
     AutoLinkConfig cfg;
-    std::cout << "\n=== Test: Parser Yields to "
-                 "Command Parser After Drop ==="
+    std::cout << "\n=== Test: Parser Yields to Command Parser After Drop ==="
               << std::endl;
 
     cfg.allowedBauds[0] = 115200;
@@ -382,21 +357,18 @@ void test_parser_yields_after_drop()
     Link pingNode(mHal, true, cfg);
     Link pong(sHal, false, cfg);
 
-
     pingNode.begin();
     pong.begin();
 
-    uint8_t bad[] = { 0x00, 0x02, 0xFF, 0x00,
-                      0x02, 0xFF, 0x00 };
+    uint8_t bad[] = { 0x00, 0x02, 0xFF, 0x00, 0x02, 0xFF, 0x00 };
     uint8_t ping[5] = { 0xAA, 0x55, 0, PING_CMD, 0 };
 
     uint8_t crc = 0;
     for (int i = 0; i < 4; i++) {
         crc ^= ping[i];
         for (int k = 0; k < 8; k++)
-            crc = (crc & 0x80)
-                ? (uint8_t)((crc << 1) ^ 0x07)
-                : (uint8_t)(crc << 1);
+            crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0x07)
+                               : (uint8_t)(crc << 1);
     }
     ping[4] = crc;
 
@@ -412,16 +384,14 @@ void test_parser_yields_after_drop()
 
 int main()
 {
-    std::cout << "=== Running ALinkError Tests ==="
-              << std::endl;
+    std::cout << "=== Running ALinkError Tests ===" << std::endl;
     test_error_threshold();
     test_error_counter();
     test_error_counter_during_swp();
     test_error_counter_link_failures();
     test_scattered_errors_dont_drop();
     test_parser_yields_after_drop();
-    std::cout << "\n=== ALinkError Tests Completed "
-                 "Successfully ==="
+    std::cout << "\n=== ALinkError Tests Completed Successfully ==="
               << std::endl;
     return 0;
 }
