@@ -14,19 +14,16 @@
 
 #ifdef ARDUINO
 
-namespace autolink
-{
+namespace autolink {
 AutoLinkWeb::AutoLinkWeb(AutoLink &link) : link_(link), log_(Log::log()) {}
 
-void AutoLinkWeb::setRole(const char *role)
-{
+void AutoLinkWeb::setRole(const char *role) {
     if (!role)
         role = "";
     snprintf(snap_.role, sizeof(snap_.role), "%s", role);
 }
 
-AutoLinkWeb::~AutoLinkWeb()
-{
+AutoLinkWeb::~AutoLinkWeb() {
     if (statTimer_) {
         esp_err_t ts = esp_timer_stop(statTimer_);
         if (ts != ESP_OK) {
@@ -61,8 +58,7 @@ AutoLinkWeb::~AutoLinkWeb()
     logRing_ = nullptr;
 }
 
-bool AutoLinkWeb::begin(const char *ssid, const char *pass, uint16_t port)
-{
+bool AutoLinkWeb::begin(const char *ssid, const char *pass, uint16_t port) {
     if (enabled_)
         return true;
     port_ = port;
@@ -139,8 +135,7 @@ bool AutoLinkWeb::begin(const char *ssid, const char *pass, uint16_t port)
     return true;
 }
 
-void AutoLinkWeb::wifiTaskThunk_(void *arg)
-{
+void AutoLinkWeb::wifiTaskThunk_(void *arg) {
     auto *self = static_cast<AutoLinkWeb *>(arg);
     Log &log = Log::log();
     log.info(TAG, "WiFi bg task started (timeout=%lu s)",
@@ -178,8 +173,7 @@ void AutoLinkWeb::wifiTaskThunk_(void *arg)
     vTaskDelete(nullptr);
 }
 
-bool AutoLinkWeb::setupHttpAndLogging_()
-{
+bool AutoLinkWeb::setupHttpAndLogging_() {
     Log &log = Log::log();
     if (enabled_) {
         log.warning(TAG, "setupHttpAndLogging_ called twice; ignoring");
@@ -258,11 +252,12 @@ bool AutoLinkWeb::setupHttpAndLogging_()
         const httpd_uri_t r5 = { "/level", HTTP_POST, handleLevel, this };
         const httpd_uri_t r6 = { "/mode", HTTP_POST, handleMode, this };
         const httpd_uri_t r7 = { "/pausemsg", HTTP_POST, handleMsgPause, this };
-        static const httpd_uri_t *const URIS[] = { &r0, &r1, &r2, &r3,
-                                                   &r4, &r5, &r6, &r7 };
+        const httpd_uri_t r8 = { "/delay", HTTP_POST, handleDelay, this };
+        static const httpd_uri_t *const URIS[] = { &r0, &r1, &r2, &r3, &r4,
+                                                   &r5, &r6, &r7, &r8 };
         static const char *const PATHS[] = { "/",         "/stats", "/logs",
                                              "/reset",    "/level", "/mode",
-                                             "/msgpause", "/reboot" };
+                                             "/pausemsg", "/delay", "/reboot" };
         for (size_t i = 0; i < sizeof(URIS) / sizeof(URIS[0]); i++) {
             esp_err_t ruh = httpd_register_uri_handler(server_, URIS[i]);
             if (ruh != ESP_OK) {
@@ -311,13 +306,9 @@ fail:
     return false;
 }
 
-String AutoLinkWeb::ip() const
-{
-    return WiFi.localIP().toString();
-}
+String AutoLinkWeb::ip() const { return WiFi.localIP().toString(); }
 
-void AutoLinkWeb::statTimerCb(void *arg)
-{
+void AutoLinkWeb::statTimerCb(void *arg) {
     AutoLinkWeb *self = (AutoLinkWeb *)arg;
 
     Stats s;
@@ -345,6 +336,8 @@ void AutoLinkWeb::statTimerCb(void *arg)
     self->snap_.linkMode = (uint8_t)self->link_.mode();
     self->snap_.msgPaused =
         self->msgPausedReader_ ? (self->msgPausedReader_() ? 1u : 0u) : 0u;
+    self->snap_.txDelayMs =
+        self->txDelayReader_ ? (int32_t)self->txDelayReader_() : 0;
     xSemaphoreGive(self->snapMtx_);
 
     self->prevTx_ = s.tx;
@@ -352,8 +345,7 @@ void AutoLinkWeb::statTimerCb(void *arg)
 }
 
 void AutoLinkWeb::logSinkCb(char sev, const char *tag, const char *msg,
-                            void *ctx)
-{
+                            void *ctx) {
     AutoLinkWeb *self = (AutoLinkWeb *)ctx;
     if (!self->logRing_)
         return;
@@ -394,8 +386,7 @@ void AutoLinkWeb::logSinkCb(char sev, const char *tag, const char *msg,
     xSemaphoreGive(self->logMtx_);
 }
 
-esp_err_t AutoLinkWeb::handleRoot(httpd_req_t *req)
-{
+esp_err_t AutoLinkWeb::handleRoot(httpd_req_t *req) {
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_set_hdr(req, "Connection", "close");
@@ -403,8 +394,7 @@ esp_err_t AutoLinkWeb::handleRoot(httpd_req_t *req)
     return ESP_OK;
 }
 
-esp_err_t AutoLinkWeb::handleStats(httpd_req_t *req)
-{
+esp_err_t AutoLinkWeb::handleStats(httpd_req_t *req) {
     AutoLinkWeb *self = (AutoLinkWeb *)req->user_ctx;
 
     Snapshot s;
@@ -423,8 +413,7 @@ esp_err_t AutoLinkWeb::handleStats(httpd_req_t *req)
     return ESP_OK;
 }
 
-esp_err_t AutoLinkWeb::handleLogs(httpd_req_t *req)
-{
+esp_err_t AutoLinkWeb::handleLogs(httpd_req_t *req) {
     AutoLinkWeb *self = (AutoLinkWeb *)req->user_ctx;
 
     char query[48] = {};
@@ -508,8 +497,7 @@ esp_err_t AutoLinkWeb::handleLogs(httpd_req_t *req)
     return ESP_OK;
 }
 
-esp_err_t AutoLinkWeb::handleReset(httpd_req_t *req)
-{
+esp_err_t AutoLinkWeb::handleReset(httpd_req_t *req) {
     AutoLinkWeb *self = (AutoLinkWeb *)req->user_ctx;
     self->link_.resetStats();
     self->link_.resetErrors();
@@ -525,8 +513,7 @@ esp_err_t AutoLinkWeb::handleReset(httpd_req_t *req)
     return ESP_OK;
 }
 
-esp_err_t AutoLinkWeb::handleLevel(httpd_req_t *req)
-{
+esp_err_t AutoLinkWeb::handleLevel(httpd_req_t *req) {
     char query[48] = {};
     char val[8] = {};
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
@@ -571,8 +558,7 @@ esp_err_t AutoLinkWeb::handleLevel(httpd_req_t *req)
     return ESP_OK;
 }
 
-esp_err_t AutoLinkWeb::handleMode(httpd_req_t *req)
-{
+esp_err_t AutoLinkWeb::handleMode(httpd_req_t *req) {
     char query[48] = {};
     char val[8] = {};
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
@@ -609,8 +595,7 @@ esp_err_t AutoLinkWeb::handleMode(httpd_req_t *req)
     return ESP_OK;
 }
 
-esp_err_t AutoLinkWeb::handleMsgPause(httpd_req_t *req)
-{
+esp_err_t AutoLinkWeb::handleMsgPause(httpd_req_t *req) {
     char query[48] = {};
     char val[8] = {};
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
@@ -647,8 +632,41 @@ esp_err_t AutoLinkWeb::handleMsgPause(httpd_req_t *req)
     return ESP_OK;
 }
 
-esp_err_t AutoLinkWeb::handleReboot(httpd_req_t *req)
-{
+esp_err_t AutoLinkWeb::handleDelay(httpd_req_t *req) {
+    char query[64] = {};
+    char val[12] = {};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "ms", val, sizeof(val)) != ESP_OK) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "missing ?ms=", 12);
+        return ESP_OK;
+    }
+    auto *self = static_cast<AutoLinkWeb *>(req->user_ctx);
+    if (!self->txDelayWriter_) {
+        httpd_resp_set_status(req, "404 Not Found");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "no tx delay (Pong?)", 20);
+        return ESP_OK;
+    }
+    int ms = atoi(val);
+    if (ms < 0) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "ms must be >= 0", 15);
+        return ESP_OK;
+    }
+    self->txDelayWriter_(ms);
+    Log::log().info(TAG, "txDelayMs set to %d via web", ms);
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_set_hdr(req, "Connection", "close");
+    char out[16];
+    int n = snprintf(out, sizeof(out), "%d", ms);
+    httpd_resp_send(req, out, n);
+    return ESP_OK;
+}
+
+esp_err_t AutoLinkWeb::handleReboot(httpd_req_t *req) {
     Log::log().info("ALinkWeb",
                     "Reboot requested via web — restarting in 200 ms");
     httpd_resp_set_type(req, "text/plain");
