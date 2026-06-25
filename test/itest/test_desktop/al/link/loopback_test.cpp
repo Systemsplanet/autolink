@@ -1,5 +1,7 @@
 // Two-Link host loopback end-to-end smoke.
 #include "al/link/Link.h"
+#include "al/link/ArqCache.h"
+#include "LinkTestAccessor.h"
 #include "MockHal.h"
 #include "al/util/Log.h"
 #include <cstdio>
@@ -17,64 +19,18 @@ static MockHal *g_pingHal = nullptr;
 static MockHal *g_pongHal = nullptr;
 
 // Minimal ARQ cache for the itest harness.
-// Same shape as AutoLink's internal pool
-// but kept here so the itest can drive raw
-// Link instances. The Link's timer-driven
-// retransmit path calls arqRetxCallback_,
-// which is null by default — without
-// these hooks installed, every wire drop
-// becomes a permanent loss in the itest.
-struct ItestArq {
-    Link *owner;
-    uint8_t buf[256][260];
-    int len[256];
-    bool in_use[256];
-    ItestArq() : owner(nullptr)
-    {
-        memset(len, 0, sizeof len);
-        memset(in_use, 0, sizeof in_use);
-    }
-};
-static ItestArq g_pingArq;
-static ItestArq g_pongArq;
-static void itest_arq_insert(uint8_t seq, const uint8_t *b, int n, uint8_t,
-                             void *ctx)
-{
-    ItestArq *a = (ItestArq *)ctx;
-    if (n <= 0 || n > 256)
-        return;
-    if (a->in_use[seq])
-        a->in_use[seq] = false;
-    memcpy(a->buf[seq], b, n);
-    a->len[seq] = n;
-    a->in_use[seq] = true;
-}
-static bool itest_arq_retx(uint8_t seq, void *ctx)
-{
-    ItestArq *a = (ItestArq *)ctx;
-    if (!a->in_use[seq])
-        return false;
-    a->owner->resendCobsFrame(seq, a->buf[seq], a->len[seq]);
-    return false;
-}
-static void itest_arq_clear(void *ctx)
-{
-    ItestArq *a = (ItestArq *)ctx;
-    for (int i = 0; i < 256; i++) {
-        a->in_use[i] = false;
-        a->len[i] = 0;
-    }
-}
-static bool itest_arq_ack(uint8_t seq, void *ctx)
-{
-    ItestArq *a = (ItestArq *)ctx;
-    a->in_use[seq] = false;
-    a->len[seq] = 0;
-    return false;
-}
+// The itest used to install its own
+// 5-trampoline cache so the link's retx
+// path had somewhere to re-send from.
+// The trampolines are gone; the itest now
+// uses the production ArqCache directly.
+// Both ends are configured ASYNC so
+// the link's timer tick actually
+// runs the retx path.
+static ArqCache g_pingArq;
+static ArqCache g_pongArq;
 
-static void pipe_now()
-{
+static void pipe_now() {
     if (g_pingHal && !g_pingHal->txBuf.empty()) {
         std::vector<uint8_t> b = g_pingHal->txBuf;
         g_pingHal->clearTx();
@@ -88,8 +44,7 @@ static void pipe_now()
 }
 
 static int run_loopback(int seconds, bool verbose, int mode, bool reliable,
-                        bool sync)
-{
+                        bool sync) {
     AutoLinkConfig cfg;
     cfg.maxMsg = 256;
     cfg.idleTimeoutMs = 0;
@@ -116,14 +71,10 @@ static int run_loopback(int seconds, bool verbose, int mode, bool reliable,
     // actually re-send the cached frame.
     // SYNC doesn't need this — it waits
     // for the receiver's ACK inline.
-    g_pingArq = ItestArq();
-    g_pongArq = ItestArq();
-    g_pingArq.owner = &ping;
-    g_pongArq.owner = &pong;
-    ping.setArqCacheHooks(&itest_arq_ack, &itest_arq_retx, nullptr,
-                          &itest_arq_insert, &itest_arq_clear, &g_pingArq);
-    pong.setArqCacheHooks(&itest_arq_ack, &itest_arq_retx, nullptr,
-                          &itest_arq_insert, &itest_arq_clear, &g_pongArq);
+    g_pingArq.clearAll();
+    g_pongArq.clearAll();
+    ping.setArqCache(&g_pingArq);
+    pong.setArqCache(&g_pongArq);
 
     if (verbose) {
         Log::log().setLevel(Log::DEBUG);
@@ -222,7 +173,8 @@ static int run_loopback(int seconds, bool verbose, int mode, bool reliable,
                     // so the test thread can
                     // pump time for the link
                     // task to deliver the ACK.
-                    if (ping.test_sendMsgBegin(payload, 64)) {
+                    LinkTestAccessor pingT(ping);
+                    if (pingT.sendMsgBegin(payload, 64)) {
                         int budget = cfg.syncAckTimeoutMs + 50;
                         bool gotAck = false;
                         for (int i = 0; i < budget; i++) {
@@ -231,7 +183,7 @@ static int run_loopback(int seconds, bool verbose, int mode, bool reliable,
                             g_pingHal->pumpClock(2);
                             g_pongHal->pumpClock(2);
                             pipe_now();
-                            if (!ping.test_sendMsgStillWaiting()) {
+                            if (!pingT.sendMsgStillWaiting()) {
                                 gotAck = true;
                                 break;
                             }
@@ -258,7 +210,8 @@ static int run_loopback(int seconds, bool verbose, int mode, bool reliable,
             while ((n = pong.recvMsg(buf, cap)) > 0) {
                 rxCount++;
                 if (sync) {
-                    if (pong.test_sendMsgBegin(buf, n)) {
+                    LinkTestAccessor pongT(pong);
+                    if (pongT.sendMsgBegin(buf, n)) {
                         int budget = cfg.syncAckTimeoutMs + 50;
                         for (int i = 0; i < budget; i++) {
                             std::this_thread::sleep_for(
@@ -266,7 +219,7 @@ static int run_loopback(int seconds, bool verbose, int mode, bool reliable,
                             g_pingHal->pumpClock(2);
                             g_pongHal->pumpClock(2);
                             pipe_now();
-                            if (!pong.test_sendMsgStillWaiting())
+                            if (!pongT.sendMsgStillWaiting())
                                 break;
                         }
                     }
@@ -341,8 +294,7 @@ static int run_loopback(int seconds, bool verbose, int mode, bool reliable,
     return 2;
 }
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
     int seconds = 30;
     bool verbose = false;
     int mode = 0;
