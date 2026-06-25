@@ -1,7 +1,6 @@
-// Host-side shim for the esp_timer_* API used by
-// EspBlinkHal. Lets UtilBlink.h compile under the host
-// test build without pulling in the real esp_timer
-// driver.
+// Host-build shim for esp_timer_* API.
+// No-ops; lets UtilBlink.h compile
+// without the real ESP-IDF driver.
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
@@ -18,22 +17,18 @@ struct esp_timer_create_args_t {
     bool skip_unhandled_events;
 };
 
-inline int
-esp_timer_create(const esp_timer_create_args_t *,
-                 esp_timer_handle_t *out)
+inline int esp_timer_create(const esp_timer_create_args_t *,
+                            esp_timer_handle_t *out)
 {
     if (out)
-        *out =
-            reinterpret_cast<esp_timer_handle_t>(0x1);
+        *out = reinterpret_cast<esp_timer_handle_t>(0x1);
     return 0;
 }
-inline int esp_timer_start_once(esp_timer_handle_t,
-                                uint64_t)
+inline int esp_timer_start_once(esp_timer_handle_t, uint64_t)
 {
     return 0;
 }
-inline int esp_timer_start_periodic(esp_timer_handle_t,
-                                    uint64_t)
+inline int esp_timer_start_periodic(esp_timer_handle_t, uint64_t)
 {
     return 0;
 }
