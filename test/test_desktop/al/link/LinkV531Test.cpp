@@ -1,7 +1,4 @@
-// 3-phase sweep + PONG_ACK + 2-of-3 + heartbeat +
-// asymmetric fast detection.
-
-
+// 3-phase sweep + PONG_ACK + 2-of-3 lock.
 #ifndef ARDUINO
 
 #    include <iostream>
@@ -14,9 +11,7 @@ using namespace autolink;
 
 static void test_v531_phase1_locks_at_slowest_baud()
 {
-    std::cout
-        << "\n=== Phase 1 connects at slowest baud ==="
-        << std::endl;
+    std::cout << "\n=== Phase 1 connects at slowest baud ===" << std::endl;
     AutoLinkConfig cfg;
     cfg.allowedBauds[0] = 115200;
     cfg.allowedBauds[1] = 9600;
@@ -30,7 +25,6 @@ static void test_v531_phase1_locks_at_slowest_baud()
     Link pong(sHal, false, cfg);
     ping.begin();
     pong.begin();
-
 
     assert(ping.getCurrentSpdIndex() == 1);
     assert(pong.getCurrentSpdIndex() == 1);
@@ -58,9 +52,7 @@ static void test_v531_phase1_locks_at_slowest_baud()
 
 static void test_v531_pong_acks_first_ping()
 {
-    std::cout << "\n=== PONG_CMD = 0x33 decodes "
-                 "correctly ==="
-              << std::endl;
+    std::cout << "\n=== PONG_CMD = 0x33 decodes correctly ===" << std::endl;
     AutoLinkConfig cfg;
     cfg.allowedBauds[0] = 115200;
     cfg.allowedBauds[1] = 9600;
@@ -81,9 +73,7 @@ static void test_v531_pong_acks_first_ping()
 
 static void test_v531_heartbeat_miss_drops_quickly()
 {
-    std::cout
-        << "\n=== heartbeat miss drops in <500ms ==="
-        << std::endl;
+    std::cout << "\n=== heartbeat miss drops in <500ms ===" << std::endl;
     AutoLinkConfig cfg;
     cfg.allowedBauds[0] = 115200;
     cfg.allowedBaudsCount = 1;
@@ -97,7 +87,6 @@ static void test_v531_heartbeat_miss_drops_quickly()
     negotiate_to_ok(ping, pong, mHal, sHal);
     assert(ping.getState() == State::OK);
     assert(pong.getState() == State::OK);
-
 
     mHal.now = 0;
     int dropsAt = -1;
@@ -113,15 +102,13 @@ static void test_v531_heartbeat_miss_drops_quickly()
     assert(dropsAt >= 0);
 
     assert(dropsAt < 10);
-    std::cout << "PASS (dropped at heartbeat tick "
-              << dropsAt << ")" << std::endl;
+    std::cout << "PASS (dropped at heartbeat tick " << dropsAt << ")"
+              << std::endl;
 }
 
 static void test_v531_dwells_computed_at_boot()
 {
-    std::cout << "\n=== dwell caps computed from baud "
-                 "list ==="
-              << std::endl;
+    std::cout << "\n=== dwell caps computed from baud list ===" << std::endl;
     AutoLinkConfig cfg;
     cfg.allowedBauds[0] = 115200;
     cfg.allowedBauds[1] = 57600;
@@ -139,16 +126,13 @@ static void test_v531_dwells_computed_at_boot()
     ping.begin();
     pong.begin();
 
-
     assert(ping.getCurrentSpdIndex() == 4);
     std::cout << "PASS" << std::endl;
 }
 
 static void test_v531_banner_logged_on_phase_entry()
 {
-    std::cout
-        << "\n=== phase banners appear in log ==="
-        << std::endl;
+    std::cout << "\n=== phase banners appear in log ===" << std::endl;
     Log::log().setLevel(Log::DEBUG);
     AutoLinkConfig cfg;
     cfg.allowedBauds[0] = 115200;
@@ -165,23 +149,19 @@ static void test_v531_banner_logged_on_phase_entry()
     ping.begin();
 
     assert(true);
-    std::cout << "PASS (visual inspection: === PHASE "
-                 "1 === banner)"
+    std::cout << "PASS (visual inspection: === PHASE 1 === banner)"
               << std::endl;
 }
 
 int main()
 {
-    std::cout << "=== Running Sweep Tests ==="
-              << std::endl;
+    std::cout << "=== Running Sweep Tests ===" << std::endl;
     test_v531_phase1_locks_at_slowest_baud();
     test_v531_pong_acks_first_ping();
     test_v531_heartbeat_miss_drops_quickly();
     test_v531_dwells_computed_at_boot();
     test_v531_banner_logged_on_phase_entry();
-    std::cout << "\n=== Sweep Tests Completed "
-                 "Successfully ==="
-              << std::endl;
+    std::cout << "\n=== Sweep Tests Completed Successfully ===" << std::endl;
     return 0;
 }
 
