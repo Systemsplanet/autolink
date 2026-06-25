@@ -9,10 +9,8 @@
 #    define UTIL_BAUD_SWEEP_MAX_BAUDS 16
 #endif
 
-namespace autolink
-{
-class UtilBaudSweep
-{
+namespace autolink {
+class UtilBaudSweep {
 public:
     struct Config {
         int pingSamplesPerBaud = 4;
@@ -20,8 +18,7 @@ public:
         int expectedSamples = -1;
     };
 
-    explicit UtilBaudSweep(int numBauds) : numBauds_(0)
-    {
+    explicit UtilBaudSweep(int numBauds) : numBauds_(0) {
         if (numBauds < 0)
             numBauds = 0;
         if (numBauds > UTIL_BAUD_SWEEP_MAX_BAUDS)
@@ -33,13 +30,11 @@ public:
 
     void configure(const Config &c);
 
-    void score(int idx)
-    {
+    void score(int idx) {
         if (idx >= 0 && idx < numBauds_)
             scores_[idx]++;
     }
-    void resetIndex(int idx)
-    {
+    void resetIndex(int idx) {
         if (idx >= 0 && idx < numBauds_)
             scores_[idx] = 0;
     }
@@ -47,13 +42,11 @@ public:
     int pickBest() const;
 
     int samplesPerBaud() const { return cfg_.pingSamplesPerBaud; }
-    int minHitsForReliable() const
-    {
+    int minHitsForReliable() const {
         int m = (int)(cfg_.minAcceptRate * (float)cfg_.expectedSamples);
         return m < 1 ? 1 : m;
     }
-    int scoreAt(int idx) const
-    {
+    int scoreAt(int idx) const {
         return (idx >= 0 && idx < numBauds_) ? scores_[idx] : 0;
     }
     int numBauds() const { return numBauds_; }
