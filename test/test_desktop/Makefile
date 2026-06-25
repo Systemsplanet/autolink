@@ -33,7 +33,8 @@ THAL     = $(TAL)/hal
 TPROTO   = $(TAL)/link
 TUTIL    = $(TAL)/util
 TWEB     = $(TAL)/web
-LINK_SRC = $(PROTO)/Link.cpp $(PROTO)/LinkBaudSweep.cpp $(PROTO)/LinkFrameRx.cpp $(UTIL)/Log.cpp $(UTIL)/UtilCrc.cpp $(UTIL)/UtilCobs.cpp
+TPING    = $(TAL)/pingpong
+LINK_SRC = $(PROTO)/Link.cpp $(PROTO)/LinkBaudSweep.cpp $(PROTO)/LinkFrameRx.cpp $(PROTO)/LinkArq.cpp $(PROTO)/LinkReorder.cpp $(PROTO)/LinkSweep.cpp $(PROTO)/ArqCache.cpp $(UTIL)/Log.cpp $(UTIL)/UtilCrc.cpp $(UTIL)/UtilCobs.cpp
 AUTOLINK_SRC = $(SRC)/AutoLink.cpp $(LINK_SRC)
 
 # Unit-test binaries only. Loopback / loopback_noise live under
@@ -44,13 +45,18 @@ TEST_BINS = run_test_crc run_test_cobs run_test_blink run_test_framerx \
             run_test_alink_arq run_test_alink_web \
             run_test_alink_facade run_test_wiresim_closedloop \
             run_test_clock_injection run_test_linkdecision \
-            run_test_alink_v53 run_test_alink_v531 \
-            run_test_alink_v531_never_leave_p1 \
+            run_test_alink_baud_preference \
+            run_test_alink_sweep_phase \
+            run_test_alink_sweep_p1_guard \
             run_test_linkreorder \
             run_test_esp_idf_error_etiquette \
             run_test_compile_check \
-            run_test_arq_hasroom_trampoline \
-            run_test_sync_mode
+            run_test_arq_cache \
+            run_test_sync_mode \
+            run_test_ping_resume_source \
+            run_test_pingpong_structure \
+            run_test_accessor_structure \
+            run_test_version_free_source
 
 # 'all' runs every unit suite, captures per-suite runtime, then
 # prints a summary: tests passed, total bytes used by the suite
@@ -127,10 +133,8 @@ test_log: run_test_log
 test_mockhal: run_test_mockhal
 	./run_test_mockhal
 
-test_autolink: run_test_autolink \
-        test_alink_web
-	./run_test_autolink \
-        test_alink_web
+test_autolink: run_test_autolink
+	./run_test_autolink
 
 test_alink_io: run_test_alink_io
 	./run_test_alink_io
@@ -158,14 +162,14 @@ run_test_linkdecision: $(TPROTO)/LinkDecisionTest.cpp
 run_test_alink_web: $(LINK_SRC) $(WEB)/AutoLinkWebCore.cpp $(TWEB)/AutoLinkWebTest.cpp
 	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(WEB)/AutoLinkWebCore.cpp $(TWEB)/AutoLinkWebTest.cpp -o $@
 
-run_test_alink_v53: $(LINK_SRC) $(TPROTO)/LinkV53Test.cpp
-	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/LinkV53Test.cpp -o $@
+run_test_alink_baud_preference: $(LINK_SRC) $(TPROTO)/LinkBaudPreferenceTest.cpp
+	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/LinkBaudPreferenceTest.cpp -o $@
 
-run_test_alink_v531: $(LINK_SRC) $(TPROTO)/LinkV531Test.cpp
-	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/LinkV531Test.cpp -o $@
+run_test_alink_sweep_phase: $(LINK_SRC) $(TPROTO)/LinkSweepPhaseTest.cpp
+	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/LinkSweepPhaseTest.cpp -o $@
 
-run_test_alink_v531_never_leave_p1: $(LINK_SRC) $(TPROTO)/LinkV531NeverLeaveP1Test.cpp
-	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/LinkV531NeverLeaveP1Test.cpp -o $@
+run_test_alink_sweep_p1_guard: $(LINK_SRC) $(TPROTO)/LinkSweepP1GuardTest.cpp
+	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/LinkSweepP1GuardTest.cpp -o $@
 
 run_test_linkreorder: $(LINK_SRC) $(TPROTO)/LinkReorderTest.cpp
 	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/LinkReorderTest.cpp -o $@
@@ -173,17 +177,44 @@ run_test_linkreorder: $(LINK_SRC) $(TPROTO)/LinkReorderTest.cpp
 # Static-analysis test for ESP-IDF error-etiquette — reads
 # the .cpp/.h source files and asserts every known ESP-IDF
 # call site has a paired esp_err_to_name log.
-run_test_esp_idf_error_etiquette: EspIdfErrorEtiquetteTest.cpp
-	$(CXX) $(CXXFLAGS) EspIdfErrorEtiquetteTest.cpp -o $@
+run_test_esp_idf_error_etiquette: al/EspIdfErrorEtiquetteTest.cpp
+	$(CXX) $(CXXFLAGS) al/EspIdfErrorEtiquetteTest.cpp -o $@
 
-run_test_compile_check: CompileCheckTest.cpp
-	$(CXX) $(CXXFLAGS) CompileCheckTest.cpp -o $@
+run_test_compile_check: al/CompileCheckTest.cpp
+	$(CXX) $(CXXFLAGS) al/CompileCheckTest.cpp -o $@
 
-run_test_arq_hasroom_trampoline: $(AUTOLINK_SRC) ArqCacheHasRoomTrampolineTest.cpp
-	$(CXX) $(CXXFLAGS) $(AUTOLINK_SRC) ArqCacheHasRoomTrampolineTest.cpp -o $@
+run_test_arq_cache: $(AUTOLINK_SRC) al/link/ArqCacheTest.cpp
+	$(CXX) $(CXXFLAGS) $(AUTOLINK_SRC) al/link/ArqCacheTest.cpp -o $@
 
-run_test_sync_mode: $(AUTOLINK_SRC) SyncModeTest.cpp
-	$(CXX) $(CXXFLAGS) $(AUTOLINK_SRC) SyncModeTest.cpp -o $@
+run_test_sync_mode: $(AUTOLINK_SRC) al/SyncModeTest.cpp
+	$(CXX) $(CXXFLAGS) $(AUTOLINK_SRC) al/SyncModeTest.cpp -o $@
+
+# Source-level regression test for Ping::setPaused resume
+# contract. Ping is #ifdef ARDUINO so we can't
+# construct one on host; we pin the proactive clearQueue_()
+# call by reading the source.
+run_test_ping_resume_source: $(TPING)/PingResumeSourceTest.cpp
+	$(CXX) $(CXXFLAGS) $(TPING)/PingResumeSourceTest.cpp -o $@
+
+# PingPongBase split into free functions +
+# discrete setup steps. Source-level pin
+# (Ping is #ifdef ARDUINO so no host coverage).
+run_test_pingpong_structure: $(TPING)/PingPongStructureTest.cpp
+	$(CXX) $(CXXFLAGS) $(TPING)/PingPongStructureTest.cpp -o $@
+
+# test_* / *_ForTest hooks moved off
+# Link / AutoLink public API into
+# LinkTestAccessor / AutoLinkTestAccessor
+# shims under test/common/. Source-level
+# pin: reads Link.h and AutoLink.h, asserts
+# the public sections no longer declare
+# the hooks and the friend declarations
+# for the shims are present.
+run_test_accessor_structure: $(LINK_SRC) $(AUTOLINK_SRC) $(TPROTO)/TestAccessorStructureTest.cpp
+	$(CXX) $(CXXFLAGS) $(AUTOLINK_SRC) $(TPROTO)/TestAccessorStructureTest.cpp -o $@
+
+run_test_version_free_source: al/VersionFreeSourceTest.cpp
+	$(CXX) $(CXXFLAGS) al/VersionFreeSourceTest.cpp -o $@
 
 run_test_crc: $(UTIL)/UtilCrc.cpp $(TUTIL)/UtilCrcTest.cpp
 	$(CXX) $(CXXFLAGS) $(UTIL)/UtilCrc.cpp $(TUTIL)/UtilCrcTest.cpp -o $@
@@ -206,20 +237,20 @@ run_test_log: $(UTIL)/Log.cpp $(TUTIL)/LogTest.cpp
 run_test_mockhal: $(LINK_SRC) $(THAL)/MockHalTest.cpp
 	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(THAL)/MockHalTest.cpp -o $@
 
-run_test_autolink: $(AUTOLINK_SRC) AutoLinkTest.cpp
-	$(CXX) $(CXXFLAGS) $(AUTOLINK_SRC) AutoLinkTest.cpp -o $@
+run_test_autolink: $(AUTOLINK_SRC) al/AutoLinkTest.cpp
+	$(CXX) $(CXXFLAGS) $(AUTOLINK_SRC) al/AutoLinkTest.cpp -o $@
 
-run_test_alink_facade: $(AUTOLINK_SRC) AutoLinkFacadeTest.cpp
-	$(CXX) $(CXXFLAGS) $(AUTOLINK_SRC) AutoLinkFacadeTest.cpp -o $@
+run_test_alink_facade: $(AUTOLINK_SRC) al/AutoLinkFacadeTest.cpp
+	$(CXX) $(CXXFLAGS) $(AUTOLINK_SRC) al/AutoLinkFacadeTest.cpp -o $@
 
-run_test_wiresim_closedloop: $(AUTOLINK_SRC) WireSimClosedLoopTest.cpp
-	$(CXX) $(CXXFLAGS) $(AUTOLINK_SRC) WireSimClosedLoopTest.cpp -o $@
+run_test_wiresim_closedloop: $(AUTOLINK_SRC) al/WireSimClosedLoopTest.cpp
+	$(CXX) $(CXXFLAGS) $(AUTOLINK_SRC) al/WireSimClosedLoopTest.cpp -o $@
 
 # : deterministic clock-injection tests. Pins the three
 # time-dependent protocol paths (idle timeout, ACK RTO, sweep stall)
 # as sub-ms host tests via MockHal::pumpClock.
-run_test_clock_injection: $(AUTOLINK_SRC) ClockInjectionTest.cpp
-	$(CXX) $(CXXFLAGS) $(AUTOLINK_SRC) ClockInjectionTest.cpp -o $@
+run_test_clock_injection: $(AUTOLINK_SRC) al/ClockInjectionTest.cpp
+	$(CXX) $(CXXFLAGS) $(AUTOLINK_SRC) al/ClockInjectionTest.cpp -o $@
 
 run_test_alink_io: $(LINK_SRC) $(TPROTO)/LinkIOTest.cpp
 	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/LinkIOTest.cpp -o $@
@@ -259,8 +290,12 @@ coverage: clean
 	    echo "  $$t"; \
 	    ./$$t > /dev/null 2>&1 || { echo "  $$t FAILED"; exit 1; }; \
 	done
+	@echo "=== Building coverage manifest from TEST_BINS ==="
+	@mkdir -p coverage
+	@printf '%s\n' $(TEST_BINS) > coverage/test_bins.list
+	@python3 coverage_manifest.py Makefile coverage/test_bins.list coverage/manifest.sh
 	@echo "=== Merging .gcda counts from every binary ==="
-	@./coverage_merge.sh
+	@./coverage_merge.sh coverage/manifest.sh
 	@echo "--- coverage summary (lines / branches) ---" | tee coverage/coverage.txt
 	@for g in coverage/*.gcov; do \
 	    base=$$(basename $$g .gcov); \
@@ -289,21 +324,78 @@ clean:
         test_crc test_cobs test_blink test_framerx test_baudsweep test_log \
         test_mockhal test_alink_io test_alink_message \
         test_alink_error test_alink_cobsseq test_autolink \
-        test_alink_web test_alink_v53 test_alink_v531 \
-        test_alink_v531_never_leave_p1 test_wiresim_closedloop \
-        test_esp_idf_error_etiquette
+        test_alink_web test_alink_baud_preference \
+        test_alink_sweep_phase test_alink_sweep_p1_guard \
+        test_wiresim_closedloop \
+        test_esp_idf_error_etiquette \
+        test_alink_arq test_alink_facade \
+        test_clock_injection test_linkdecision test_linkreorder \
+        test_compile_check test_arq_cache test_sync_mode \
+        test_ping_resume_source test_pingpong_structure \
+        test_accessor_structure test_version_free_source \
+        test_coverage_manifest
+
+# Self-test for the coverage manifest generator. Pins AGENTS.md
+# rule 4: coverage_merge.sh must not drift from TEST_BINS. The
+# generator is the single source of truth — a new suite added to
+# TEST_BINS must show up in every src_for_<basename> entry it
+# links, with no edit to coverage_merge.sh required.
+test_coverage_manifest:
+	@python3 test_coverage_manifest.py
 
 test_alink_web: run_test_alink_web
 	./run_test_alink_web
 
-test_alink_v53: run_test_alink_v53
-	./run_test_alink_v53
+test_alink_baud_preference: run_test_alink_baud_preference
+	./run_test_alink_baud_preference
 
-test_alink_v531: run_test_alink_v531
-	./run_test_alink_v531
+test_alink_sweep_phase: run_test_alink_sweep_phase
+	./run_test_alink_sweep_phase
 
-test_alink_v531_never_leave_p1: run_test_alink_v531_never_leave_p1
-	./run_test_alink_v531_never_leave_p1
+test_alink_sweep_p1_guard: run_test_alink_sweep_p1_guard
+	./run_test_alink_sweep_p1_guard
+
+test_alink_arq: run_test_alink_arq
+	./run_test_alink_arq
+
+test_alink_facade: run_test_alink_facade
+	./run_test_alink_facade
+
+test_wiresim_closedloop: run_test_wiresim_closedloop
+	./run_test_wiresim_closedloop
+
+test_clock_injection: run_test_clock_injection
+	./run_test_clock_injection
+
+test_linkdecision: run_test_linkdecision
+	./run_test_linkdecision
+
+test_linkreorder: run_test_linkreorder
+	./run_test_linkreorder
+
+test_esp_idf_error_etiquette: run_test_esp_idf_error_etiquette
+	./run_test_esp_idf_error_etiquette
+
+test_compile_check: run_test_compile_check
+	./run_test_compile_check
+
+test_arq_cache: run_test_arq_cache
+	./run_test_arq_cache
+
+test_sync_mode: run_test_sync_mode
+	./run_test_sync_mode
+
+test_ping_resume_source: run_test_ping_resume_source
+	./run_test_ping_resume_source
+
+test_pingpong_structure: run_test_pingpong_structure
+	./run_test_pingpong_structure
+
+test_accessor_structure: run_test_accessor_structure
+	./run_test_accessor_structure
+
+test_version_free_source: run_test_version_free_source
+	./run_test_version_free_source
 
 # ---- dashboard JS test (Node + jsdom) ------------------------------------
 # Verifies the embedded dashboard JavaScript (poll(), bindLvlGroup(),
