@@ -18,29 +18,13 @@ struct esp_timer_create_args_t {
 };
 
 inline int esp_timer_create(const esp_timer_create_args_t *,
-                            esp_timer_handle_t *out)
-{
+                            esp_timer_handle_t *out) {
     if (out)
         *out = reinterpret_cast<esp_timer_handle_t>(0x1);
     return 0;
 }
-inline int esp_timer_start_once(esp_timer_handle_t, uint64_t)
-{
-    return 0;
-}
-inline int esp_timer_start_periodic(esp_timer_handle_t, uint64_t)
-{
-    return 0;
-}
-inline int esp_timer_stop(esp_timer_handle_t)
-{
-    return 0;
-}
-inline int esp_timer_delete(esp_timer_handle_t)
-{
-    return 0;
-}
-inline long long esp_timer_get_time()
-{
-    return 0;
-}
+inline int esp_timer_start_once(esp_timer_handle_t, uint64_t) { return 0; }
+inline int esp_timer_start_periodic(esp_timer_handle_t, uint64_t) { return 0; }
+inline int esp_timer_stop(esp_timer_handle_t) { return 0; }
+inline int esp_timer_delete(esp_timer_handle_t) { return 0; }
+inline long long esp_timer_get_time() { return 0; }
