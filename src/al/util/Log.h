@@ -5,10 +5,8 @@
 #include <stdarg.h>
 #include <stddef.h>
 
-namespace autolink
-{
-class Log
-{
+namespace autolink {
+class Log {
 public:
     enum Level {
         NONE = 0,
@@ -19,8 +17,7 @@ public:
         VERBOSE = 5
     };
 
-    static Log &log()
-    {
+    static Log &log() {
         static Log inst;
         return inst;
     }
@@ -30,8 +27,7 @@ public:
 
     bool wouldEmit(Level lvl_for_msg) const { return lvl_for_msg <= lvl; }
 
-    void error(const char *tag, const char *fmt, ...) const
-    {
+    void error(const char *tag, const char *fmt, ...) const {
         if (lvl < ERROR)
             return;
         va_list ap;
@@ -40,8 +36,7 @@ public:
         va_end(ap);
     }
 
-    void warning(const char *tag, const char *fmt, ...) const
-    {
+    void warning(const char *tag, const char *fmt, ...) const {
         if (lvl < WARNING)
             return;
         va_list ap;
@@ -50,8 +45,7 @@ public:
         va_end(ap);
     }
 
-    void info(const char *tag, const char *fmt, ...) const
-    {
+    void info(const char *tag, const char *fmt, ...) const {
         if (lvl < INFO)
             return;
         va_list ap;
@@ -60,8 +54,7 @@ public:
         va_end(ap);
     }
 
-    void debug(const char *tag, const char *fmt, ...) const
-    {
+    void debug(const char *tag, const char *fmt, ...) const {
         if (lvl < DEBUG)
             return;
         va_list ap;
@@ -70,8 +63,7 @@ public:
         va_end(ap);
     }
 
-    void verbose(const char *tag, const char *fmt, ...) const
-    {
+    void verbose(const char *tag, const char *fmt, ...) const {
         if (lvl < VERBOSE)
             return;
         va_list ap;
