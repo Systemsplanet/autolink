@@ -5,8 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-namespace autolink
-{
+namespace autolink {
 static constexpr int WEB_RING_CAP = 200;
 static constexpr int WEB_LINE_CAP = 180;
 
@@ -29,6 +28,7 @@ struct WebSnapshot {
     uint8_t fillMode;
     uint8_t msgPaused;
     uint8_t linkMode;
+    int32_t txDelayMs;
     char role[8];
 };
 
