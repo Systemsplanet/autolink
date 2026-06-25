@@ -1,8 +1,6 @@
-// Singleton leveled logger. Use Log::log().info(...) —
-// the ctor is private; the accessor hands out a
-// Meyers-singleton instance. Sink is optional; when
-// set, output fans out to the host buffer (web
-// dashboard log endpoint) in addition to stdout.
+// Singleton leveled logger.
+// Log::log().info(tag, fmt, ...).
+// Optional sink fans to web dashboard.
 #pragma once
 #include <stdarg.h>
 #include <stddef.h>
@@ -30,13 +28,9 @@ public:
     void setLevel(Level lv) { lvl = lv; }
     Level getLevel() const { return lvl; }
 
-    bool wouldEmit(Level lvl_for_msg) const
-    {
-        return lvl_for_msg <= lvl;
-    }
+    bool wouldEmit(Level lvl_for_msg) const { return lvl_for_msg <= lvl; }
 
-    void error(const char *tag, const char *fmt,
-               ...) const
+    void error(const char *tag, const char *fmt, ...) const
     {
         if (lvl < ERROR)
             return;
@@ -46,8 +40,7 @@ public:
         va_end(ap);
     }
 
-    void warning(const char *tag, const char *fmt,
-                 ...) const
+    void warning(const char *tag, const char *fmt, ...) const
     {
         if (lvl < WARNING)
             return;
@@ -57,8 +50,7 @@ public:
         va_end(ap);
     }
 
-    void info(const char *tag, const char *fmt,
-              ...) const
+    void info(const char *tag, const char *fmt, ...) const
     {
         if (lvl < INFO)
             return;
@@ -68,8 +60,7 @@ public:
         va_end(ap);
     }
 
-    void debug(const char *tag, const char *fmt,
-               ...) const
+    void debug(const char *tag, const char *fmt, ...) const
     {
         if (lvl < DEBUG)
             return;
@@ -79,8 +70,7 @@ public:
         va_end(ap);
     }
 
-    void verbose(const char *tag, const char *fmt,
-                 ...) const
+    void verbose(const char *tag, const char *fmt, ...) const
     {
         if (lvl < VERBOSE)
             return;
@@ -90,9 +80,7 @@ public:
         va_end(ap);
     }
 
-
-    using LogSink = void (*)(char sev, const char *tag,
-                             const char *msg,
+    using LogSink = void (*)(char sev, const char *tag, const char *msg,
                              void *ctx);
     void setSink(LogSink fn, void *ctx = nullptr);
     void clearSink();
@@ -107,8 +95,8 @@ private:
     Log(const Log &) = delete;
     Log &operator=(const Log &) = delete;
 
-    void emit(const char *sev, const char *tag,
-              const char *fmt, va_list ap) const;
+    void emit(const char *sev, const char *tag, const char *fmt,
+              va_list ap) const;
 };
 
 } // namespace autolink
