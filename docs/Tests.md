@@ -129,7 +129,7 @@ Run via `cd test && make itest`. Each runs for seconds and exits
 `test/itest/test_embedded/test_embedded.ino` is a single-board
 self-loopback sketch. Wire **GPIO17 (TX) → GPIO16 (RX)** on the
 same ESP32, flash, open the serial monitor. It exercises the
-`AutoLink` facade — construction, the Stream / state / stats /
+`AutoLink` facade — construction, the byte-stream / state / stats /
 error APIs, `blinkWait` paths — without needing a second board.
 
 For a real two-board end-to-end test, flash
