@@ -11,8 +11,7 @@
 
 using namespace autolink;
 
-class MockListener : public UtilFrameRx::Listener
-{
+class MockListener : public UtilFrameRx::Listener {
 public:
     std::vector<std::vector<uint8_t>> payloads;
     std::vector<uint8_t> seqs;
@@ -20,32 +19,27 @@ public:
     std::vector<uint8_t> naks;
     int errors = 0;
     int dropAfterErrors = -1;
-    bool onPayload(uint8_t cobsSeq, const uint8_t *b, int n) override
-    {
+    bool onPayload(uint8_t cobsSeq, const uint8_t *b, int n) override {
         seqs.push_back(cobsSeq);
         payloads.emplace_back(b, b + n);
         return false;
     }
-    bool onAck(uint8_t ackedCobsSeq) override
-    {
+    bool onAck(uint8_t ackedCobsSeq) override {
         acks.push_back(ackedCobsSeq);
         return false;
     }
-    bool onNak(uint8_t missingCobsSeq) override
-    {
+    bool onNak(uint8_t missingCobsSeq) override {
         naks.push_back(missingCobsSeq);
         return false;
     }
-    bool onFrameError() override
-    {
+    bool onFrameError() override {
         errors++;
         return dropAfterErrors >= 0 && errors >= dropAfterErrors;
     }
 };
 
 static std::vector<uint8_t> wireFrame(const std::vector<uint8_t> &payload,
-                                      uint8_t cobsSeq = 0)
-{
+                                      uint8_t cobsSeq = 0) {
     std::vector<uint8_t> raw;
     raw.push_back(cobsSeq);
     raw.insert(raw.end(), payload.begin(), payload.end());
@@ -58,8 +52,7 @@ static std::vector<uint8_t> wireFrame(const std::vector<uint8_t> &payload,
     return enc;
 }
 
-void test_single_frame()
-{
+void test_single_frame() {
     std::cout << "\n=== Test: Single Frame Delivered with cobsSeq ==="
               << std::endl;
     MockListener lis;
@@ -73,8 +66,7 @@ void test_single_frame()
     std::cout << "PASS" << std::endl;
 }
 
-void test_split_across_feeds()
-{
+void test_split_across_feeds() {
     std::cout << "\n=== Test: Frame Split Across Feeds ===" << std::endl;
     MockListener lis;
     UtilFrameRx rx(lis);
@@ -90,8 +82,7 @@ void test_split_across_feeds()
     std::cout << "PASS" << std::endl;
 }
 
-void test_back_to_back_frames()
-{
+void test_back_to_back_frames() {
     std::cout << "\n=== Test: Back-to-Back Frames in One Feed ===" << std::endl;
     MockListener lis;
     UtilFrameRx rx(lis);
@@ -106,8 +97,7 @@ void test_back_to_back_frames()
     std::cout << "PASS" << std::endl;
 }
 
-void test_bad_crc_is_error()
-{
+void test_bad_crc_is_error() {
     std::cout << "\n=== Test: Bad CRC Reports Error, Stream Stays Synced ==="
               << std::endl;
     MockListener lis;
@@ -124,8 +114,7 @@ void test_bad_crc_is_error()
     std::cout << "PASS" << std::endl;
 }
 
-void test_malformed_and_crc_only_are_errors()
-{
+void test_malformed_and_crc_only_are_errors() {
     std::cout << "\n=== Test: Malformed COBS / CRC-Only Frames ==="
               << std::endl;
     MockListener lis;
@@ -141,8 +130,7 @@ void test_malformed_and_crc_only_are_errors()
     std::cout << "PASS" << std::endl;
 }
 
-void test_oversize_frame()
-{
+void test_oversize_frame() {
     std::cout << "\n=== Test: Oversize Frame Overflow ===" << std::endl;
     MockListener lis;
     UtilFrameRx rx(lis);
@@ -158,8 +146,7 @@ void test_oversize_frame()
     std::cout << "PASS" << std::endl;
 }
 
-void test_keepalive_atom_skipped()
-{
+void test_keepalive_atom_skipped() {
     std::cout << "\n=== Test: 0x00 0x00 Keepalive Atom Skipped ==="
               << std::endl;
     MockListener lis;
@@ -170,8 +157,7 @@ void test_keepalive_atom_skipped()
     std::cout << "PASS" << std::endl;
 }
 
-void test_keepalive_atom_split_across_feeds()
-{
+void test_keepalive_atom_split_across_feeds() {
     std::cout << "\n=== Test: 0x00 0x00 Split Across Feeds ===" << std::endl;
     MockListener lis;
     UtilFrameRx rx(lis);
@@ -183,8 +169,7 @@ void test_keepalive_atom_split_across_feeds()
     std::cout << "PASS" << std::endl;
 }
 
-void test_keepalive_after_partial_frame()
-{
+void test_keepalive_after_partial_frame() {
     std::cout << "\n=== Test: 0x00 0x00 After Partial Frame ===" << std::endl;
     MockListener lis;
     UtilFrameRx rx(lis);
@@ -194,8 +179,7 @@ void test_keepalive_after_partial_frame()
     std::cout << "PASS" << std::endl;
 }
 
-void test_frames_around_keepalive()
-{
+void test_frames_around_keepalive() {
     std::cout << "\n=== Test: Frames Around Keepalive Atoms ===" << std::endl;
     MockListener lis;
     UtilFrameRx rx(lis);
@@ -212,8 +196,7 @@ void test_frames_around_keepalive()
     std::cout << "PASS" << std::endl;
 }
 
-void test_lone_zero_still_skipped()
-{
+void test_lone_zero_still_skipped() {
     std::cout << "\n=== Test: Lone Stray 0x00 Still Skipped ===" << std::endl;
     MockListener lis;
     UtilFrameRx rx(lis);
@@ -229,8 +212,7 @@ void test_lone_zero_still_skipped()
     std::cout << "PASS" << std::endl;
 }
 
-void test_drop_stops_feed_early()
-{
+void test_drop_stops_feed_early() {
     std::cout << "\n=== Test: Listener Drop Stops Feed Early ===" << std::endl;
     MockListener lis;
     lis.dropAfterErrors = 2;
@@ -244,8 +226,7 @@ void test_drop_stops_feed_early()
     std::cout << "PASS" << std::endl;
 }
 
-void test_reset_discards_partial()
-{
+void test_reset_discards_partial() {
     std::cout << "\n=== Test: reset() Discards Partial Frame ===" << std::endl;
     MockListener lis;
     UtilFrameRx rx(lis);
@@ -258,8 +239,7 @@ void test_reset_discards_partial()
     std::cout << "PASS" << std::endl;
 }
 
-void test_zero_byte_payload_with_cobsSeq()
-{
+void test_zero_byte_payload_with_cobsSeq() {
     std::cout << "\n=== Test: Zero-Byte Payload Delivered with cobsSeq ==="
               << std::endl;
     MockListener lis;
@@ -272,8 +252,7 @@ void test_zero_byte_payload_with_cobsSeq()
     std::cout << "PASS" << std::endl;
 }
 
-void test_max_cobsSeq()
-{
+void test_max_cobsSeq() {
     std::cout << "\n=== Test: cobsSeq=0xFD (max data) Passes Through ==="
               << std::endl;
     MockListener lis;
@@ -305,8 +284,7 @@ void test_max_cobsSeq()
     std::cout << "PASS" << std::endl;
 }
 
-int main()
-{
+int main() {
     std::cout << "=== Running UtilFrameRx Tests ===" << std::endl;
     test_single_frame();
     test_split_across_feeds();
