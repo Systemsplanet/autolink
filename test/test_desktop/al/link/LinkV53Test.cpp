@@ -1,7 +1,4 @@
-// Baud preference + err-rate window + header
-// coalescing + re-sweep timing.
-
-
+// Baud preference + err-rate window.
 #ifndef ARDUINO
 
 #    include <iostream>
@@ -13,9 +10,7 @@ using namespace autolink;
 
 static void test_v53_preferred_baud_recorded_on_lock()
 {
-    std::cout
-        << "\n=== preferredBaud_ recorded on lock ==="
-        << std::endl;
+    std::cout << "\n=== preferredBaud_ recorded on lock ===" << std::endl;
     AutoLinkConfig cfg;
     cfg.allowedBauds[0] = 115200;
     cfg.allowedBauds[1] = 9600;
@@ -34,16 +29,13 @@ static void test_v53_preferred_baud_recorded_on_lock()
     Diag d;
     ping.getDiag(d);
 
-
     assert(d.preferredBaud == 1);
     std::cout << "PASS" << std::endl;
 }
 
 static void test_v53_resweep_starts_at_preferred_baud()
 {
-    std::cout << "\n=== re-sweep starts at "
-                 "preferredBaud_ ==="
-              << std::endl;
+    std::cout << "\n=== re-sweep starts at preferredBaud_ ===" << std::endl;
     AutoLinkConfig cfg;
     cfg.allowedBauds[0] = 115200;
     cfg.allowedBauds[1] = 9600;
@@ -65,7 +57,6 @@ static void test_v53_resweep_starts_at_preferred_baud()
     ping.getDiag(d);
     assert(d.preferredBaud == 1);
 
-
     cfg.allowedBauds[0] = 115200;
     cfg.allowedBauds[1] = 9600;
     MockHal mHal2, sHal2;
@@ -77,7 +68,6 @@ static void test_v53_resweep_starts_at_preferred_baud()
     Diag d2;
     ping2.getDiag(d2);
 
-
     MockHal mHal3, sHal3;
     mHal3.peer = &sHal3;
     sHal3.peer = &mHal3;
@@ -85,7 +75,6 @@ static void test_v53_resweep_starts_at_preferred_baud()
     Link pong3(sHal3, false, cfg);
     ping3.begin();
     pong3.begin();
-
 
     for (int i = 0; i < 30; i++) {
         mHal3.pumpClock(50);
@@ -99,27 +88,21 @@ static void test_v53_resweep_starts_at_preferred_baud()
     Diag d3;
     ping3.getDiag(d3);
 
-
     std::vector<uint8_t> garbage(300, 0xCC);
     for (int b = 0; b < 25; b++) {
-        ping3.onRx(garbage.data(),
-                   (int)garbage.size());
+        ping3.onRx(garbage.data(), (int)garbage.size());
         if (ping3.getState() == State::SWP)
             break;
     }
     assert(ping3.getState() == State::SWP);
 
-
-    assert(ping3.getCurrentSpdIndex() ==
-           (int)cfg.allowedBaudsCount - 1);
+    assert(ping3.getCurrentSpdIndex() == (int)cfg.allowedBaudsCount - 1);
     std::cout << "PASS" << std::endl;
 }
 
-static void
-test_v53_err_rate_window_drops_on_sustained_noise()
+static void test_v53_err_rate_window_drops_on_sustained_noise()
 {
-    std::cout << "\n=== errRateWindow trips on "
-                 "sustained noise ==="
+    std::cout << "\n=== errRateWindow trips on sustained noise ==="
               << std::endl;
     AutoLinkConfig cfg;
     cfg.allowedBauds[0] = 115200;
@@ -137,12 +120,10 @@ test_v53_err_rate_window_drops_on_sustained_noise()
     negotiate_to_ok(ping, pong, mHal, sHal);
     assert(ping.getState() == State::OK);
 
-
     mHal.now = 0;
     mHal.now += 500;
     ping.onTimer();
     assert(ping.getState() == State::OK);
-
 
     std::vector<uint8_t> burst(300, 0xCC);
     mHal.now = 1000;
@@ -162,9 +143,7 @@ test_v53_err_rate_window_drops_on_sustained_noise()
 
 static void test_v53_baud_retries_cleared_on_reset()
 {
-    std::cout << "\n=== baudRetries_ cleared on every "
-                 "reset ==="
-              << std::endl;
+    std::cout << "\n=== baudRetries_ cleared on every reset ===" << std::endl;
     AutoLinkConfig cfg;
     cfg.allowedBauds[0] = 115200;
     cfg.allowedBaudsCount = 1;
@@ -184,7 +163,6 @@ static void test_v53_baud_retries_cleared_on_reset()
     ping.getDiag(d0);
     assert(d0.baudRetries == 0);
 
-
     std::vector<uint8_t> garbage(300, 0xCC);
     for (int b = 0; b < 25; b++) {
         ping.onRx(garbage.data(), (int)garbage.size());
@@ -200,9 +178,7 @@ static void test_v53_baud_retries_cleared_on_reset()
 
 static void test_v53_short_message_coalesces()
 {
-    std::cout << "\n=== short messages coalesce "
-                 "header + data ==="
-              << std::endl;
+    std::cout << "\n=== short messages coalesce header + data ===" << std::endl;
     AutoLinkConfig cfg;
     cfg.allowedBauds[0] = 115200;
     cfg.allowedBaudsCount = 1;
@@ -244,8 +220,7 @@ static void test_v53_short_message_coalesces()
     int got = 0;
     uint8_t out[256];
     int n;
-    while ((n = pong.recvMsg(out, sizeof out)) > 0 &&
-           got < 10) {
+    while ((n = pong.recvMsg(out, sizeof out)) > 0 && got < 10) {
         assert(n == 100);
 
         for (int i = 0; i < 100; i++) {
@@ -259,15 +234,13 @@ static void test_v53_short_message_coalesces()
 
 int main()
 {
-    std::cout << "=== Running Reliability Tests ==="
-              << std::endl;
+    std::cout << "=== Running Reliability Tests ===" << std::endl;
     test_v53_preferred_baud_recorded_on_lock();
     test_v53_resweep_starts_at_preferred_baud();
     test_v53_err_rate_window_drops_on_sustained_noise();
     test_v53_baud_retries_cleared_on_reset();
     test_v53_short_message_coalesces();
-    std::cout << "\n=== Reliability Tests Completed "
-                 "Successfully ==="
+    std::cout << "\n=== Reliability Tests Completed Successfully ==="
               << std::endl;
     return 0;
 }
