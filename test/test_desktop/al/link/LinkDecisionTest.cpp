@@ -6,8 +6,7 @@
 
 using namespace autolink;
 
-static void test_classifyGap_first_frame()
-{
+static void test_classifyGap_first_frame() {
     std::cout << "\n=== Test: classifyGap first frame (rxSeqSet=false) ==="
               << std::endl;
     int d;
@@ -19,8 +18,7 @@ static void test_classifyGap_first_frame()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_classifyGap_forward()
-{
+static void test_classifyGap_forward() {
     std::cout << "\n=== Test: classifyGap forward (expected = cobsSeq) ==="
               << std::endl;
     int d;
@@ -34,8 +32,7 @@ static void test_classifyGap_forward()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_classifyGap_stale_duplicate()
-{
+static void test_classifyGap_stale_duplicate() {
     std::cout << "\n=== Test: classifyGap stale duplicate (diff=0) ==="
               << std::endl;
     int d;
@@ -46,8 +43,7 @@ static void test_classifyGap_stale_duplicate()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_classifyGap_stale_wraparound()
-{
+static void test_classifyGap_stale_wraparound() {
     std::cout << "\n=== Test: classifyGap stale wraparound (diff > 127) ==="
               << std::endl;
     int d;
@@ -62,8 +58,7 @@ static void test_classifyGap_stale_wraparound()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_classifyGap_gap_small()
-{
+static void test_classifyGap_gap_small() {
     std::cout << "\n=== Test: classifyGap gap (diff 1..127) ===" << std::endl;
     int d;
 
@@ -81,8 +76,7 @@ static void test_classifyGap_gap_small()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_classifyGap_out_param_optional()
-{
+static void test_classifyGap_out_param_optional() {
     std::cout << "\n=== Test: classifyGap out-param is optional ==="
               << std::endl;
 
@@ -93,8 +87,7 @@ static void test_classifyGap_out_param_optional()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decideArqSlot_hold()
-{
+static void test_decideArqSlot_hold() {
     std::cout << "\n=== Test: decideArqSlot hold (age < RTO) ===" << std::endl;
     assert(decideArqSlot(50, 0, 100, 5) == ArqAction::Hold);
     assert(decideArqSlot(99, 0, 100, 5) == ArqAction::Hold);
@@ -102,8 +95,7 @@ static void test_decideArqSlot_hold()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decideArqSlot_retx()
-{
+static void test_decideArqSlot_retx() {
     std::cout << "\n=== Test: decideArqSlot retx (age >= RTO and under cap) ==="
               << std::endl;
 
@@ -113,8 +105,7 @@ static void test_decideArqSlot_retx()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decideArqSlot_drop()
-{
+static void test_decideArqSlot_drop() {
     std::cout << "\n=== Test: decideArqSlot drop (retxCount >= maxRetx) ==="
               << std::endl;
     assert(decideArqSlot(150, 5, 100, 5) == ArqAction::Drop);
@@ -125,8 +116,7 @@ static void test_decideArqSlot_drop()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decideSwpTick_enterLck()
-{
+static void test_decideSwpTick_enterLck() {
     std::cout << "\n=== Test: decideSwpTick EnterLck (spdI past end) ==="
               << std::endl;
     assert(decideSwpTick(2, 2, 0, 3, false) == SwpAction::EnterLck);
@@ -136,8 +126,7 @@ static void test_decideSwpTick_enterLck()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decideSwpTick_restartSweep()
-{
+static void test_decideSwpTick_restartSweep() {
     std::cout << "\n=== Test: decideSwpTick RestartSweep (lckExhausted) ==="
               << std::endl;
 
@@ -145,8 +134,7 @@ static void test_decideSwpTick_restartSweep()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decideSwpTick_sendPingSame()
-{
+static void test_decideSwpTick_sendPingSame() {
     std::cout
         << "\n=== Test: decideSwpTick SendPingSame (more samples needed) ==="
         << std::endl;
@@ -157,8 +145,7 @@ static void test_decideSwpTick_sendPingSame()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decideSwpTick_sendPingAdvance()
-{
+static void test_decideSwpTick_sendPingAdvance() {
     std::cout << "\n=== Test: decideSwpTick SendPingAdvance (last sample) ==="
               << std::endl;
 
@@ -168,8 +155,7 @@ static void test_decideSwpTick_sendPingAdvance()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decideLckTick_sendReq()
-{
+static void test_decideLckTick_sendReq() {
     std::cout << "\n=== Test: decideLckTick SendReq (under threshold) ==="
               << std::endl;
     assert(decideLckTick(1, 4) == LckAction::SendReq);
@@ -178,8 +164,7 @@ static void test_decideLckTick_sendReq()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decideLckTick_dropAndResweep()
-{
+static void test_decideLckTick_dropAndResweep() {
     std::cout << "\n=== Test: decideLckTick DropAndResweep (over threshold) ==="
               << std::endl;
     assert(decideLckTick(5, 4) == LckAction::DropAndResweep);
@@ -188,8 +173,7 @@ static void test_decideLckTick_dropAndResweep()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decideIdleWatchdog_hold()
-{
+static void test_decideIdleWatchdog_hold() {
     std::cout
         << "\n=== Test: decideIdleWatchdog Hold (under threshold or active TX) ==="
         << std::endl;
@@ -202,8 +186,7 @@ static void test_decideIdleWatchdog_hold()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decideIdleWatchdog_drop()
-{
+static void test_decideIdleWatchdog_drop() {
     std::cout
         << "\n=== Test: decideIdleWatchdog Drop (both TX and RX silent) ==="
         << std::endl;
@@ -216,8 +199,7 @@ static void test_decideIdleWatchdog_drop()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decideKeepalive_hold_paused()
-{
+static void test_decideKeepalive_hold_paused() {
     std::cout << "\n=== Test: decideKeepalive Hold when paused ==="
               << std::endl;
 
@@ -226,8 +208,7 @@ static void test_decideKeepalive_hold_paused()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decideKeepalive_hold_recent()
-{
+static void test_decideKeepalive_hold_recent() {
     std::cout << "\n=== Test: decideKeepalive Hold (recent TX) ==="
               << std::endl;
     assert(decideKeepalive(0, 3000, false) == KeepaliveAction::Hold);
@@ -236,8 +217,7 @@ static void test_decideKeepalive_hold_recent()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decideKeepalive_emit()
-{
+static void test_decideKeepalive_emit() {
     std::cout << "\n=== Test: decideKeepalive Emit (txAge >= timeout/3) ==="
               << std::endl;
     assert(decideKeepalive(1000, 3000, false) == KeepaliveAction::Emit);
@@ -246,8 +226,7 @@ static void test_decideKeepalive_emit()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decideAppBuf_accept()
-{
+static void test_decideAppBuf_accept() {
     std::cout << "\n=== Test: decideAppBuf Accept (full push) ===" << std::endl;
     assert(decideAppBuf(16, 16) == AppBufAction::Accept);
     assert(decideAppBuf(0, 0) == AppBufAction::Accept);
@@ -255,8 +234,7 @@ static void test_decideAppBuf_accept()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decideAppBuf_holdAck()
-{
+static void test_decideAppBuf_holdAck() {
     std::cout << "\n=== Test: decideAppBuf HoldAck (partial push) ==="
               << std::endl;
     assert(decideAppBuf(0, 16) == AppBufAction::HoldAck);
@@ -264,8 +242,7 @@ static void test_decideAppBuf_holdAck()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decideMasterPhase1Timeout_alwaysStay()
-{
+static void test_decideMasterPhase1Timeout_alwaysStay() {
     std::cout << "\n=== Test: decideMasterPhase1Timeout always Stay ==="
               << std::endl;
     assert(decideMasterPhase1Timeout(0, 6) == SwpPhaseAction::Stay);
@@ -276,24 +253,21 @@ static void test_decideMasterPhase1Timeout_alwaysStay()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decideMasterPhase1Ack_locks()
-{
+static void test_decideMasterPhase1Ack_locks() {
     std::cout << "\n=== Test: decideMasterPhase1Ack always Locks ==="
               << std::endl;
     assert(decideMasterPhase1Ack() == SwpPhaseAction::Lock);
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decideMasterPhase2Ack_promotes()
-{
+static void test_decideMasterPhase2Ack_promotes() {
     std::cout << "\n=== Test: decideMasterPhase2Ack always Promotes ==="
               << std::endl;
     assert(decideMasterPhase2Ack() == SwpPhaseAction::PromoteToPhase3);
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decideMasterPhase3Ack_stays()
-{
+static void test_decideMasterPhase3Ack_stays() {
     std::cout << "\n=== Test: decideMasterPhase3Ack Stay (below threshold) ==="
               << std::endl;
     assert(decideMasterPhase3Ack(0, 2) == SwpPhaseAction::Stay);
@@ -301,8 +275,7 @@ static void test_decideMasterPhase3Ack_stays()
     assert(decideMasterPhase3Ack(1, 3) == SwpPhaseAction::Stay);
     std::cout << "PASS" << std::endl;
 }
-static void test_decideMasterPhase3Ack_locks()
-{
+static void test_decideMasterPhase3Ack_locks() {
     std::cout << "\n=== Test: decideMasterPhase3Ack Lock (>= threshold) ==="
               << std::endl;
     assert(decideMasterPhase3Ack(2, 2) == SwpPhaseAction::Lock);
@@ -311,8 +284,7 @@ static void test_decideMasterPhase3Ack_locks()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decideMasterPhase2Timeout_advance()
-{
+static void test_decideMasterPhase2Timeout_advance() {
     std::cout << "\n=== Test: decideMasterPhase2Timeout Stay (advance baud) ==="
               << std::endl;
     assert(decideMasterPhase2Timeout(0, 5) == SwpPhaseAction::Stay);
@@ -320,8 +292,7 @@ static void test_decideMasterPhase2Timeout_advance()
     assert(decideMasterPhase2Timeout(3, 5) == SwpPhaseAction::Stay);
     std::cout << "PASS" << std::endl;
 }
-static void test_decideMasterPhase2Timeout_fallback()
-{
+static void test_decideMasterPhase2Timeout_fallback() {
     std::cout
         << "\n=== Test: decideMasterPhase2Timeout Fallback (last baud) ==="
         << std::endl;
@@ -332,8 +303,7 @@ static void test_decideMasterPhase2Timeout_fallback()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decideMasterPhase3Timeout_advance()
-{
+static void test_decideMasterPhase3Timeout_advance() {
     std::cout
         << "\n=== Test: decideMasterPhase3Timeout Stay (next baud exists) ==="
         << std::endl;
@@ -341,8 +311,7 @@ static void test_decideMasterPhase3Timeout_advance()
     assert(decideMasterPhase3Timeout(3, 5) == SwpPhaseAction::Stay);
     std::cout << "PASS" << std::endl;
 }
-static void test_decideMasterPhase3Timeout_fallback()
-{
+static void test_decideMasterPhase3Timeout_fallback() {
     std::cout
         << "\n=== Test: decideMasterPhase3Timeout Fallback (no more bauds) ==="
         << std::endl;
@@ -353,32 +322,28 @@ static void test_decideMasterPhase3Timeout_fallback()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decidePongPhase1Ping_sendsAck()
-{
+static void test_decidePongPhase1Ping_sendsAck() {
     std::cout << "\n=== Test: decidePongPhase1Ping sends PONG_ACK ==="
               << std::endl;
     assert(decidePongPhase1Ping() == SwpPhaseAction::SendPongAck);
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decidePongPhase2Ping_promotes()
-{
+static void test_decidePongPhase2Ping_promotes() {
     std::cout << "\n=== Test: decidePongPhase2Ping promotes to PHASE3 ==="
               << std::endl;
     assert(decidePongPhase2Ping() == SwpPhaseAction::PromoteToPhase3);
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decidePongPhase3Ack_stays()
-{
+static void test_decidePongPhase3Ack_stays() {
     std::cout << "\n=== Test: decidePongPhase3Ack Stay (below threshold) ==="
               << std::endl;
     assert(decidePongPhase3Ack(0, 2) == SwpPhaseAction::Stay);
     assert(decidePongPhase3Ack(1, 2) == SwpPhaseAction::Stay);
     std::cout << "PASS" << std::endl;
 }
-static void test_decidePongPhase3Ack_locks()
-{
+static void test_decidePongPhase3Ack_locks() {
     std::cout << "\n=== Test: decidePongPhase3Ack Lock (>= threshold) ==="
               << std::endl;
     assert(decidePongPhase3Ack(2, 2) == SwpPhaseAction::Lock);
@@ -386,32 +351,28 @@ static void test_decidePongPhase3Ack_locks()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decidePongPhase1Timeout_drops()
-{
+static void test_decidePongPhase1Timeout_drops() {
     std::cout << "\n=== Test: decidePongPhase1Timeout drops to PHASE1 ==="
               << std::endl;
     assert(decidePongPhase1Timeout() == SwpPhaseAction::DropToPhase1);
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decidePongPhase2Timeout_advance()
-{
+static void test_decidePongPhase2Timeout_advance() {
     std::cout << "\n=== Test: decidePongPhase2Timeout Stay (advance baud) ==="
               << std::endl;
     assert(decidePongPhase2Timeout(1, 5) == SwpPhaseAction::Stay);
     assert(decidePongPhase2Timeout(4, 5) == SwpPhaseAction::Stay);
     std::cout << "PASS" << std::endl;
 }
-static void test_decidePongPhase2Timeout_drops()
-{
+static void test_decidePongPhase2Timeout_drops() {
     std::cout << "\n=== Test: decidePongPhase2Timeout drops (no more bauds) ==="
               << std::endl;
     assert(decidePongPhase2Timeout(0, 5) == SwpPhaseAction::DropToPhase1);
     std::cout << "PASS" << std::endl;
 }
 
-static void test_isLockPayload_valid()
-{
+static void test_isLockPayload_valid() {
     std::cout << "\n=== Test: isLockPayload valid ===" << std::endl;
     int idx = -1;
     assert(isLockPayload(0x44, 5, &idx) == true && idx == 0);
@@ -420,8 +381,7 @@ static void test_isLockPayload_valid()
     assert(isLockPayload(0x44, 1, &idx) == true && idx == 0);
     std::cout << "PASS" << std::endl;
 }
-static void test_isLockPayload_belowRange()
-{
+static void test_isLockPayload_belowRange() {
     std::cout << "\n=== Test: isLockPayload below range (PING / PONG / REQ) ==="
               << std::endl;
     int idx = -1;
@@ -431,8 +391,7 @@ static void test_isLockPayload_belowRange()
     assert(isLockPayload(0x43, 5, &idx) == false);
     std::cout << "PASS" << std::endl;
 }
-static void test_isLockPayload_aboveRange()
-{
+static void test_isLockPayload_aboveRange() {
     std::cout << "\n=== Test: isLockPayload above range ===" << std::endl;
     int idx = -1;
     assert(isLockPayload(0x49, 5, &idx) == false);
@@ -440,8 +399,7 @@ static void test_isLockPayload_aboveRange()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_isBaudIndexPayload_valid()
-{
+static void test_isBaudIndexPayload_valid() {
     std::cout << "\n=== Test: isBaudIndexPayload valid ===" << std::endl;
     int idx = -1;
     assert(isBaudIndexPayload(0, 5, &idx) == true && idx == 0);
@@ -449,8 +407,7 @@ static void test_isBaudIndexPayload_valid()
     assert(isBaudIndexPayload(4, 5, &idx) == true && idx == 4);
     std::cout << "PASS" << std::endl;
 }
-static void test_isBaudIndexPayload_aboveRange()
-{
+static void test_isBaudIndexPayload_aboveRange() {
     std::cout << "\n=== Test: isBaudIndexPayload above range ===" << std::endl;
     int idx = -1;
     assert(isBaudIndexPayload(5, 5, &idx) == false);
@@ -458,8 +415,7 @@ static void test_isBaudIndexPayload_aboveRange()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_decideResetPolicy_alwaysSlowest()
-{
+static void test_decideResetPolicy_alwaysSlowest() {
     std::cout << "\n=== Test: decideResetPolicy always StartAtSlowest ==="
               << std::endl;
     assert(decideResetPolicy(false, 0, 2) == ResetAction::StartAtSlowest);
@@ -469,8 +425,7 @@ static void test_decideResetPolicy_alwaysSlowest()
     std::cout << "PASS" << std::endl;
 }
 
-static void test_jitterPhase1Dwell_bounds()
-{
+static void test_jitterPhase1Dwell_bounds() {
     std::cout << "\n=== Test: jitterPhase1Dwell bounds + clamp ==="
               << std::endl;
     const int bases[] = { 1, 2, 6, 50, 100, 255 };
@@ -508,8 +463,7 @@ static void test_jitterPhase1Dwell_bounds()
     std::cout << "PASS" << std::endl;
 }
 
-int main()
-{
+int main() {
     std::cout
         << "=== Running LinkDecision Tests (the fix: pure-decision extraction) ==="
         << std::endl;
