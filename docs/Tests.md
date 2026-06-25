@@ -50,7 +50,7 @@ tree.
 
 # 🧪 Unit Suites
 
-22 unit binaries, organised one-class-per-file. Run via
+30 unit binaries, organised one-class-per-file. Run via
 `cd test && make test`. Each prints a per-suite
 `[PASS]/[FAIL] <name> <ms> <bytes> rss=<KiB>` line, then a
 summary block.
@@ -64,10 +64,10 @@ summary block.
 | `run_test_baudsweep` | `al/link/LinkBaudSweepTest.cpp` | Baud scoring, threshold fall-back, real cable scenario |
 | `run_test_log` | `al/util/LogTest.cpp` | Level filtering, sink registration, context pointer, truncation |
 | `run_test_mockhal` | `al/hal/MockHalTest.cpp` | `MockHal` IHal mock: setSpd, sendBreak, TX buffer, app buffer, clock |
-| `run_test_autolink` | `AutoLinkTest.cpp` | `AutoLink` facade: construction, state, stats, stream, message, error control, blinkWait, isHealthy |
-| `run_test_alink_facade` | `AutoLinkFacadeTest.cpp` | `AutoLink` facade: behavioral |
-| `run_test_wiresim_closedloop` | `WireSimClosedLoopTest.cpp` | WireSim 2-node simulator: full OK-state message exchange |
-| `run_test_clock_injection` | `ClockInjectionTest.cpp` | pumpClock/runFor, ACK timeout retx, RTO schedule, cobsSeq wraparound |
+| `run_test_autolink` | `al/AutoLinkTest.cpp` | `AutoLink` facade: construction, state, stats, stream, message, error control, blinkWait, isHealthy |
+| `run_test_alink_facade` | `al/AutoLinkFacadeTest.cpp` | `AutoLink` facade: behavioral |
+| `run_test_wiresim_closedloop` | `al/WireSimClosedLoopTest.cpp` | WireSim 2-node simulator: full OK-state message exchange |
+| `run_test_clock_injection` | `al/ClockInjectionTest.cpp` | pumpClock/runFor, ACK timeout retx, RTO schedule, cobsSeq wraparound |
 | `run_test_linkdecision` | `al/link/LinkDecisionTest.cpp` | Pure decision logic: classifyGap, decideArqSlot, decideSwpTick, decideLckTick, decideIdleWatchdog, decideKeepalive, decideAppBuf |
 | `run_test_alink_io` | `al/link/LinkIOTest.cpp` | Byte I/O, reliable mode, throughput, stats, README scenario, 254→0 wrap regression guard |
 | `run_test_alink_message` | `al/link/LinkMessageTest.cpp` | Message API: round-trip, boundaries, size sweep, CRC reject, corrupt-header resync, 240-chunk ARQ cap, send-rejection error paths |
@@ -75,10 +75,14 @@ summary block.
 | `run_test_alink_cobsseq` | `al/link/LinkCobsSeqTest.cpp` | cobsSeq wraparound, classifyGap, gap accounting, app-buffer-full no-op |
 | `run_test_alink_arq` | `al/link/LinkArqTest.cpp` | ARQ constants, ACK_TYPE=0xFF, state machine, retx, cache hooks |
 | `run_test_alink_web` | `al/web/AutoLinkWebTest.cpp` | Web dashboard protocol parsing, command dispatch |
-| `run_test_alink_v53` | `al/link/LinkV53Test.cpp` | Baud-preference + rate-window regression guards |
-| `run_test_alink_v531` | `al/link/LinkV531Test.cpp` | 3-phase sweep + asymmetric fast detection |
-| `run_test_alink_v531_never_leave_p1` | `al/link/LinkV531NeverLeaveP1Test.cpp` | Phase-1 stuck-peer guard |
+| `run_test_alink_baud_preference` | `al/link/LinkBaudPreferenceTest.cpp` | Baud-preference + rate-window regression guards |
+| `run_test_alink_sweep_phase` | `al/link/LinkSweepPhaseTest.cpp` | 3-phase sweep + asymmetric fast detection |
+| `run_test_alink_sweep_p1_guard` | `al/link/LinkSweepP1GuardTest.cpp` | Phase-1 stuck-peer guard |
 | `run_test_linkreorder` | `al/link/LinkReorderTest.cpp` | Hold-on-gap reorder buffer + staleness cap |
+| `run_test_sync_mode` | `al/SyncModeTest.cpp` | SYNC mode: stop-and-wait send, zero ARQ slots, recovery after wire drop, ACK timeout |
+| `run_test_compile_check` | `al/CompileCheckTest.cpp` | Source-level compile-check for ARDUINO-gated code (EspHal, AutoLinkWeb, PingPongMain, Ping) |
+| `run_test_esp_idf_error_etiquette` | `al/EspIdfErrorEtiquetteTest.cpp` | Source-level audit: every ESP-IDF call site has paired `esp_err_to_name` log |
+| `run_test_version_free_source` | `al/VersionFreeSourceTest.cpp` | Source-level pin for rule 9: no hard-coded X.Y.Z outside the version contract |
 
 The 5 `Link*` files are split from the original monolithic
 `LinkTest.cpp` by functionality area so each file stays small
