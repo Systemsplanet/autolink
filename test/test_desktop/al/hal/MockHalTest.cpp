@@ -3,12 +3,12 @@
 
 #    include <iostream>
 #    include <cassert>
+#    include <type_traits>
 #    include "MockHal.h"
 
 using namespace autolink;
 
-void test_set_spd_records_history()
-{
+void test_set_spd_records_history() {
     std::cout << "\n=== Test: MockHal setSpd Records History ===" << std::endl;
     MockHal hal;
     hal.setSpd(115200);
@@ -20,8 +20,7 @@ void test_set_spd_records_history()
     std::cout << "PASS" << std::endl;
 }
 
-void test_send_break_self_delivery_is_noop_without_peer()
-{
+void test_send_break_self_delivery_is_noop_without_peer() {
     std::cout << "\n=== Test: sendBreak Without Peer Doesn't Self-Deliver ==="
               << std::endl;
     MockHal hal;
@@ -35,8 +34,7 @@ void test_send_break_self_delivery_is_noop_without_peer()
     std::cout << "PASS" << std::endl;
 }
 
-void test_send_break_delivers_to_peer()
-{
+void test_send_break_delivers_to_peer() {
     std::cout << "\n=== Test: sendBreak Delivers to Peer MockHal ==="
               << std::endl;
     MockHal a, b;
@@ -57,8 +55,7 @@ void test_send_break_delivers_to_peer()
     std::cout << "PASS" << std::endl;
 }
 
-void test_tx_buffer_accumulates()
-{
+void test_tx_buffer_accumulates() {
     std::cout << "\n=== Test: MockHal tx Accumulates Buffer ===" << std::endl;
     MockHal hal;
     uint8_t a = 0xFF;
@@ -74,8 +71,7 @@ void test_tx_buffer_accumulates()
     std::cout << "PASS" << std::endl;
 }
 
-void test_timer_state_transitions()
-{
+void test_timer_state_transitions() {
     std::cout << "\n=== Test: MockHal startTimer / stopTimer ===" << std::endl;
     MockHal hal;
     hal.startTimer(50);
@@ -86,8 +82,7 @@ void test_timer_state_transitions()
     std::cout << "PASS" << std::endl;
 }
 
-void test_lock_unlock_balanced()
-{
+void test_lock_unlock_balanced() {
     std::cout << "\n=== Test: MockHal lock / unlock Are Balanced ==="
               << std::endl;
     MockHal hal;
@@ -99,8 +94,35 @@ void test_lock_unlock_balanced()
     std::cout << "PASS" << std::endl;
 }
 
-void test_app_buffer_push_peek_pop_clear()
-{
+// Pins that IHal::lock()/unlock() are non-const. Mutating
+// operation on the HAL's mutex; the const would have
+// hidden the mutation behind the type system.
+void test_lock_unlock_are_nonconst() {
+    std::cout << "\n=== Test: MockHal lock / unlock Are Non-Const ==="
+              << std::endl;
+    MockHal hal;
+    auto lock_mp = &MockHal::lock;
+    auto unlock_mp = &MockHal::unlock;
+
+    // A pointer-to-const-member has a different signature
+    // than a pointer-to-non-const-member. If the method
+    // is const, the unqualified `&MockHal::lock` resolves
+    // to the const overload. After the fix it must
+    // resolve to the non-const overload.
+    static_assert(
+        !std::is_same<decltype(lock_mp), void (MockHal::*)() const>::value,
+        "lock() must NOT be const");
+    static_assert(
+        !std::is_same<decltype(unlock_mp), void (MockHal::*)() const>::value,
+        "unlock() must NOT be const");
+    static_assert(std::is_same<decltype(lock_mp), void (MockHal::*)()>::value,
+                  "lock() must be non-const");
+    static_assert(std::is_same<decltype(unlock_mp), void (MockHal::*)()>::value,
+                  "unlock() must be non-const");
+    std::cout << "PASS" << std::endl;
+}
+
+void test_app_buffer_push_peek_pop_clear() {
     std::cout << "\n=== Test: MockHal App Buffer Push/Peek/Pop/Clear ==="
               << std::endl;
     MockHal hal;
@@ -126,8 +148,7 @@ void test_app_buffer_push_peek_pop_clear()
     std::cout << "PASS" << std::endl;
 }
 
-void test_app_buffer_push_respects_capacity()
-{
+void test_app_buffer_push_respects_capacity() {
     std::cout << "\n=== Test: MockHal App Buffer Capacity Cap ===" << std::endl;
     MockHal hal;
     hal.appBufCap = 4;
@@ -138,8 +159,7 @@ void test_app_buffer_push_respects_capacity()
     std::cout << "PASS" << std::endl;
 }
 
-void test_now_ms_is_injectable()
-{
+void test_now_ms_is_injectable() {
     std::cout << "\n=== Test: MockHal nowMs Is Injectable ===" << std::endl;
     MockHal hal;
     hal.now = 0;
@@ -149,8 +169,7 @@ void test_now_ms_is_injectable()
     std::cout << "PASS" << std::endl;
 }
 
-int main()
-{
+int main() {
     std::cout << "=== Running MockHal Tests ===" << std::endl;
     test_set_spd_records_history();
     test_send_break_self_delivery_is_noop_without_peer();
@@ -158,6 +177,7 @@ int main()
     test_tx_buffer_accumulates();
     test_timer_state_transitions();
     test_lock_unlock_balanced();
+    test_lock_unlock_are_nonconst();
     test_app_buffer_push_peek_pop_clear();
     test_app_buffer_push_respects_capacity();
     test_now_ms_is_injectable();
