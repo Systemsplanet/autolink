@@ -9,22 +9,18 @@
 
 using namespace autolink;
 
-class MockBlinkHal : public IBlinkHal
-{
+class MockBlinkHal : public IBlinkHal {
 public:
     std::vector<std::string> ev;
     void writePin(bool on) override { ev.push_back(on ? "HI" : "LO"); }
-    void startOnce(uint32_t ms) override
-    {
+    void startOnce(uint32_t ms) override {
         ev.push_back("once" + std::to_string(ms));
     }
     void cancel() override { ev.push_back("cancel"); }
-    void delayMs(uint32_t ms) override
-    {
+    void delayMs(uint32_t ms) override {
         ev.push_back("delay" + std::to_string(ms));
     }
-    std::string joined() const
-    {
+    std::string joined() const {
         std::string s;
         for (auto &e : ev) {
             if (!s.empty())
@@ -35,8 +31,7 @@ public:
     }
 };
 
-void test_async_sequence()
-{
+void test_async_sequence() {
     std::cout << "\n=== Test: Async Pattern Sequence ===" << std::endl;
     MockBlinkHal hal;
     UtilBlink b(hal);
@@ -55,8 +50,7 @@ void test_async_sequence()
     std::cout << "PASS" << std::endl;
 }
 
-void test_async_single_flash()
-{
+void test_async_single_flash() {
     std::cout << "\n=== Test: Async Single Flash ===" << std::endl;
     MockBlinkHal hal;
     UtilBlink b(hal);
@@ -67,8 +61,7 @@ void test_async_single_flash()
     std::cout << "PASS" << std::endl;
 }
 
-void test_restart_replaces()
-{
+void test_restart_replaces() {
     std::cout << "\n=== Test: Restart Replaces Running Pattern ==="
               << std::endl;
     MockBlinkHal hal;
@@ -82,8 +75,7 @@ void test_restart_replaces()
     std::cout << "PASS" << std::endl;
 }
 
-void test_cancel()
-{
+void test_cancel() {
     std::cout << "\n=== Test: Cancel Stops and Forces LED Off ===" << std::endl;
     MockBlinkHal hal;
     UtilBlink b(hal);
@@ -98,8 +90,7 @@ void test_cancel()
     std::cout << "PASS" << std::endl;
 }
 
-void test_blocking_sequence()
-{
+void test_blocking_sequence() {
     std::cout << "\n=== Test: Blocking Flash + Pause ===" << std::endl;
     MockBlinkHal hal;
     UtilBlink b(hal);
@@ -113,8 +104,7 @@ void test_blocking_sequence()
     std::cout << "PASS" << std::endl;
 }
 
-void test_blocking_cancels_async()
-{
+void test_blocking_cancels_async() {
     std::cout << "\n=== Test: Blocking Call Cancels Async Pattern ==="
               << std::endl;
     MockBlinkHal hal;
@@ -127,8 +117,7 @@ void test_blocking_cancels_async()
     std::cout << "PASS" << std::endl;
 }
 
-void test_invalid_n_ignored()
-{
+void test_invalid_n_ignored() {
     std::cout << "\n=== Test: n <= 0 Is Ignored ===" << std::endl;
     MockBlinkHal hal;
     UtilBlink b(hal);
@@ -139,8 +128,7 @@ void test_invalid_n_ignored()
     std::cout << "PASS" << std::endl;
 }
 
-int main()
-{
+int main() {
     std::cout << "=== Running UtilBlink Tests ===" << std::endl;
     test_async_sequence();
     test_async_single_flash();
