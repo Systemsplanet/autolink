@@ -29,6 +29,11 @@ what the user rejected. That history is the source of truth.
     before declaring done.** Host tests do NOT compile
     `AutoLinkWeb.cpp`.
   - `arduino-cli-cmd.sh` — wrapper for the toolchain.
+  - `pretty_print.py` — the single canonical pretty-printer
+    for the project. Wraps `clang-format -i` plus a
+    one-time string-merge pass for legacy string-literal
+    splits. Run it on every `.cpp` / `.h` you change. See
+    `build/test_pretty_print.py` for its self-tests.
 
 ## Hard rules
 
@@ -52,6 +57,15 @@ what the user rejected. That history is the source of truth.
    - `cd test && make itest` — host integration suite.
    - `./build/verify_build.sh` — ESP32 cross-compile.
    For protocol changes (`Link.cpp`), also run `make loopback`.
+
+4a. **Never delete the `build/` directory.** It is part of
+    the project. `build_env.sh`, `verify_build.sh`,
+    `arduino-cli-cmd.sh`, `pretty_print.py`,
+    `test_pretty_print.py`, and `verify_build/verify_build.ino`
+    all live there. If you find `build/` missing in a clone
+    or working tree, restore it from git or the last good
+    zip BEFORE doing anything else. The cross-compile
+    wrapper chain depends on it.
 
 5. **Update `docs/Version.md`.** Newest entry on top. One-line
    description, the fix, the regression test, disclosed
@@ -109,16 +123,18 @@ what the user rejected. That history is the source of truth.
 
 14. **Use `arduino-cli-cmd.sh`, never bare `arduino-cli`.**
 
-14a. **Run `clang-format` on every changed `.cpp` / `.h`
-     before zipping.** The project root has a `.clang-format`
-     file. Run:
+14a. **Run `build/pretty_print.py` on every changed `.cpp` /
+     `.h` before zipping.** It wraps `clang-format -i` with
+     the project's `.clang-format` (which has
+     `BreakStringLiterals: false` set) plus a one-time
+     string-merge pass for legacy splits. Run:
      ```
-     find . -name '*.cpp' -o -name '*.h' | xargs clang-format -i
+     build/pretty_print.py $(find . -name '*.cpp' -o -name '*.h')
      ```
      Pre-existing files that were untouched don't need to be
      re-formatted, but any file you change must leave the
-     tree `clang-format`-clean for that file. (The project
-     was pretty-printed once at this baseline.)
+     tree `pretty_print.py`-clean for that file. The
+     self-tests live at `build/test_pretty_print.py`.
 
 15. **Smoke-compile a user sketch with every public include.**
     After `verify_build.sh` passes, compile a one-file `.ino`
@@ -198,7 +214,8 @@ what the user rejected. That history is the source of truth.
 ## Gotchas
 
 - **`portYIELD()`** needs `<freertos/FreeRTOS.h>` at file
-  scope, not inside `namespace autolink { ... }`.
+  scope, not inside `namespace autolink {
+    ... }`.
 - **`arduino-cli --library`** (singular). The plural flag
   doesn't recurse into subdirs.
 - **`AutoLinkWeb.cpp`** isn't covered by host tests. Any
