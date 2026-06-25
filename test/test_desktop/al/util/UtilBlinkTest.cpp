@@ -1,6 +1,4 @@
-// UtilBlink pattern: start/flash/cancel, timer tick
-// correctness.
-
+// UtilBlink pattern: start/flash/cancel.
 #ifndef ARDUINO
 
 #    include <iostream>
@@ -15,10 +13,7 @@ class MockBlinkHal : public IBlinkHal
 {
 public:
     std::vector<std::string> ev;
-    void writePin(bool on) override
-    {
-        ev.push_back(on ? "HI" : "LO");
-    }
+    void writePin(bool on) override { ev.push_back(on ? "HI" : "LO"); }
     void startOnce(uint32_t ms) override
     {
         ev.push_back("once" + std::to_string(ms));
@@ -42,9 +37,7 @@ public:
 
 void test_async_sequence()
 {
-    std::cout
-        << "\n=== Test: Async Pattern Sequence ==="
-        << std::endl;
+    std::cout << "\n=== Test: Async Pattern Sequence ===" << std::endl;
     MockBlinkHal hal;
     UtilBlink b(hal);
     b.start(2, 60, 40);
@@ -54,9 +47,7 @@ void test_async_sequence()
     b.tick();
     assert(!b.active());
 
-    assert(
-        hal.joined() ==
-        "cancel,LO,HI,once60,LO,once40,HI,once60,LO");
+    assert(hal.joined() == "cancel,LO,HI,once60,LO,once40,HI,once60,LO");
 
     size_t n = hal.ev.size();
     b.tick();
@@ -66,8 +57,7 @@ void test_async_sequence()
 
 void test_async_single_flash()
 {
-    std::cout << "\n=== Test: Async Single Flash ==="
-              << std::endl;
+    std::cout << "\n=== Test: Async Single Flash ===" << std::endl;
     MockBlinkHal hal;
     UtilBlink b(hal);
     b.start(1);
@@ -79,8 +69,7 @@ void test_async_single_flash()
 
 void test_restart_replaces()
 {
-    std::cout << "\n=== Test: Restart Replaces "
-                 "Running Pattern ==="
+    std::cout << "\n=== Test: Restart Replaces Running Pattern ==="
               << std::endl;
     MockBlinkHal hal;
     UtilBlink b(hal);
@@ -95,9 +84,7 @@ void test_restart_replaces()
 
 void test_cancel()
 {
-    std::cout << "\n=== Test: Cancel Stops and Forces "
-                 "LED Off ==="
-              << std::endl;
+    std::cout << "\n=== Test: Cancel Stops and Forces LED Off ===" << std::endl;
     MockBlinkHal hal;
     UtilBlink b(hal);
     b.start(3, 50, 50);
@@ -113,15 +100,12 @@ void test_cancel()
 
 void test_blocking_sequence()
 {
-    std::cout
-        << "\n=== Test: Blocking Flash + Pause ==="
-        << std::endl;
+    std::cout << "\n=== Test: Blocking Flash + Pause ===" << std::endl;
     MockBlinkHal hal;
     UtilBlink b(hal);
     b.flashBlocking(2, 100, 40, 2000);
     assert(hal.joined() ==
-           "cancel,LO,HI,delay100,LO,delay40,HI,"
-           "delay100,LO,delay2000");
+           "cancel,LO,HI,delay100,LO,delay40,HI,delay100,LO,delay2000");
 
     hal.ev.clear();
     b.flashBlocking(1, 60, 60, 0);
@@ -131,8 +115,7 @@ void test_blocking_sequence()
 
 void test_blocking_cancels_async()
 {
-    std::cout << "\n=== Test: Blocking Call Cancels "
-                 "Async Pattern ==="
+    std::cout << "\n=== Test: Blocking Call Cancels Async Pattern ==="
               << std::endl;
     MockBlinkHal hal;
     UtilBlink b(hal);
@@ -146,8 +129,7 @@ void test_blocking_cancels_async()
 
 void test_invalid_n_ignored()
 {
-    std::cout << "\n=== Test: n <= 0 Is Ignored ==="
-              << std::endl;
+    std::cout << "\n=== Test: n <= 0 Is Ignored ===" << std::endl;
     MockBlinkHal hal;
     UtilBlink b(hal);
     b.start(0);
@@ -159,8 +141,7 @@ void test_invalid_n_ignored()
 
 int main()
 {
-    std::cout << "=== Running UtilBlink Tests ==="
-              << std::endl;
+    std::cout << "=== Running UtilBlink Tests ===" << std::endl;
     test_async_sequence();
     test_async_single_flash();
     test_restart_replaces();
@@ -168,8 +149,7 @@ int main()
     test_blocking_sequence();
     test_blocking_cancels_async();
     test_invalid_n_ignored();
-    std::cout << "\n=== UtilBlink Tests Completed "
-                 "Successfully ==="
+    std::cout << "\n=== UtilBlink Tests Completed Successfully ==="
               << std::endl;
     return 0;
 }
