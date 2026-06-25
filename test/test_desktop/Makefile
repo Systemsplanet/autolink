@@ -47,7 +47,10 @@ TEST_BINS = run_test_crc run_test_cobs run_test_blink run_test_framerx \
             run_test_alink_v53 run_test_alink_v531 \
             run_test_alink_v531_never_leave_p1 \
             run_test_linkreorder \
-            run_test_esp_idf_error_etiquette
+            run_test_esp_idf_error_etiquette \
+            run_test_compile_check \
+            run_test_arq_hasroom_trampoline \
+            run_test_sync_mode
 
 # 'all' runs every unit suite, captures per-suite runtime, then
 # prints a summary: tests passed, total bytes used by the suite
@@ -172,6 +175,15 @@ run_test_linkreorder: $(LINK_SRC) $(TPROTO)/LinkReorderTest.cpp
 # call site has a paired esp_err_to_name log.
 run_test_esp_idf_error_etiquette: EspIdfErrorEtiquetteTest.cpp
 	$(CXX) $(CXXFLAGS) EspIdfErrorEtiquetteTest.cpp -o $@
+
+run_test_compile_check: CompileCheckTest.cpp
+	$(CXX) $(CXXFLAGS) CompileCheckTest.cpp -o $@
+
+run_test_arq_hasroom_trampoline: $(AUTOLINK_SRC) ArqCacheHasRoomTrampolineTest.cpp
+	$(CXX) $(CXXFLAGS) $(AUTOLINK_SRC) ArqCacheHasRoomTrampolineTest.cpp -o $@
+
+run_test_sync_mode: $(AUTOLINK_SRC) SyncModeTest.cpp
+	$(CXX) $(CXXFLAGS) $(AUTOLINK_SRC) SyncModeTest.cpp -o $@
 
 run_test_crc: $(UTIL)/UtilCrc.cpp $(TUTIL)/UtilCrcTest.cpp
 	$(CXX) $(CXXFLAGS) $(UTIL)/UtilCrc.cpp $(TUTIL)/UtilCrcTest.cpp -o $@
