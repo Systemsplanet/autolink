@@ -22,11 +22,5 @@ PingPong upp(PingPong::PONG,
              80            // web server port
 );
 
-void setup()
-{
-    upp.setup();
-}
-void loop()
-{
-    upp.loop();
-}
+void setup() { upp.setup(); }
+void loop() { upp.loop(); }
