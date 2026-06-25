@@ -1,10 +1,7 @@
-// Sweep-phase state machine as pure functions
-// returning action enums. Side effects (counter bumps,
-// state mutation, log calls) live in the caller.
-// Truth-table testable with no I/O.
+// Sweep state-machine as pure functions.
+// No side-effects; truth-table testable.
 #ifndef AUTOLINK_LINK_DECISION_H
 #define AUTOLINK_LINK_DECISION_H
-
 #include <stdint.h>
 #include <stddef.h>
 
@@ -12,9 +9,9 @@ namespace autolink
 {
 enum class SwpPhase : uint8_t {
     None = 0,
-    Phase1 = 1,
-    Phase2 = 2,
-    Phase3 = 3,
+    Phase1,
+    Phase2,
+    Phase3,
 };
 
 enum class SwpPhaseAction : uint8_t {
@@ -26,8 +23,7 @@ enum class SwpPhaseAction : uint8_t {
     Stay,
 };
 
-inline SwpPhaseAction decideMasterPhase1Timeout(int,
-                                                int)
+inline SwpPhaseAction decideMasterPhase1Timeout(int, int)
 {
     return SwpPhaseAction::Stay;
 }
@@ -42,28 +38,21 @@ inline SwpPhaseAction decideMasterPhase2Ack()
     return SwpPhaseAction::PromoteToPhase3;
 }
 
-inline SwpPhaseAction
-decideMasterPhase3Ack(int phase3Acks, int phase3Needed)
+inline SwpPhaseAction decideMasterPhase3Ack(int acks, int needed)
 {
-    if (phase3Acks >= phase3Needed)
-        return SwpPhaseAction::Lock;
-    return SwpPhaseAction::Stay;
+    return (acks >= needed) ? SwpPhaseAction::Lock : SwpPhaseAction::Stay;
 }
 
-inline SwpPhaseAction
-decideMasterPhase2Timeout(int spdI, int baudCount)
+inline SwpPhaseAction decideMasterPhase2Timeout(int spdI, int baudCount)
 {
-    if (spdI + 1 >= baudCount)
-        return SwpPhaseAction::FallbackLockSlowest;
-    return SwpPhaseAction::Stay;
+    return (spdI + 1 >= baudCount) ? SwpPhaseAction::FallbackLockSlowest
+                                   : SwpPhaseAction::Stay;
 }
 
-inline SwpPhaseAction
-decideMasterPhase3Timeout(int nextBaud, int baudCount)
+inline SwpPhaseAction decideMasterPhase3Timeout(int nextBaud, int baudCount)
 {
-    if (nextBaud >= baudCount)
-        return SwpPhaseAction::FallbackLockSlowest;
-    return SwpPhaseAction::Stay;
+    return (nextBaud >= baudCount) ? SwpPhaseAction::FallbackLockSlowest
+                                   : SwpPhaseAction::Stay;
 }
 
 inline SwpPhaseAction decidePongPhase1Ping()
@@ -76,12 +65,9 @@ inline SwpPhaseAction decidePongPhase2Ping()
     return SwpPhaseAction::PromoteToPhase3;
 }
 
-inline SwpPhaseAction
-decidePongPhase3Ack(int phase3Acks, int phase3Needed)
+inline SwpPhaseAction decidePongPhase3Ack(int acks, int needed)
 {
-    if (phase3Acks >= phase3Needed)
-        return SwpPhaseAction::Lock;
-    return SwpPhaseAction::Stay;
+    return (acks >= needed) ? SwpPhaseAction::Lock : SwpPhaseAction::Stay;
 }
 
 inline SwpPhaseAction decidePongPhase1Timeout()
@@ -89,21 +75,13 @@ inline SwpPhaseAction decidePongPhase1Timeout()
     return SwpPhaseAction::DropToPhase1;
 }
 
-inline SwpPhaseAction
-decidePongPhase2Timeout(int spdI, int baudCount)
+inline SwpPhaseAction decidePongPhase2Timeout(int spdI, int)
 {
-    (void)baudCount;
-    if (spdI - 1 < 0)
-        return SwpPhaseAction::DropToPhase1;
-    return SwpPhaseAction::Stay;
+    return (spdI - 1 < 0) ? SwpPhaseAction::DropToPhase1 : SwpPhaseAction::Stay;
 }
 
-// Decode a baud-index payload for the LOCK frame
-// (offset 0x44). Raw byte = baud index; valid iff <
-// baudCount.
-inline bool isLockPayload(uint8_t payload,
-                          int baudCount,
-                          int *outBaudIdx)
+// LOCK payload: raw byte = baud_index + 0x44.
+inline bool isLockPayload(uint8_t payload, int baudCount, int *outBaudIdx)
 {
     if (payload < 0x44)
         return false;
@@ -115,11 +93,8 @@ inline bool isLockPayload(uint8_t payload,
     return true;
 }
 
-// Decode a baud-index payload for the legacy REQ path.
-// Raw byte = baud index; valid iff < baudCount.
-inline bool isBaudIndexPayload(uint8_t payload,
-                               int baudCount,
-                               int *outBaudIdx)
+// REQ payload: raw byte = baud index.
+inline bool isBaudIndexPayload(uint8_t payload, int baudCount, int *outBaudIdx)
 {
     if (payload >= (uint8_t)baudCount)
         return false;
@@ -128,9 +103,8 @@ inline bool isBaudIndexPayload(uint8_t payload,
     return true;
 }
 
-// Modulus for gap-classification math. The data seq
-// space is 254 (0..253); 0xFE/0xFF are reserved as
-// wire discriminators (NAK/ACK).
+// Seq space 0..253; 0xFE/0xFF reserved
+// as wire discriminators (NAK/ACK).
 static constexpr int LD_SEQ_WRAP = 254;
 
 enum class GapClass {
@@ -139,9 +113,7 @@ enum class GapClass {
     Gap,
 };
 
-inline GapClass classifyGap(uint8_t cobsSeq,
-                            uint8_t rxSeq,
-                            bool rxSeqSet,
+inline GapClass classifyGap(uint8_t cobsSeq, uint8_t rxSeq, bool rxSeqSet,
                             int *outDiff = nullptr)
 {
     if (!rxSeqSet) {
@@ -149,9 +121,7 @@ inline GapClass classifyGap(uint8_t cobsSeq,
             *outDiff = 0;
         return GapClass::Forward;
     }
-    uint8_t expected = (rxSeq == LD_SEQ_WRAP - 1)
-        ? 0
-        : (uint8_t)(rxSeq + 1);
+    uint8_t expected = (rxSeq == LD_SEQ_WRAP - 1) ? 0 : (uint8_t)(rxSeq + 1);
     if (cobsSeq == expected) {
         if (outDiff)
             *outDiff = 0;
@@ -162,22 +132,15 @@ inline GapClass classifyGap(uint8_t cobsSeq,
         diff += LD_SEQ_WRAP;
     if (outDiff)
         *outDiff = diff;
-    if (diff == 0 || diff > LD_SEQ_WRAP / 2) {
-        return GapClass::Stale;
-    }
-    return GapClass::Gap;
+    // diff > WRAP/2 means seq went backward.
+    return (diff == 0 || diff > LD_SEQ_WRAP / 2) ? GapClass::Stale
+                                                 : GapClass::Gap;
 }
 
-enum class ArqAction {
-    Hold,
-    Retx,
-    Drop,
-};
+enum class ArqAction { Hold, Retx, Drop };
 
-inline ArqAction decideArqSlot(uint32_t ageMs,
-                               uint8_t retxCount,
-                               uint32_t ackRtoMs,
-                               uint8_t maxRetx)
+inline ArqAction decideArqSlot(uint32_t ageMs, uint8_t retxCount,
+                               uint32_t ackRtoMs, uint8_t maxRetx)
 {
     if (ageMs < ackRtoMs)
         return ArqAction::Hold;
@@ -193,10 +156,8 @@ enum class SwpAction {
     RestartSweep,
 };
 
-inline SwpAction decideSwpTick(int spdI, int baudCount,
-                               int pingSample,
-                               int samplesPerBaud,
-                               bool lckExhausted)
+inline SwpAction decideSwpTick(int spdI, int baudCount, int pingSample,
+                               int samplesPerBaud, bool lckExhausted)
 {
     if (lckExhausted)
         return SwpAction::RestartSweep;
@@ -207,6 +168,8 @@ inline SwpAction decideSwpTick(int spdI, int baudCount,
     return SwpAction::SendPingSame;
 }
 
+// Jitter P1 dwell ±1/6 of base to reduce
+// master/pong PING collision.
 inline int jitterPhase1Dwell(int baseMs, uint32_t seed)
 {
     if (baseMs <= 1)
@@ -215,8 +178,7 @@ inline int jitterPhase1Dwell(int baseMs, uint32_t seed)
     if (span < 1)
         span = 1;
     uint32_t r = seed * 2654435761u + 0x9E3779B9u;
-    int off =
-        (int)(r % (uint32_t)(2 * span + 1)) - span;
+    int off = (int)(r % (uint32_t)(2 * span + 1)) - span;
     int d = baseMs + off;
     return d < 1 ? 1 : d;
 }
@@ -226,74 +188,51 @@ enum class LckAction {
     DropAndResweep,
 };
 
-inline LckAction decideLckTick(int lckRetries,
-                               int maxRetries)
+inline LckAction decideLckTick(int lckRetries, int maxRetries)
 {
-    if (lckRetries > maxRetries)
-        return LckAction::DropAndResweep;
-    return LckAction::SendReq;
+    return (lckRetries > maxRetries) ? LckAction::DropAndResweep
+                                     : LckAction::SendReq;
 }
 
-enum class IdleAction {
-    Hold,
-    Drop,
-};
+enum class IdleAction { Hold, Drop };
 
-inline IdleAction decideIdleWatchdog(uint32_t rxAgeMs,
-                                     uint32_t txAgeMs,
+inline IdleAction decideIdleWatchdog(uint32_t rxAgeMs, uint32_t txAgeMs,
                                      int idleTimeoutMs)
 {
     if (idleTimeoutMs <= 0)
         return IdleAction::Hold;
-    if (rxAgeMs > (uint32_t)idleTimeoutMs &&
-        txAgeMs > (uint32_t)idleTimeoutMs)
+    if (rxAgeMs > (uint32_t)idleTimeoutMs && txAgeMs > (uint32_t)idleTimeoutMs)
         return IdleAction::Drop;
     return IdleAction::Hold;
 }
 
-enum class KeepaliveAction {
-    Hold,
-    Emit,
-};
+enum class KeepaliveAction { Hold, Emit };
 
-inline KeepaliveAction
-decideKeepalive(uint32_t txAgeMs, int idleTimeoutMs,
-                bool linkPaused)
+inline KeepaliveAction decideKeepalive(uint32_t txAgeMs, int idleTimeoutMs,
+                                       bool linkPaused)
 {
-    if (linkPaused)
-        return KeepaliveAction::Hold;
-    if (idleTimeoutMs <= 0)
+    if (linkPaused || idleTimeoutMs <= 0)
         return KeepaliveAction::Hold;
     if (txAgeMs >= (uint32_t)(idleTimeoutMs / 3))
         return KeepaliveAction::Emit;
     return KeepaliveAction::Hold;
 }
 
-enum class AppBufAction {
-    Accept,
-    HoldAck,
-};
+enum class AppBufAction { Accept, HoldAck };
 
-inline AppBufAction decideAppBuf(int accepted,
-                                 int incoming)
+inline AppBufAction decideAppBuf(int accepted, int incoming)
 {
-    return (accepted < incoming)
-        ? AppBufAction::HoldAck
-        : AppBufAction::Accept;
+    return (accepted < incoming) ? AppBufAction::HoldAck : AppBufAction::Accept;
 }
 
-enum class ResetAction {
-    StartAtSlowest,
-};
+enum class ResetAction { StartAtSlowest };
 
-// Per directive: any break or line error restarts in
-// PHASE 1 at the slowest baud, ignoring preferredBaud_
-// and retry count.
+// Any break/line-error always restarts
+// at P1 slowest baud; preferredBaud_ ignored.
 inline ResetAction decideResetPolicy(bool, int, int)
 {
     return ResetAction::StartAtSlowest;
 }
 
 } // namespace autolink
-
 #endif
