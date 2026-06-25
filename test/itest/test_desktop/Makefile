@@ -41,7 +41,7 @@ LINK_SRC = $(PROTO)/Link.cpp $(PROTO)/LinkBaudSweep.cpp $(PROTO)/LinkFrameRx.cpp
 # Integration-test binaries. End-to-end smoke tests that wire
 # two Link instances together and verify protocol behaviour
 # across a host pipe (no hardware).
-ITEST_BINS = run_loopback run_loopback_noise
+ITEST_BINS = run_loopback run_loopback_noise run_loopback_sync
 
 # ---- embedded sketch cross-compile ----------------------------------------
 # See test_embedded/Makefile — the Arduino-sketch integration test
@@ -101,6 +101,9 @@ run_loopback: $(LINK_SRC) $(TPROTO)/loopback_test.cpp
 run_loopback_noise: $(LINK_SRC) $(TPROTO)/loopback_noise_test.cpp
 	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/loopback_noise_test.cpp -o $@ -pthread
 
+run_loopback_sync: $(LINK_SRC) $(TPROTO)/loopback_sync_test.cpp
+	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/loopback_sync_test.cpp -o $@ -pthread
+
 # ---- convenience runners ----------------------------------------------------
 
 loopback: run_loopback
@@ -129,6 +132,57 @@ loopback_all: run_loopback
 test_loopback: run_loopback
 	@./run_loopback 10 >/dev/null 2>&1 && echo 'PASS' || echo 'FAIL'
 
+# Run the loopback + loopback_noise itests
+# in BOTH modes (ASYNC and SYNC) and emit a
+# per-mode summary. One driver, one
+# output, clear mode differentiation.
+#
+# SYNC mode is added in v5.3.46 as the new
+# default. The driver exists so a single
+# 'make loopback_modes' command verifies
+# both code paths end-to-end before
+# shipping a release.
+#
+# 'sec=N' overrides the per-test duration
+# (default 5s). 'noise=off' skips the
+# noise test (run it separately if you
+# only want the clean-wire mode check).
+loopback_modes: run_loopback run_loopback_noise
+	@sec=$${sec:-5}; noise=$${noise:-on}; \
+	total_pass=0; total_fail=0; \
+	async_pass=0; async_fail=0; \
+	sync_pass=0; sync_fail=0; \
+	for mode in async sync; do \
+	    for variant in clean noise; do \
+	        if [ "$$variant" = "clean" ]; then \
+	            bin=./run_loopback; noise_off=1; \
+	        else \
+	            if [ "$$noise" != "on" ]; then continue; fi; \
+	            bin=./run_loopback_noise; noise_off=0; \
+	        fi; \
+	        tag="[$$mode / $$variant / $$sec s]"; \
+	        printf "\n--- %-30s %s\n" "$$bin" "$$tag" | tee /tmp/last_mode_tag; \
+	        out=$$( $$bin $$sec $$mode 2>&1 ); rc=$$?; \
+	        summary=$$(echo "$$out" | grep -E "^(PASS|FAIL|\\[.*\\] All|TX=)" | head -8); \
+	        echo "$$summary" | sed 's/^/  /'; \
+	        if [ $$rc -eq 0 ]; then \
+	            printf "  RESULT: PASS\n"; \
+	            total_pass=$$(( total_pass + 1 )); \
+	            if [ "$$mode" = "async" ]; then async_pass=$$(( async_pass + 1 )); else sync_pass=$$(( sync_pass + 1 )); fi; \
+	        else \
+	            printf "  RESULT: FAIL (rc=%d)\n" $$rc; \
+	            total_fail=$$(( total_fail + 1 )); \
+	            if [ "$$mode" = "async" ]; then async_fail=$$(( async_fail + 1 )); else sync_fail=$$(( sync_fail + 1 )); fi; \
+	        fi; \
+	    done; \
+	done; \
+	printf "\n=== Loopback modes summary ===\n"; \
+	printf "  ASYNC : %d pass, %d fail\n" $$async_pass $$async_fail; \
+	printf "  SYNC  : %d pass, %d fail\n" $$sync_pass $$sync_fail; \
+	printf "  TOTAL : %d pass, %d fail\n" $$total_pass $$total_fail; \
+	if [ $$total_fail -gt 0 ]; then exit 1; fi; \
+	printf "=== ALL MODES PASS ===\n"
+
 test_loopback_noise: run_loopback_noise
 	./run_loopback_noise
 
@@ -140,4 +194,5 @@ clean:
 
 .PHONY: all test_cpp clean \
         loopback loopback_quick loopback_verbose loopback_all \
-        test_loopback test_loopback_noise test_loopback_suite
+        test_loopback test_loopback_noise test_loopback_suite \
+        loopback_modes
