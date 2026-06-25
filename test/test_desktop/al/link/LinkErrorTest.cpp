@@ -8,8 +8,7 @@
 
 using namespace autolink;
 
-void test_error_threshold()
-{
+void test_error_threshold() {
     std::cout << "\n=== Test: Custom Error Thresholding ===" << std::endl;
     MockHal mHal;
     AutoLinkConfig cfg;
@@ -38,8 +37,7 @@ void test_error_threshold()
     std::cout << "PASS" << std::endl;
 }
 
-void test_error_counter()
-{
+void test_error_counter() {
     AutoLinkConfig cfg;
 
     std::cout << "\n=== Test: Disconnect Counter = One Per Link Drop ==="
@@ -111,8 +109,7 @@ void test_error_counter()
     std::cout << "PASS" << std::endl;
 }
 
-void test_error_counter_during_swp()
-{
+void test_error_counter_during_swp() {
     std::cout << "\n=== Test: One Count Per Cable Bounce ===" << std::endl;
     MockHal mHal, sHal;
     AutoLinkConfig cfg;
@@ -152,8 +149,7 @@ void test_error_counter_during_swp()
     std::cout << "PASS" << std::endl;
 }
 
-void test_error_counter_link_failures()
-{
+void test_error_counter_link_failures() {
     std::cout << "\n=== Test: Error Counter Ticks on Link Failures ==="
               << std::endl;
 
@@ -312,8 +308,7 @@ void test_error_counter_link_failures()
     std::cout << "PASS" << std::endl;
 }
 
-void test_scattered_errors_dont_drop()
-{
+void test_scattered_errors_dont_drop() {
     AutoLinkConfig cfg;
     std::cout << "\n=== Test: Scattered Errors Don't Drop a Working Link ==="
               << std::endl;
@@ -342,8 +337,7 @@ void test_scattered_errors_dont_drop()
     std::cout << "PASS" << std::endl;
 }
 
-void test_parser_yields_after_drop()
-{
+void test_parser_yields_after_drop() {
     AutoLinkConfig cfg;
     std::cout << "\n=== Test: Parser Yields to Command Parser After Drop ==="
               << std::endl;
@@ -382,8 +376,7 @@ void test_parser_yields_after_drop()
     std::cout << "PASS" << std::endl;
 }
 
-int main()
-{
+int main() {
     std::cout << "=== Running ALinkError Tests ===" << std::endl;
     test_error_threshold();
     test_error_counter();
