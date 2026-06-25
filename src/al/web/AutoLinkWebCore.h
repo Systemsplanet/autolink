@@ -1,7 +1,5 @@
-// Protocol-agnostic dashboard core: ring log + JSON
-// formatter + HTML payload. Host-testable: no WiFi, no
-// httpd. The ARDUINO-only AutoLinkWeb.cpp wires this
-// up to esp_http_server.
+// Dashboard core: ring log + JSON
+// formatter. Host-testable; no WiFi/httpd.
 #pragma once
 #include "al/util/Log.h"
 #include <stdint.h>
@@ -30,15 +28,14 @@ struct WebSnapshot {
     uint32_t baudRate;
     uint8_t fillMode;
     uint8_t msgPaused;
+    uint8_t linkMode;
     char role[8];
 };
 
-int formatStatsJson(const WebSnapshot *s, int logLevel,
-                    const char *version, char *out,
-                    int outLen);
+int formatStatsJson(const WebSnapshot *s, int logLevel, const char *version,
+                    char *out, int outLen);
 
-int formatLogsJson(const WebLogEntry *ring,
-                   uint32_t head, uint32_t since,
+int formatLogsJson(const WebLogEntry *ring, uint32_t head, uint32_t since,
                    char *out, int outLen);
 
 int parseLevelQuery(const char *val);
