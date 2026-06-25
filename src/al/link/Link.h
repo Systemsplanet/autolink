@@ -1,15 +1,25 @@
 // Wire-protocol state machine.
 // Pure decisions in LinkDecision.h.
 // All I/O through IHal only.
+//
+// Link is a coordinator. The actual state lives
+// in three owned helpers:
+//   LinkArq     — per-cobsSeq ACK/retx tables
+//   LinkReorder — out-of-order frame hold buffer
+//   LinkSweep   — baud-sweep phase machine
+// Each helper takes Link& for I/O callbacks.
 #pragma once
 #include "al/hal/IHal.h"
+#include "al/link/IArqCache.h"
 #include "al/link/LinkFrameRx.h"
 #include "al/link/LinkBaudSweep.h"
+#include "al/link/LinkArq.h"
+#include "al/link/LinkReorder.h"
+#include "al/link/LinkSweep.h"
 #include <stdint.h>
 #include <stddef.h>
 
-namespace autolink
-{
+namespace autolink {
 enum class State { OK, SWP, LCK };
 const char *StateToStr(State s);
 
@@ -18,16 +28,6 @@ constexpr uint8_t PONG_CMD = 0x33;
 constexpr uint8_t REQ_CMD = 0x11;
 constexpr uint8_t LOCK_CMD = 0x44;
 constexpr int LOCK_CMD_BASE = 0x44;
-
-enum class SweepPhase : uint8_t { NONE = 0, PHASE1, PHASE2, PHASE3 };
-
-struct SweepDwells {
-    int phase1;
-    int phase2[16];
-    int phase2Slave[16];
-    int phase3;
-    int phase2Total;
-};
 
 constexpr int CTRL_FRAME_SIZE = 5;
 constexpr int CTRL_FRAME_SEQ_IDX = 2;
@@ -97,8 +97,30 @@ struct AutoLinkConfig {
 
     // SYNC only: how long send() blocks
     // waiting for the receiver ACK before
-    // timing out and returning 0.
+    // timing out and returning 0. Also
+    // used as the ASYNC ARQ retransmit
+    // timeout (retransmit if no ACK
+    // arrives within this window).
     int syncAckTimeoutMs = 500;
+
+    // ARQ retransmit budget per chunk.
+    // After this many unacknowledged
+    // retransmits, the chunk is dropped
+    // and the link is reset.
+    uint8_t maxRetx = 5;
+
+    // Per-transmit delay (ms) honored by
+    // Ping::loop after each send. Lets
+    // the GUI throttle the wire without
+    // recompiling. 0 = no delay (run as
+    // fast as the link allows). Works in
+    // both SYNC and ASYNC; the SYNC
+    // sender is already blocked on the
+    // receiver ACK, so the additional
+    // txDelayMs only adds idle time when
+    // the wire is fast enough to clear
+    // the ACK before the delay expires.
+    int txDelayMs = 0;
 
     bool _test_forwardResync = false;
 };
@@ -117,9 +139,17 @@ struct Diag {
     uint8_t preferredBaud;
 };
 
-class Link : private UtilFrameRx::Listener
-{
+class LinkArq;
+class LinkReorder;
+class LinkSweep;
+class LinkTestAccessor;
+
+class Link : private UtilFrameRx::Listener {
     friend class AutoLink;
+    friend class LinkArq;
+    friend class LinkReorder;
+    friend class LinkSweep;
+    friend class LinkTestAccessor;
     IHal &hw;
     bool isMaster;
     AutoLinkConfig cfg;
@@ -129,11 +159,8 @@ class Link : private UtilFrameRx::Listener
     int emptySweeps;
     UtilBaudSweep baudSweep;
 
-    SweepPhase sweepPhase_ = SweepPhase::NONE;
-    int phase3Baud_ = -1;
-    int phase3Acks_ = 0;
+    LinkSweep sweep_;
     bool wasEverOk_ = false;
-    SweepDwells dwells_;
 
     int heartbeatPingsMissed_ = 0;
     uint32_t lastHeartbeatMs_ = 0;
@@ -162,44 +189,27 @@ class Link : private UtilFrameRx::Listener
     uint64_t gaps = 0, stale = 0;
     uint64_t lostMsgs = 0;
 
-    // Per-seq ARQ state indexed by cobsSeq.
-    bool ackedPending_[256] = {};
-    uint8_t retxCount_[256] = {};
-    uint32_t sentAtMs_[256] = {};
-    uint8_t baseSeq_[256] = {};
+    LinkArq arq_;
+    LinkReorder reorder_;
+    bool linkPaused_ = false;
+
+    // MAX_RETX / ACK_RTO_MS moved to
+    // AutoLinkConfig as cfg.maxRetx /
+    // cfg.syncAckTimeoutMs. Both were
+    // private constants here; now they're
+    // public knobs on the config struct.
+
+    // ARQ cache lives in IArqCache / ArqCache;
+    // Link holds a raw IArqCache* borrowed
+    // from the facade. The cache must outlive
+    // the Link; AutoLink owns the cache by
+    // value and constructs the Link first, so
+    // dtor order is safe.
+
+    IArqCache *arqCache_ = nullptr;
     bool retxNeeded_ = false;
     bool hasPendingRetx_ = false;
     uint8_t pendingRetxBase_ = 0;
-
-    struct ReorderSlot {
-        uint8_t *buf = nullptr;
-        uint16_t len = 0;
-        uint32_t heldAtMs = 0;
-        bool in_use = false;
-    };
-    ReorderSlot reorder_[256] = {};
-    bool linkPaused_ = false;
-
-    // Chunk dropped (not link-drop) after
-    // MAX_RETX unacknowledged retransmits.
-    static constexpr uint8_t MAX_RETX = 5;
-    static constexpr uint32_t ACK_RTO_MS = 500;
-
-    using ArqAckCallback = bool (*)(uint8_t, void *);
-    using ArqRetxCallback = bool (*)(uint8_t, void *);
-    using ArqCacheHasRoomCallback = bool (*)(void *);
-    using ArqCacheInsertCallback = void (*)(uint8_t, const uint8_t *, int,
-                                            uint8_t, void *);
-    using ArqCacheClearAllCallback = void (*)(void *);
-    using LinkResetCallback = void (*)(void *);
-
-    ArqAckCallback arqAckCallback_ = nullptr;
-    ArqRetxCallback arqRetxCallback_ = nullptr;
-    ArqCacheHasRoomCallback arqCacheHasRoomCallback_ = nullptr;
-    ArqCacheInsertCallback arqCacheInsertCallback_ = nullptr;
-    ArqCacheClearAllCallback arqCacheClearAllCallback_ = nullptr;
-    LinkResetCallback linkResetCallback_ = nullptr;
-    void *arqCtx_ = nullptr;
 
     bool onPayload(uint8_t cobsSeq, const uint8_t *b, int n) override;
     bool onAck(uint8_t ackedCobsSeq);
@@ -207,12 +217,8 @@ class Link : private UtilFrameRx::Listener
     bool onFrameError() override;
 
     void sendPongAck_unlocked();
-    void enterPhase1_unlocked();
-    void enterPhase2_unlocked();
-    void enterPhase3_unlocked(int baud);
-    void enterResweep_unlocked();
-    void computeDwells_unlocked();
     int phase1ArmMs();
+    void computeDwells_unlocked();
 
     void sendFrame(uint8_t payload);
     void sendFrame_unlocked(uint8_t payload);
@@ -240,41 +246,48 @@ class Link : private UtilFrameRx::Listener
     void onTimerLck_unlocked();
     void reset_unlocked(bool count);
     int okTickMs() const;
-
-    bool retxNeeded() const { return retxNeeded_; }
-    void setRetxPending(bool v = true) { retxNeeded_ = v; }
-    int popRetransmitSlot();
     int findMsgHeaderResync_unlocked(int max_scan);
-    void reorderClear_unlocked();
-    void reorderDropExpired_unlocked(uint32_t nowMs);
-    int reorderFlushContiguous_unlocked(uint32_t nowMs);
+    int popRetransmitSlot();
+
+    // Narrow accessors for the helpers. Each
+    // is a one-line forward to IHal or a
+    // member; they exist so LinkArq /
+    // LinkReorder / LinkSweep can do I/O
+    // through Link without reaching into
+    // IHal directly. Friends see them.
+    void hwLock() { hw.lock(); }
+    void hwUnlock() { hw.unlock(); }
+    uint32_t hwNowMs() const { return hw.nowMs(); }
+    void hwSetSpd(uint32_t b) { hw.setSpd(b); }
+    void hwStartTimer(int ms) { hw.startTimer(ms); }
+    int reorderPushAppBuf(const uint8_t *b, int n) {
+        return hw.pushAppBuf(b, n);
+    }
+    void reorderSendAck(uint8_t seq) { sendAckFrame_unlocked(seq); }
+    uint8_t reorderExpectedSeq() const;
+    void reorderAdvanceRxSeq(uint8_t seq);
+    void reorderCountBytes(int n) { rxBytes += (uint32_t)n; }
+
+    bool masterRole() const { return isMaster; }
+    int currentSpdI() const { return spdI; }
+    void setCurrentSpdI(int i) { spdI = i; }
+    int allowedBaudsCount() const { return cfg.allowedBaudsCount; }
+    uint32_t allowedBaud(int i) const { return cfg.allowedBauds[i]; }
+    int delayMs() const { return cfg.delayMs; }
+    int preferredBaudIndex() const { return (int)preferredBaud_; }
+    int baudRetryLimit() const { return cfg.baudRetryLimit; }
+    int baudRetries() const { return baudRetries_; }
+    void incBaudRetries() { baudRetries_++; }
+    void clearBaudRetries() { baudRetries_ = 0; }
+    void clearPreferredBaud() { preferredBaud_ = NO_PREFERRED_BAUD; }
 
 public:
     uint8_t peekTxSeq() const { return txSeq; }
 
-    void setArqHooks(ArqAckCallback ack, ArqRetxCallback retx, void *ctx)
-    {
-        arqAckCallback_ = ack;
-        arqRetxCallback_ = retx;
-        arqCtx_ = ctx;
-    }
-    void setLinkResetHook(LinkResetCallback cb, void *ctx)
-    {
-        linkResetCallback_ = cb;
-        arqCtx_ = ctx;
-    }
-    void setArqCacheHooks(ArqAckCallback ack, ArqRetxCallback retx,
-                          ArqCacheHasRoomCallback hasRoom,
-                          ArqCacheInsertCallback insert,
-                          ArqCacheClearAllCallback clearAll, void *ctx)
-    {
-        arqAckCallback_ = ack;
-        arqRetxCallback_ = retx;
-        arqCacheHasRoomCallback_ = hasRoom;
-        arqCacheInsertCallback_ = insert;
-        arqCacheClearAllCallback_ = clearAll;
-        arqCtx_ = ctx;
-    }
+    // Borrowed raw pointer. The cache
+    // must outlive the link; see the
+    // comment block above.
+    void setArqCache(IArqCache *c) { arqCache_ = c; }
 
     Link(IHal &hw, bool isMasterNode,
          const AutoLinkConfig &config = AutoLinkConfig());
@@ -300,17 +313,19 @@ public:
     void setMode(AutoLinkConfig::Mode m) { cfg.mode = m; }
     AutoLinkConfig::Mode mode() const { return cfg.mode; }
 
-    // Public wrapper for the itest's ARQ
-    // retx callback. The itest installs
-    // its own minimal ARQ cache and calls
-    // this from the retx hook to re-send
-    // a cached frame. Production callers
-    // (AutoLink facade) do not use this —
-    // they handle retransmits via the
-    // arqRetxCallback_ hook chain, which
-    // is the normal path.
-    void resendCobsFrame(uint8_t seq, const uint8_t *b, int n)
-    {
+    // Runtime-mutable throttle (used by the
+    // web dashboard's delay-ms widget).
+    void setTxDelayMs(int ms) { cfg.txDelayMs = ms < 0 ? 0 : ms; }
+    int txDelayMs() const { return cfg.txDelayMs; }
+
+    // Public wrapper for the itest. The
+    // itest runs Link standalone without
+    // an ArqCache and re-sends a frame
+    // directly via this entry point.
+    // Production callers (AutoLink
+    // facade) go through the link's
+    // arqCache_ path inside onTimer.
+    void resendCobsFrame(uint8_t seq, const uint8_t *b, int n) {
         hw.lock();
         resendCobsFrame_unlocked(seq, b, n);
         hw.unlock();
@@ -337,7 +352,11 @@ public:
     void onBreak();
     void onTimer();
 
-    void test_markAckedPending(uint8_t s) { ackedPending_[s] = true; }
+private:
+    // Host-test hooks: friends of
+    // LinkTestAccessor only; production
+    // sketches have no path to call these.
+    void test_markAckedPending(uint8_t s) { arq_.setPending(s, true); }
 
     // SYNC-mode host test hooks. Split
     // sendMsg() into a non-blocking "begin"
@@ -347,17 +366,14 @@ public:
     // the wire can deliver the ACK.
     bool test_sendMsgBegin(const uint8_t *b, int len);
     bool test_sendMsgStillWaiting();
-    int syncAckTimeoutMsForTest() const { return cfg.syncAckTimeoutMs; }
 
     // Direct reorder-buffer inspection
     // for LinkReorderTest.
-    bool test_reorderSlotInUse(uint8_t cobsSeq) const
-    {
-        return reorder_[cobsSeq].in_use;
+    bool test_reorderSlotInUse(uint8_t cobsSeq) const {
+        return reorder_.slotInUse(cobsSeq);
     }
-    uint16_t test_reorderSlotLen(uint8_t cobsSeq) const
-    {
-        return reorder_[cobsSeq].len;
+    uint16_t test_reorderSlotLen(uint8_t cobsSeq) const {
+        return reorder_.slotLen(cobsSeq);
     }
 };
 
