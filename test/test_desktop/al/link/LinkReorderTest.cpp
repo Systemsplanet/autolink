@@ -5,13 +5,13 @@
 #    include <cassert>
 #    include <vector>
 #    include "MockHal.h"
+#    include "LinkTestAccessor.h"
 #    include "al/util/UtilCrc.h"
 #    include "al/util/UtilCobs.h"
 
 using namespace autolink;
 
-static std::vector<uint8_t> cobsFrame(uint8_t cobsSeq, int payloadLen = 16)
-{
+static std::vector<uint8_t> cobsFrame(uint8_t cobsSeq, int payloadLen = 16) {
     std::vector<uint8_t> raw;
     raw.push_back(cobsSeq);
     for (int i = 0; i < payloadLen; i++)
@@ -25,8 +25,7 @@ static std::vector<uint8_t> cobsFrame(uint8_t cobsSeq, int payloadLen = 16)
     return enc;
 }
 
-void test_gap_then_retransmit_delivers_in_order()
-{
+void test_gap_then_retransmit_delivers_in_order() {
     AutoLinkConfig cfg;
     cfg._test_forwardResync = false;
     std::cout
@@ -55,8 +54,7 @@ void test_gap_then_retransmit_delivers_in_order()
     std::cout << "PASS" << std::endl;
 }
 
-void test_gap_then_retransmit_drops_as_stale_under_forward_resync()
-{
+void test_gap_then_retransmit_drops_as_stale_under_forward_resync() {
     AutoLinkConfig cfg;
     cfg._test_forwardResync = true;
     std::cout
@@ -81,10 +79,9 @@ void test_gap_then_retransmit_drops_as_stale_under_forward_resync()
     std::cout << "PASS (toggle confirms the bounded-reorder fix)" << std::endl;
 }
 
-void test_keepalive_gap_does_not_occupy_reorder_slot()
-{
+void test_keepalive_gap_does_not_occupy_reorder_slot() {
     std::cout << "\n=== Test: Out-of-order keepalive does not "
-                 "occupy a reorder slot (v5.3.41) ==="
+                 "occupy a reorder slot ==="
               << std::endl;
     AutoLinkConfig cfg;
     cfg._test_forwardResync = false;
@@ -96,16 +93,17 @@ void test_keepalive_gap_does_not_occupy_reorder_slot()
 
     b.onRx(cobsFrame(2).data(), (int)cobsFrame(2).size());
 
-    assert(b.test_reorderSlotInUse(2));
-    assert(b.test_reorderSlotLen(2) > 0);
+    LinkTestAccessor t(b);
+    assert(t.reorderSlotInUse(2));
+    assert(t.reorderSlotLen(2) > 0);
 
     b.onRx(cobsFrame(3, 0).data(), (int)cobsFrame(3, 0).size());
 
-    assert(!b.test_reorderSlotInUse(3));
+    assert(!t.reorderSlotInUse(3));
 
-    assert(!b.test_reorderSlotInUse(1));
+    assert(!t.reorderSlotInUse(1));
 
-    assert(b.test_reorderSlotInUse(2));
+    assert(t.reorderSlotInUse(2));
     Diag d;
     b.getDiag(d);
 
@@ -115,8 +113,7 @@ void test_keepalive_gap_does_not_occupy_reorder_slot()
               << std::endl;
 }
 
-int main()
-{
+int main() {
     std::cout << "=== Running LinkReorder Tests (hold-on-gap toggle) ==="
               << std::endl;
     test_gap_then_retransmit_delivers_in_order();
