@@ -1,8 +1,7 @@
 // CRC-8 / CRC-16 LUT tables + drivers.
 #include "al/util/UtilCrc.h"
 
-namespace autolink
-{
+namespace autolink {
 const uint8_t UtilCrc::crc8_lut[256] = {
     0x00, 0x07, 0x0E, 0x09, 0x1C, 0x1B, 0x12, 0x15, 0x38, 0x3F, 0x36, 0x31,
     0x24, 0x23, 0x2A, 0x2D, 0x70, 0x77, 0x7E, 0x79, 0x6C, 0x6B, 0x62, 0x65,
@@ -60,16 +59,14 @@ const uint16_t UtilCrc::crc16_lut[256] = {
     0x2E93, 0x3EB2, 0x0ED1, 0x1EF0
 };
 
-uint8_t UtilCrc::crc8(const uint8_t *data, int len)
-{
+uint8_t UtilCrc::crc8(const uint8_t *data, int len) {
     uint8_t crc = 0;
     for (int i = 0; i < len; i++)
         crc = crc8_lut[crc ^ data[i]];
     return crc;
 }
 
-uint16_t UtilCrc::crc16(const uint8_t *data, int len)
-{
+uint16_t UtilCrc::crc16(const uint8_t *data, int len) {
     uint16_t crc = 0xFFFF;
     for (int i = 0; i < len; i++) {
         crc = (uint16_t)((crc << 8) ^ crc16_lut[(crc >> 8) ^ data[i]]);
