@@ -14,6 +14,8 @@
 #   make env         — install arduino-cli + esp32 core (idempotent)
 #   make ci          — `make test` then `make verify`; fail fast
 #   make clean       — remove host test artifacts + verify_build cache
+#                      (delegates to build/clean.py; pass CLEAN_FLAGS
+#                       for e.g. --apply to actually delete)
 #   make loopback    — 30s host loopback smoke
 #   make coverage    — host tests with gcov instrumentation
 #   make asan        — host tests with AddressSanitizer + UBSan
@@ -61,7 +63,6 @@ asan:
 	@$(MAKE) -C $(TEST_DIR) test_asan
 
 clean:
+	@python3 $(ROOT_DIR)/build/clean.py --apply $(CLEAN_FLAGS)
 	@$(MAKE) -C $(TEST_DIR) clean
-	@rm -rf $(ROOT_DIR)/build/verify_build/build
-	@rm -rf $(ROOT_DIR)/build/verify_build/libraries
-	@echo "=== clean: host artifacts + ESP32 build cache removed ==="
+	@echo "=== make clean: host artifacts + ESP32 build cache removed ==="
