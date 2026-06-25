@@ -4,12 +4,10 @@
 #pragma once
 #include <stdint.h>
 
-namespace autolink
-{
+namespace autolink {
 class Link;
 
-class IHal
-{
+class IHal {
 public:
     Link *link = nullptr;
 
@@ -29,8 +27,8 @@ public:
     virtual void delayMs(int ms) = 0;
     virtual uint32_t nowMs() = 0;
 
-    virtual void lock() const = 0;
-    virtual void unlock() const = 0;
+    virtual void lock() = 0;
+    virtual void unlock() = 0;
 
     virtual int pushAppBuf(const uint8_t *b, int n) = 0;
     virtual int popAppBuf(uint8_t *b, int max_len) = 0;
