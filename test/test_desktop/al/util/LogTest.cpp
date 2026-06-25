@@ -16,13 +16,11 @@ struct CapturedLine {
     std::string msg;
 };
 static std::vector<CapturedLine> g_captured;
-static void captureSink(char sev, const char *tag, const char *msg, void *)
-{
+static void captureSink(char sev, const char *tag, const char *msg, void *) {
     g_captured.push_back({ sev, tag ? tag : "", msg ? msg : "" });
 }
 
-void test_level_filtering()
-{
+void test_level_filtering() {
     std::cout << "\n=== Test: Log Level Filtering (4: NONE..DEBUG) ==="
               << std::endl;
     Log &L = Log::log();
@@ -115,8 +113,7 @@ void test_level_filtering()
     std::cout << "PASS" << std::endl;
 }
 
-void test_sink_registration_and_clearing()
-{
+void test_sink_registration_and_clearing() {
     std::cout << "\n=== Test: Sink Registration & Clearing ===" << std::endl;
     Log &L = Log::log();
     L.setLevel(Log::DEBUG);
@@ -135,8 +132,7 @@ void test_sink_registration_and_clearing()
     std::cout << "PASS" << std::endl;
 }
 
-void test_sink_context_pointer_passes_through()
-{
+void test_sink_context_pointer_passes_through() {
     std::cout << "\n=== Test: Sink Context Pointer ===" << std::endl;
     Log &L = Log::log();
     L.setLevel(Log::DEBUG);
@@ -152,8 +148,7 @@ void test_sink_context_pointer_passes_through()
     std::cout << "PASS" << std::endl;
 }
 
-void test_sink_called_within_emit()
-{
+void test_sink_called_within_emit() {
     std::cout << "\n=== Test: Sink Called Within emit() ===" << std::endl;
     Log &L = Log::log();
     L.setLevel(Log::DEBUG);
@@ -168,8 +163,7 @@ void test_sink_called_within_emit()
     std::cout << "PASS" << std::endl;
 }
 
-void test_long_message_truncated_at_buffer()
-{
+void test_long_message_truncated_at_buffer() {
     std::cout << "\n=== Test: Long Message Truncated ===" << std::endl;
     Log &L = Log::log();
     L.setLevel(Log::DEBUG);
@@ -185,8 +179,7 @@ void test_long_message_truncated_at_buffer()
     std::cout << "PASS" << std::endl;
 }
 
-void test_singleton_returns_same_instance()
-{
+void test_singleton_returns_same_instance() {
     std::cout << "\n=== Test: Log::log() Is Singleton ===" << std::endl;
     Log &a = Log::log();
     Log &b = Log::log();
@@ -194,8 +187,7 @@ void test_singleton_returns_same_instance()
     std::cout << "PASS" << std::endl;
 }
 
-int main()
-{
+int main() {
     std::cout << "=== Running Log Tests ===" << std::endl;
     test_level_filtering();
     test_sink_registration_and_clearing();
