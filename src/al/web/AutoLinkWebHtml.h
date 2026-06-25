@@ -1,7 +1,4 @@
-// Embedded dashboard HTML (single-page web UI: live
-// stats, log ring, fill-mode/pause controls). Includes
-// inline JS for polling /stats and /logs; no external
-// assets.
+// Embedded dashboard HTML/JS/CSS.
 #pragma once
 #include "AutoLink.h"
 
@@ -172,24 +169,13 @@ main{padding:14px;max-width:540px;margin:0 auto}
     R"HTML(</span> AutoLink Web Monitor &#x2014; <span id="host"></span></div>
 </main>
 <script>
-// On load: log the HTML build version (compiled in at link time)
-// and start the dashboard. The firmware's reported version arrives
-// on the first /stats response — a mismatch there means the firmware
-// was built from a different tree than the HTML.
+
 console.log('[autolink] dashboard script loaded, HTML build v)HTML" AUTOLINK_VERSION
     R"HTML(');
 console.log('[autolink] starting up…');
 
-// msgPaused starts true so the button reads "Start" on
-// load. The device is actually paused at boot (paused_=true in
-// Ping) and waits for /pausemsg?p=0 to begin sending. Showing
-// "Start" up front matches the device state and avoids the
-// confusing "Pause button while nothing's happening" UX. The /stats
-// poll reconciles in case anything diverges.
 var logPaused=false,msgPaused=true,logFullOpen=false,lastSeq=0,fails=0,busy=false,currentLvl=null;
 var currentMode=null;
-// device role as seen by the dashboard. Null = unknown
-// (before first /stats). Drives the ping-only controls' visibility
 
 var deviceRole=null;
 
@@ -287,7 +273,6 @@ function appendLog(sev,seq,text){
   addTo(document.getElementById('log'));
   if(logFullOpen)addTo(document.getElementById('logFull'));
   updateFillBar();
-
 
   try{if(localStorage.verbose==='1')console.log('[autolink] log['+seq+'] '+sev+' '+text);}catch(_){}
 }
@@ -467,13 +452,11 @@ async function poll(){
   if(busy)return;
   busy=true;
 
-
   try{
     try{
     var r=await tfetch('/stats',null,5000);
     if(!r.ok)throw 0;
     var d=await r.json();
-
 
     set('txbps',bps(d.txBps));
     set('txtot','total '+bytes(d.txTotal));
@@ -505,7 +488,6 @@ async function poll(){
       }
     }
 
-
     var rp=document.getElementById('rolePill');
     if(rp){
       if(d.role&&d.role.length){
@@ -517,14 +499,12 @@ async function poll(){
       }
     }
 
-
     if(d.role==='Ping'){
       deviceRole='Ping';
       document.body.setAttribute('data-role','ping');
     }else if(d.role==='Pong'){
       deviceRole='Pong';
       document.body.setAttribute('data-role','pong');
-
 
       document.querySelectorAll('.ping-only').forEach(function(el){
         el.style.display='none';
@@ -537,7 +517,6 @@ async function poll(){
       highlightLvl();
     }
 
-
     if(d.mode!==undefined&&d.mode!==null){
       var m=d.mode===1?'rand':'seq';
       if(m!==currentMode){
@@ -547,7 +526,6 @@ async function poll(){
         highlightMode();
       }
     }
-
 
     if(d.msgPaused!==undefined&&d.msgPaused!==null){
       var devPaused=d.msgPaused===1;
@@ -603,4 +581,4 @@ poll().then(function(){
 </body>
 </html>)HTML";
 
-} // namespace autolink
+}
