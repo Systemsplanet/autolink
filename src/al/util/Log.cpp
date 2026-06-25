@@ -9,11 +9,9 @@
 #    include "esp_log.h"
 #endif
 
-namespace autolink
-{
+namespace autolink {
 void Log::emit(const char *sev, const char *tag, const char *fmt,
-               va_list ap) const
-{
+               va_list ap) const {
     if (lvl == NONE)
         return;
 
@@ -57,14 +55,12 @@ void Log::emit(const char *sev, const char *tag, const char *fmt,
         sink_fn_(sev[0], tag, msg, sink_ctx_);
 }
 
-void Log::setSink(LogSink fn, void *ctx)
-{
+void Log::setSink(LogSink fn, void *ctx) {
     sink_fn_ = fn;
     sink_ctx_ = ctx;
 }
 
-void Log::clearSink()
-{
+void Log::clearSink() {
     sink_fn_ = nullptr;
     sink_ctx_ = nullptr;
 }
