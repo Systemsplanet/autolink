@@ -10,11 +10,11 @@
 #    include "al/util/UtilCrc.h"
 #    include "al/util/UtilCobs.h"
 #    include "AutoLink.h"
+#    include "EspHalStub.h"
 
 using namespace autolink;
 
-static std::vector<uint8_t> ackFrame(uint8_t ackedSeq)
-{
+static std::vector<uint8_t> ackFrame(uint8_t ackedSeq) {
     uint8_t unenc[3] = { ACK_TYPE, ackedSeq, 0 };
     unenc[2] = UtilCrc::crc8(unenc, 2);
     std::vector<uint8_t> enc(UtilCobs::encodedMax(3) + 2);
@@ -25,8 +25,7 @@ static std::vector<uint8_t> ackFrame(uint8_t ackedSeq)
     return enc;
 }
 
-void test_ack_type_constant()
-{
+void test_ack_type_constant() {
     std::cout << "\n=== Test: ACK_TYPE constant ===" << std::endl;
 
     assert(ACK_TYPE == 0xFF);
@@ -37,8 +36,7 @@ void test_ack_type_constant()
     std::cout << "PASS" << std::endl;
 }
 
-void test_unknown_cobs_ack_dropped()
-{
+void test_unknown_cobs_ack_dropped() {
     std::cout << "\n=== Test: ACK for Unknown cobsSeq Is Dropped ==="
               << std::endl;
     MockHal mHal;
@@ -63,8 +61,7 @@ void test_unknown_cobs_ack_dropped()
     std::cout << "PASS" << std::endl;
 }
 
-void test_duplicate_acks_are_idempotent()
-{
+void test_duplicate_acks_are_idempotent() {
     std::cout << "\n=== Test: Duplicate ACKs Are Idempotent ===" << std::endl;
     MockHal mHal;
     AutoLinkConfig cfg;
@@ -85,8 +82,7 @@ void test_duplicate_acks_are_idempotent()
     std::cout << "PASS" << std::endl;
 }
 
-void test_ack_type_not_a_preamble_or_cmd()
-{
+void test_ack_type_not_a_preamble_or_cmd() {
     std::cout << "\n=== Test: ACK_TYPE Doesn't Collide With Preamble/Cmd ==="
               << std::endl;
 
@@ -97,8 +93,7 @@ void test_ack_type_not_a_preamble_or_cmd()
     std::cout << "PASS" << std::endl;
 }
 
-void test_ack_type_outside_cobsseq_reserved()
-{
+void test_ack_type_outside_cobsseq_reserved() {
     std::cout << "\n=== Test: ACK_TYPE Outside cobsSeq Reserved Range ==="
               << std::endl;
 
@@ -108,8 +103,7 @@ void test_ack_type_outside_cobsseq_reserved()
     std::cout << "PASS" << std::endl;
 }
 
-void test_pending_acks_invariant()
-{
+void test_pending_acks_invariant() {
     std::cout << "\n=== Test: pendingAcks() Is a Stable Invariant ==="
               << std::endl;
     MockHal mHal;
@@ -130,8 +124,7 @@ void test_pending_acks_invariant()
     std::cout << "PASS" << std::endl;
 }
 
-void test_ack_wire_round_trip()
-{
+void test_ack_wire_round_trip() {
     std::cout << "\n=== Test: ACK Wire Format COBS+CRC Round-Trip ==="
               << std::endl;
 
@@ -152,8 +145,7 @@ void test_ack_wire_round_trip()
     std::cout << "PASS" << std::endl;
 }
 
-void test_base_seq_self_for_single_chunk()
-{
+void test_base_seq_self_for_single_chunk() {
     std::cout
         << "\n=== Test: baseSeq_ Equals Chunk Seq for 1-Chunk Messages ==="
         << std::endl;
@@ -169,8 +161,7 @@ void test_base_seq_self_for_single_chunk()
     std::cout << "PASS" << std::endl;
 }
 
-void test_retransmit_does_not_deadlock_with_lock()
-{
+void test_retransmit_does_not_deadlock_with_lock() {
     std::cout
         << "\n=== Test: Retransmit Deferred Past Lock Release (the fix) ==="
         << std::endl;
@@ -193,8 +184,7 @@ void test_retransmit_does_not_deadlock_with_lock()
         << std::endl;
 }
 
-void test_sendmsg_stalls_when_arq_cache_full()
-{
+void test_sendmsg_stalls_when_arq_cache_full() {
     std::cout << "\n=== Test: sendMsg stalls when ARQ cache is full (Bug 1) ==="
               << std::endl;
     MockHal mHal, sHal;
@@ -233,8 +223,7 @@ void test_sendmsg_stalls_when_arq_cache_full()
         << std::endl;
 }
 
-void test_reset_clears_arq_state_maps()
-{
+void test_reset_clears_arq_state_maps() {
     std::cout << "\n=== Test: reset_unlocked clears ARQ state maps (Bug 2) ==="
               << std::endl;
     MockHal mHal, sHal;
@@ -273,8 +262,7 @@ void test_reset_clears_arq_state_maps()
     std::cout << "PASS" << std::endl;
 }
 
-void test_keepalive_does_not_trigger_ack()
-{
+void test_keepalive_does_not_trigger_ack() {
     std::cout
         << "\n=== Test: 0-payload keepalive frame is not ACKed (the fix) ==="
         << std::endl;
@@ -311,8 +299,7 @@ void test_keepalive_does_not_trigger_ack()
     std::cout << "PASS (keepalive received, no push, no ACK sent)" << std::endl;
 }
 
-int main()
-{
+int main() {
     std::cout << "=== Running ALink ARQ Tests (v5: per-message ACK) ==="
               << std::endl;
     test_ack_type_constant();
