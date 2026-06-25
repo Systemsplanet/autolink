@@ -49,15 +49,13 @@ static uint32_t tBoot = 0;
 static bool facCheckStarted = false;
 static bool facCheckDone = false;
 
-void test_facade_construction()
-{
+void test_facade_construction() {
     // Construction completed (we got here). begin() is
     // called in setup().
     Serial.println("[t1] facade construction: ok");
 }
 
-void test_facade_state_api()
-{
+void test_facade_state_api() {
     Stats s;
     alink.getStats(s);
     Serial.printf("[t2] state=%s baud=%lu errCount=%d frameErrs=%llu\n",
@@ -66,8 +64,7 @@ void test_facade_state_api()
                   (unsigned long long)s.frameErrs);
 }
 
-void test_facade_stats_api()
-{
+void test_facade_stats_api() {
     Stats s;
     alink.getStats(s);
     Serial.printf("[t3] stats tx=%llu rx=%llu disc=%llu frameErrs=%llu\n",
@@ -83,8 +80,7 @@ void test_facade_stats_api()
         (unsigned long long)s.discCount, (unsigned long long)s.frameErrs);
 }
 
-void test_facade_stream_api()
-{
+void test_facade_stream_api() {
     // The byte-stream API
     // (available/read/peek/write/flush) must be
     // callable. The values themselves depend on link
@@ -96,8 +92,7 @@ void test_facade_stream_api()
     Serial.printf("[t4] stream available=%d peek=%d flush ok\n", a, p);
 }
 
-void test_facade_message_api()
-{
+void test_facade_message_api() {
     // recvMsg returns 0 when no message is ready; we
     // just verify the signature compiles and the call
     // doesn't crash.
@@ -106,13 +101,11 @@ void test_facade_message_api()
     Serial.printf("[t5] recvMsg returned %d (expected 0 with no traffic)\n", n);
 }
 
-void test_facade_ishealthy()
-{
+void test_facade_ishealthy() {
     Serial.printf("[t6] isHealthy=%d\n", alink.isHealthy() ? 1 : 0);
 }
 
-void test_facade_blink()
-{
+void test_facade_blink() {
     // Async blink: 1 flash, 60/60. Should return
     // immediately.
     uint32_t t0 = millis();
@@ -122,8 +115,7 @@ void test_facade_blink()
                   (unsigned long)dt);
 }
 
-void test_facade_blink_blocking()
-{
+void test_facade_blink_blocking() {
     // Blocking blink: 2 flashes, 50/50, then 100 ms
     // pause. Should hold the CPU for 2*50 + 50 + 100 =
     // 250 ms.
@@ -135,23 +127,20 @@ void test_facade_blink_blocking()
         (unsigned long)dt);
 }
 
-void test_facade_blink_invalid_ignored()
-{
+void test_facade_blink_invalid_ignored() {
     alink.blinkWait(0);
     alink.blinkWait(-3);
     Serial.println("[t9] blinkWait(0) and blinkWait(-3) ignored as expected");
 }
 
-void test_facade_droplink_safe()
-{
+void test_facade_droplink_safe() {
     // dropLink must be safe to call at any time, even
     // before negotiation.
     alink.dropLink();
     Serial.println("[t10] dropLink() returned without crash");
 }
 
-void test_facade_err_clearing()
-{
+void test_facade_err_clearing() {
     alink.err();
     alink.err();
     Serial.printf("[t11] errCount=%d after 2 err() calls\n",
@@ -160,8 +149,7 @@ void test_facade_err_clearing()
     Serial.printf("[t11] errCount=%d after clearErr()\n", alink.getErrCount());
 }
 
-void runFacadeChecks()
-{
+void runFacadeChecks() {
     test_facade_construction();
     test_facade_state_api();
     test_facade_stats_api();
@@ -178,8 +166,7 @@ void runFacadeChecks()
     Serial.println("[ALL_TESTS_DONE]");
 }
 
-void setup()
-{
+void setup() {
     Serial.begin(115200);
     delay(200);
     Serial.println("\n[test_embedded] AutoLink facade self-loopback test");
@@ -191,8 +178,7 @@ void setup()
     // at the top of file.
 }
 
-void loop()
-{
+void loop() {
     if (!facCheckStarted) {
         facCheckStarted = true;
         runFacadeChecks();
