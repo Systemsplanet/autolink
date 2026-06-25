@@ -2,44 +2,70 @@
 # Generate gcov coverage reports.
 #
 # Each test binary links a different subset of the AutoLink sources, so
-# instead of trying to merge .gcda across all 13 binaries (gcov-tool
+# instead of trying to merge .gcda across all binaries (gcov-tool
 # merge is fragile and often produces empty outputs), we pick the
-# most-comprehensive binary for each source:
+# most-comprehensive binary for each source.
 #
-#   - run_test_alink_error covers Link, Log, LinkBaudSweep, UtilCobs,
-#     UtilCrc, LinkFrameRx, plus the test cpp itself. Use it for the
-#     protocol sources.
-#   - run_test_crc / run_test_cobs / run_test_framerx / run_test_baudsweep
-#     each cover their utility more thoroughly than the protocol test
-#     does. Use them for the Util* sources.
-#   - run_test_log covers Log.cpp more thoroughly than the protocol test.
-#   - run_test_blink covers UtilBlink.h (header-only, in the test cpp).
+# The source-to-binary map used to live as a hardcoded `src_for` array
+# in this script. That drifted from TEST_BINS in the test Makefile:
+# adding a new suite there did not update this script, so coverage
+# silently missed the new suite (see AGENTS.md rule 4).
 #
-# If a future change adds a more-comprehensive test, update the map below.
+# Fix: the Makefile generates a manifest (coverage/manifest.sh) that
+# lists, for every library source basename, the set of run_test_*
+# binaries that link it. The manifest is the single source of truth,
+# derived from TEST_BINS and the per-suite build rules. This script
+# sources the manifest and uses the resulting src_for_<basename>
+# variables in place of the old hardcoded map. The list of test
+# binaries is also passed via the manifest (TEST_BINS variable), so
+# the test-file branch iterates the same set as the Makefile.
+#
+# Usage: coverage_merge.sh <manifest_path>
+#
+#   <manifest_path>  path to a shell-sourceable file produced by
+#                    coverage_manifest.py, defining
+#                      TEST_BINS="bin1 bin2 ..."
+#                      src_for_<basename>="bin1 bin2 ..."
+#                    for every library source referenced by at
+#                    least one suite.
 set -e
 cd "$(dirname "$0")"
+
+if [ $# -ne 1 ]; then
+    echo "usage: coverage_merge.sh <manifest_path>" >&2
+    exit 2
+fi
+MANIFEST="$1"
+if [ ! -f "$MANIFEST" ]; then
+    echo "coverage_merge.sh: manifest not found: $MANIFEST" >&2
+    exit 2
+fi
+
+# shellcheck disable=SC1090
+source "$MANIFEST"
+
+if [ -z "$TEST_BINS" ]; then
+    echo "coverage_merge.sh: manifest has no TEST_BINS" >&2
+    exit 2
+fi
 
 echo "=== Assembling coverage inputs from per-suite .gcda files ==="
 rm -rf coverage/merged && mkdir -p coverage/merged
 
-# Map: source basename -> list of binaries whose .gcda we MERGE.
-# Each binary exercises a different subset of the source's branches,
-# so a single binary gives partial coverage. The full-coverage
-# approach is to run every test that links the source, then
-# gcov-tool merge the per-binary .gcda files into one canonical
-# .gcda per source.
-declare -A src_for=(
-    [Link]="run_test_alink_error run_test_alink_io run_test_alink_message run_test_alink_negotiation run_test_alink_watchdog run_test_alink_cobsseq"
-    [Log]="run_test_log run_test_alink_error run_test_alink_io run_test_alink_message run_test_alink_negotiation run_test_alink_watchdog run_test_alink_cobsseq run_test_autolink run_test_mockhal"
-    [AutoLink]="run_test_autolink run_test_alink_io"
-    [IHal]="run_test_alink_error run_test_alink_io run_test_alink_message run_test_alink_negotiation run_test_alink_watchdog run_test_alink_cobsseq run_test_autolink run_test_mockhal"
-    [LinkBaudSweep]="run_test_baudsweep run_test_alink_error run_test_alink_io run_test_alink_message run_test_alink_negotiation run_test_alink_watchdog run_test_alink_cobsseq"
-    [UtilBlink]="run_test_blink"
-    [UtilCobs]="run_test_cobs run_test_alink_error run_test_alink_io run_test_alink_message run_test_alink_negotiation run_test_alink_watchdog run_test_alink_cobsseq"
-    [UtilCrc]="run_test_crc run_test_alink_error run_test_alink_io run_test_alink_message run_test_alink_negotiation run_test_alink_watchdog run_test_alink_cobsseq"
-    [LinkFrameRx]="run_test_framerx run_test_alink_error run_test_alink_io run_test_alink_message run_test_alink_negotiation run_test_alink_watchdog run_test_alink_cobsseq"
-    [MockHal]="run_test_mockhal run_test_alink_error run_test_alink_io run_test_alink_message run_test_alink_negotiation run_test_alink_watchdog run_test_alink_cobsseq"
-)
+# src_for is built from the manifest: every src_for_<basename>
+# variable is a candidate. The map keys are the basenames g++
+# uses for the .gcno/.gcda sidecars of each library source.
+# Anything in src/ that a suite links ends up here automatically
+# when the suite is added to TEST_BINS — no edit to this script.
+# `declare -A` is required — without it bash treats src_for as
+# an indexed array and string keys get coerced to integer indices.
+declare -A src_for=()
+for var in $(compgen -v | grep '^src_for_'); do
+    base=${var#src_for_}
+    # Indirection: ${!var} reads the variable named in $var.
+    bins=${!var}
+    src_for["$base"]=$bins
+done
 
 # Source: pick the .gcno from any binary (they're all identical for the
 # same source). Then merge the .gcda from every binary that linked it
@@ -102,10 +128,10 @@ for src in "${!src_for[@]}"; do
 done
 
 # Test files: one .gcno + .gcda per test, renamed to avoid collisions.
-for bin in run_test_crc run_test_cobs run_test_blink run_test_framerx \
-           run_test_baudsweep run_test_log run_test_mockhal \
-           run_test_alink_io run_test_alink_message run_test_alink_negotiation \
-           run_test_alink_error run_test_alink_watchdog run_test_autolink; do
+# Iterate TEST_BINS from the manifest rather than a hardcoded list —
+# adding a new suite to TEST_BINS automatically includes its test-cpp
+# coverage here.
+for bin in $TEST_BINS; do
     for ext in gcno gcda; do
         for f in "$bin"-*."$ext"; do
             [ -e "$f" ] || continue
@@ -131,9 +157,27 @@ for f in coverage/merged/*.gcno; do
 done
 mv -f *.gcov coverage/ 2>/dev/null || true
 
-# Prune the STL / system-header files.
-find coverage -maxdepth 1 -name "*.gcov" \
-    ! -name "Link*" ! -name "AutoLink*" ! -name "IHal*" ! -name "Log*" \
-    ! -name "MockHal*" ! -name "UtilBaudSweep*" ! -name "UtilBlink*" \
-    ! -name "UtilCobs*" ! -name "UtilCrc*" ! -name "UtilFrameRx*" \
-    -delete 2>/dev/null || true
+# Prune STL / system-header files. The set of library basenames we
+# care about is the same set of keys in src_for; we feed those into
+# find -name patterns so that adding a new library source updates
+# the keep-list automatically.
+keep_pat=()
+for src in "${!src_for[@]}"; do
+    if [ ${#keep_pat[@]} -gt 0 ]; then
+        keep_pat+=("-o")
+    fi
+    keep_pat+=("-name" "${src}*")
+done
+if [ ${#keep_pat[@]} -gt 0 ]; then
+    find coverage -maxdepth 1 -name "*.gcov" \
+        \( "${keep_pat[@]}" \) -print > /tmp/.keep_gcovs 2>/dev/null || true
+    # Delete everything that isn't in the keep list.
+    if [ -s /tmp/.keep_gcovs ]; then
+        find coverage -maxdepth 1 -name "*.gcov" \
+            | sort > /tmp/.all_gcovs
+        sort -u /tmp/.keep_gcovs > /tmp/.keep_sorted
+        comm -23 /tmp/.all_gcovs /tmp/.keep_sorted \
+            | xargs -r rm -f 2>/dev/null || true
+    fi
+    rm -f /tmp/.keep_gcovs /tmp/.all_gcovs /tmp/.keep_sorted
+fi
