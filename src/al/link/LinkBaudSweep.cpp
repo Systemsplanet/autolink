@@ -1,10 +1,8 @@
 // Per-baud PONG_ACK accumulator.
 #include "al/link/LinkBaudSweep.h"
 
-namespace autolink
-{
-void UtilBaudSweep::configure(const Config &c)
-{
+namespace autolink {
+void UtilBaudSweep::configure(const Config &c) {
     cfg_ = c;
     if (cfg_.expectedSamples < 0)
         cfg_.expectedSamples = cfg_.pingSamplesPerBaud;
@@ -12,14 +10,12 @@ void UtilBaudSweep::configure(const Config &c)
         cfg_.expectedSamples = 1;
 }
 
-void UtilBaudSweep::resetAll()
-{
+void UtilBaudSweep::resetAll() {
     for (int i = 0; i < numBauds_; i++)
         scores_[i] = 0;
 }
 
-int UtilBaudSweep::pickBest() const
-{
+int UtilBaudSweep::pickBest() const {
     int minHits = (int)(cfg_.minAcceptRate * (float)cfg_.expectedSamples);
     if (minHits < 1)
         minHits = 1;
