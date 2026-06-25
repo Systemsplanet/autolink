@@ -14,8 +14,7 @@
 
 using namespace autolink;
 
-void setup()
-{
+void setup() {
     Serial.begin(115200);
 
     AutoLinkConfig cfg;
