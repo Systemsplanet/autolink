@@ -1,11 +1,10 @@
-// Host-test IHal: pipe-backed TX/RX, injectable clock
-// via pumpClock/runFor, optional frame-drop model.
-// Lets the protocol run on a host with deterministic
-// timing.
+// Host IHal: memory-pipe TX/RX,
+// injectable clock, frame-drop model.
 #pragma once
 #ifndef ARDUINO
 
 #    include "al/link/Link.h"
+#    include <iostream>
 #    include <queue>
 #    include <mutex>
 #    include <vector>
@@ -21,9 +20,7 @@ public:
     bool timerActive = false;
     std::vector<uint8_t> txBuf;
 
-
     std::vector<uint32_t> txBaudPerByte;
-
 
     uint32_t txBaud = 9600;
 
@@ -32,12 +29,9 @@ public:
     int timerFiredCalls = 0;
     std::vector<uint32_t> spdHistory;
 
-
     uint32_t nextTimerAtMs = UINT32_MAX;
 
-
     MockHal *peer = nullptr;
-
 
     int frameDropPct = 0;
     int bytesDropped = 0;
@@ -97,13 +91,12 @@ public:
         nextTimerAtMs = UINT32_MAX;
     }
 
-
     void pumpClock(uint32_t deltaMs)
     {
         now += deltaMs;
         int safety = 0;
-        while (nextTimerAtMs != UINT32_MAX &&
-               now >= nextTimerAtMs && safety++ < 16) {
+        while (nextTimerAtMs != UINT32_MAX && now >= nextTimerAtMs &&
+               safety++ < 16) {
             timerFiredCalls++;
             if (link)
                 link->onTimer();
@@ -163,11 +156,9 @@ public:
             return -1;
         return appBuf.front();
     }
-    int peekAt(uint8_t *out, int n,
-               int offset) const override
+    int peekAt(uint8_t *out, int n, int offset) const override
     {
-        if (n <= 0 || offset < 0 ||
-            offset >= (int)appBuf.size())
+        if (n <= 0 || offset < 0 || offset >= (int)appBuf.size())
             return 0;
         std::vector<uint8_t> tmp(appBuf.size());
         int i = 0;
@@ -177,16 +168,12 @@ public:
             copy.pop();
         }
         int copied = 0;
-        for (int k = offset;
-             k < (int)tmp.size() && copied < n; k++) {
+        for (int k = offset; k < (int)tmp.size() && copied < n; k++) {
             out[copied++] = tmp[k];
         }
         return copied;
     }
-    int appBufAvailable() const override
-    {
-        return appBuf.size();
-    }
+    int appBufAvailable() const override { return appBuf.size(); }
     void clearAppBuf() override
     {
         while (!appBuf.empty())
@@ -198,7 +185,6 @@ inline void pipe_data(MockHal &src, MockHal &dest)
 {
     if (src.txBuf.empty())
         return;
-
 
     std::vector<uint8_t> kept;
     kept.reserve(src.txBuf.size());
@@ -222,8 +208,7 @@ inline void pipe_data(MockHal &src, MockHal &dest)
     std::vector<uint8_t> delivered;
     size_t i = 0;
     while (i + 5 <= kept.size()) {
-        bool drop =
-            ((s = s * 1664525u + 1013904223u) % 100u) <
+        bool drop = ((s = s * 1664525u + 1013904223u) % 100u) <
             (uint32_t)src.frameDropPct;
         if (!drop && src.dropNextFrames > 0) {
             drop = true;
@@ -232,41 +217,33 @@ inline void pipe_data(MockHal &src, MockHal &dest)
         if (drop) {
             src.bytesDropped += 5;
         } else {
-            delivered.insert(delivered.end(),
-                             kept.begin() + i,
+            delivered.insert(delivered.end(), kept.begin() + i,
                              kept.begin() + i + 5);
         }
         i += 5;
     }
-
 
     if (i < kept.size()) {
         if (src.dropNextFrames > 0) {
             src.bytesDropped += (int)(kept.size() - i);
             src.dropNextFrames--;
         } else {
-            delivered.insert(delivered.end(),
-                             kept.begin() + i,
-                             kept.end());
+            delivered.insert(delivered.end(), kept.begin() + i, kept.end());
         }
     }
     src.dropRngSeed = s;
     if (!delivered.empty())
-        dest.link->onRx(delivered.data(),
-                        delivered.size());
+        dest.link->onRx(delivered.data(), delivered.size());
 }
 
-inline void negotiate_to_ok(Link &ping, Link &pong,
-                            MockHal &mHal,
+inline void negotiate_to_ok(Link &ping, Link &pong, MockHal &mHal,
                             MockHal &sHal)
 {
     ping.begin();
     pong.begin();
     int N = (int)ping.getConfig().allowedBaudsCount;
 
-
     sHal.setSpd(ping.getConfig().allowedBauds[N - 1]);
-
 
     for (int i = 0; i < 200; i++) {
         uint32_t targetMs = mHal.now + 50;
@@ -275,12 +252,10 @@ inline void negotiate_to_ok(Link &ping, Link &pong,
             sHal.pumpClock(targetMs - sHal.now);
             pipe_data(mHal, sHal);
             pipe_data(sHal, mHal);
-            if (ping.getState() == State::OK &&
-                pong.getState() == State::OK)
+            if (ping.getState() == State::OK && pong.getState() == State::OK)
                 break;
         }
-        if (ping.getState() == State::OK &&
-            pong.getState() == State::OK)
+        if (ping.getState() == State::OK && pong.getState() == State::OK)
             break;
     }
     assert(ping.getState() == State::OK);
