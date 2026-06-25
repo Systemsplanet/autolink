@@ -1,7 +1,4 @@
-// 3-phase sweep contract: master/pong never leave P1
-// until connected.
-
-
+// P1 contract: never leave until connected.
 #include <iostream>
 #include <iomanip>
 #include <cassert>
@@ -12,8 +9,7 @@ using namespace autolink;
 
 static void test_master_never_leaves_p1()
 {
-    std::cout << "\n=== master never leaves P1 (50 "
-                 "PINGs no ack) ==="
+    std::cout << "\n=== master never leaves P1 (50 PINGs no ack) ==="
               << std::endl;
     AutoLinkConfig cfg;
     cfg.allowedBauds[0] = 115200;
@@ -28,7 +24,6 @@ static void test_master_never_leaves_p1()
     Link pong(sHal, false, cfg);
     ping.begin();
     pong.begin();
-
 
     sHal.setSpd(cfg.allowedBauds[0]);
     sHal.dropNextFrames = 9999;
@@ -45,8 +40,7 @@ static void test_master_never_leaves_p1()
 
 static void test_pong_never_leaves_p1()
 {
-    std::cout << "\n=== pong never leaves P1 (50 "
-                 "listens no PING) ==="
+    std::cout << "\n=== pong never leaves P1 (50 listens no PING) ==="
               << std::endl;
     AutoLinkConfig cfg;
     cfg.allowedBauds[0] = 115200;
@@ -61,7 +55,6 @@ static void test_pong_never_leaves_p1()
     Link pong(sHal, false, cfg);
     ping.begin();
     pong.begin();
-
 
     mHal.setSpd(cfg.allowedBauds[0]);
     mHal.dropNextFrames = 9999;
@@ -76,11 +69,9 @@ static void test_pong_never_leaves_p1()
     std::cout << "PASS" << std::endl;
 }
 
-static void
-test_master_locks_on_first_pong_ack_at_slowest()
+static void test_master_locks_on_first_pong_ack_at_slowest()
 {
-    std::cout << "\n=== master locks on first "
-                 "PONG_ACK at slowest baud ==="
+    std::cout << "\n=== master locks on first PONG_ACK at slowest baud ==="
               << std::endl;
     AutoLinkConfig cfg;
     cfg.allowedBauds[0] = 115200;
@@ -96,14 +87,12 @@ test_master_locks_on_first_pong_ack_at_slowest()
     ping.begin();
     pong.begin();
 
-
     for (int i = 0; i < 10; i++) {
         mHal.pumpClock(50);
         sHal.pumpClock(50);
         pipe_data(mHal, sHal);
         pipe_data(sHal, mHal);
-        if (ping.getState() == State::OK &&
-            pong.getState() == State::OK)
+        if (ping.getState() == State::OK && pong.getState() == State::OK)
             break;
     }
     assert(ping.getState() == State::OK);
@@ -114,9 +103,7 @@ test_master_locks_on_first_pong_ack_at_slowest()
 
 static void test_break_in_p1_resets_to_slowest()
 {
-    std::cout << "\n=== BREAK in P1 restarts at "
-                 "slowest baud ==="
-              << std::endl;
+    std::cout << "\n=== BREAK in P1 restarts at slowest baud ===" << std::endl;
     AutoLinkConfig cfg;
     cfg.allowedBauds[0] = 115200;
     cfg.allowedBauds[1] = 9600;
@@ -136,8 +123,7 @@ static void test_break_in_p1_resets_to_slowest()
         sHal.pumpClock(50);
         pipe_data(mHal, sHal);
         pipe_data(sHal, mHal);
-        if (ping.getState() == State::OK &&
-            pong.getState() == State::OK)
+        if (ping.getState() == State::OK && pong.getState() == State::OK)
             break;
     }
     assert(ping.getState() == State::OK);
@@ -147,7 +133,6 @@ static void test_break_in_p1_resets_to_slowest()
     pong.onBreak();
     assert(ping.getState() == State::SWP);
     assert(pong.getState() == State::SWP);
-
 
     assert(ping.getCurrentSpdIndex() == 1);
     assert(pong.getCurrentSpdIndex() == 1);
@@ -159,15 +144,11 @@ static void test_break_in_p1_resets_to_slowest()
 
 int main()
 {
-    std::cout
-        << "=== Never-Leave-P1 Contract Tests ==="
-        << std::endl;
+    std::cout << "=== Never-Leave-P1 Contract Tests ===" << std::endl;
     test_master_never_leaves_p1();
     test_pong_never_leaves_p1();
     test_master_locks_on_first_pong_ack_at_slowest();
     test_break_in_p1_resets_to_slowest();
-    std::cout
-        << "\n=== All 4 never-leave-P1 tests PASS ==="
-        << std::endl;
+    std::cout << "\n=== All 4 never-leave-P1 tests PASS ===" << std::endl;
     return 0;
 }
