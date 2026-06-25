@@ -1,7 +1,5 @@
-// ARDUINO-only glue: WiFi STA connect, httpd server,
-// dashboard JSON snapshot. The protocol-agnostic core
-// (ring log + JSON formatter + state) lives in
-// AutoLinkWebCore and is host-tested.
+// Arduino-only: WiFi STA, esp_http_server,
+// live dashboard. Core in AutoLinkWebCore.
 #pragma once
 #ifdef ARDUINO
 
@@ -11,6 +9,7 @@
 #    include "esp_http_server.h"
 #    include "esp_timer.h"
 #    include "freertos/semphr.h"
+#    include <functional>
 
 namespace autolink
 {
@@ -20,32 +19,25 @@ public:
     explicit AutoLinkWeb(AutoLink &link);
     ~AutoLinkWeb();
 
-
     void setRole(const char *role);
 
-
-    using FillModeReader = uint8_t (*)();
-    using FillModeWriter = void (*)(uint8_t);
-    void setFillModeHook(FillModeReader r,
-                         FillModeWriter w)
+    using FillModeReader = std::function<uint8_t()>;
+    using FillModeWriter = std::function<void(uint8_t)>;
+    void setFillModeHook(FillModeReader r, FillModeWriter w)
     {
-        fillModeReader_ = r;
-        fillModeWriter_ = w;
+        fillModeReader_ = std::move(r);
+        fillModeWriter_ = std::move(w);
     }
 
-
-    using MsgPausedReader = bool (*)();
-    using MsgPausedWriter = void (*)(bool);
-    void setMsgPauseHook(MsgPausedReader r,
-                         MsgPausedWriter w)
+    using MsgPausedReader = std::function<bool()>;
+    using MsgPausedWriter = std::function<void(bool)>;
+    void setMsgPauseHook(MsgPausedReader r, MsgPausedWriter w)
     {
-        msgPausedReader_ = r;
-        msgPausedWriter_ = w;
+        msgPausedReader_ = std::move(r);
+        msgPausedWriter_ = std::move(w);
     }
 
-
-    bool begin(const char *ssid, const char *password,
-               uint16_t port = 8765);
+    bool begin(const char *ssid, const char *password, uint16_t port = 8765);
 
     bool isUp() const { return enabled_; }
     String ip() const;
@@ -53,8 +45,7 @@ public:
 private:
     static constexpr int RING_CAP = 200;
     static constexpr int LINE_CAP = 180;
-    static constexpr uint32_t WIFI_BG_TIMEOUT_MS =
-        10000;
+    static constexpr uint32_t WIFI_BG_TIMEOUT_MS = 10000;
     static constexpr uint32_t WIFI_BG_TICK_MS = 250;
     static constexpr uint32_t WIFI_TIMEOUT_MS = 12000;
     static constexpr const char *TAG = "ALinkWeb";
@@ -68,6 +59,7 @@ private:
     using Snapshot = WebSnapshot;
 
     AutoLink &link_;
+    Log &log_;
     uint16_t port_ = 8765;
     bool enabled_ = false;
     bool ntpSynced_ = false;
@@ -100,9 +92,8 @@ private:
 
     static void statTimerCb(void *arg);
 
-
-    static void logSinkCb(char sev, const char *tag,
-                          const char *msg, void *ctx);
+    static void logSinkCb(char sev, const char *tag, const char *msg,
+                          void *ctx);
 
     static esp_err_t handleRoot(httpd_req_t *req);
     static esp_err_t handleStats(httpd_req_t *req);
