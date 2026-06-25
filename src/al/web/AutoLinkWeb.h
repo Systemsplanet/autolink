@@ -11,10 +11,8 @@
 #    include "freertos/semphr.h"
 #    include <functional>
 
-namespace autolink
-{
-class AutoLinkWeb
-{
+namespace autolink {
+class AutoLinkWeb {
 public:
     explicit AutoLinkWeb(AutoLink &link);
     ~AutoLinkWeb();
@@ -23,18 +21,23 @@ public:
 
     using FillModeReader = std::function<uint8_t()>;
     using FillModeWriter = std::function<void(uint8_t)>;
-    void setFillModeHook(FillModeReader r, FillModeWriter w)
-    {
+    void setFillModeHook(FillModeReader r, FillModeWriter w) {
         fillModeReader_ = std::move(r);
         fillModeWriter_ = std::move(w);
     }
 
     using MsgPausedReader = std::function<bool()>;
     using MsgPausedWriter = std::function<void(bool)>;
-    void setMsgPauseHook(MsgPausedReader r, MsgPausedWriter w)
-    {
+    void setMsgPauseHook(MsgPausedReader r, MsgPausedWriter w) {
         msgPausedReader_ = std::move(r);
         msgPausedWriter_ = std::move(w);
+    }
+
+    using TxDelayReader = std::function<int()>;
+    using TxDelayWriter = std::function<void(int)>;
+    void setTxDelayHook(TxDelayReader r, TxDelayWriter w) {
+        txDelayReader_ = std::move(r);
+        txDelayWriter_ = std::move(w);
     }
 
     bool begin(const char *ssid, const char *password, uint16_t port = 8765);
@@ -74,6 +77,9 @@ private:
 
     MsgPausedReader msgPausedReader_ = nullptr;
     MsgPausedWriter msgPausedWriter_ = nullptr;
+
+    TxDelayReader txDelayReader_ = nullptr;
+    TxDelayWriter txDelayWriter_ = nullptr;
     uint64_t prevTx_ = 0;
     uint64_t prevRx_ = 0;
     SemaphoreHandle_t snapMtx_ = nullptr;
@@ -102,6 +108,7 @@ private:
     static esp_err_t handleLevel(httpd_req_t *req);
     static esp_err_t handleMode(httpd_req_t *req);
     static esp_err_t handleMsgPause(httpd_req_t *req);
+    static esp_err_t handleDelay(httpd_req_t *req);
     static esp_err_t handleReboot(httpd_req_t *req);
 };
 
