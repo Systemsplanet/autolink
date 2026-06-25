@@ -1,6 +1,4 @@
-// Dashboard JSON formatters and HTML stub fallback.
-// Real HTML payload comes from AutoLinkWebHtml.h when
-// compiled in.
+// Dashboard JSON formatters and log ring.
 #include "al/web/AutoLinkWebCore.h"
 #include <stdio.h>
 #include <string.h>
@@ -8,53 +6,36 @@
 
 namespace autolink
 {
-int formatStatsJson(const WebSnapshot *s, int logLevel,
-                    const char *version, char *out,
-                    int outLen)
+int formatStatsJson(const WebSnapshot *s, int logLevel, const char *version,
+                    char *out, int outLen)
 {
     if (!s || !out || outLen <= 0)
         return 0;
     return snprintf(
         out, (size_t)outLen,
-        "{\"state\":\"%s\",\"errCount\":%lu,"
-        "\"errTotal\":%llu,"
-        "\"lostMsgs\":%llu,"
-        "\"txBps\":%lu,\"rxBps\":%lu,"
-        "\"txTotal\":%llu,\"rxTotal\":%llu,"
-        "\"rssi\":%d,\"freeHeap\":%lu,\"uptimeS\":%lu,"
-        "\"baudRate\":%lu,\"lvl\":%d,\"mode\":%u,"
-        "\"msgPaused\":%u,"
-        "\"role\":\"%s\","
-        "\"version\":\"%s\"}",
-        s->state, (unsigned long)s->errCount,
-        (unsigned long long)s->errTotal,
-        (unsigned long long)s->lostMsgs,
-        (unsigned long)s->txBps,
-        (unsigned long)s->rxBps,
-        (unsigned long long)s->txTotal,
+        "{\"state\":\"%s\",\"errCount\":%lu, \"errTotal\":%llu, \"lostMsgs\":%llu, \"txBps\":%lu,\"rxBps\":%lu, \"txTotal\":%llu,\"rxTotal\":%llu, \"rssi\":%d,\"freeHeap\":%lu,\"uptimeS\":%lu, \"baudRate\":%lu,\"lvl\":%d,\"mode\":%u, \"msgPaused\":%u, \"linkMode\":%u, \"role\":\"%s\", \"version\":\"%s\"}",
+        s->state, (unsigned long)s->errCount, (unsigned long long)s->errTotal,
+        (unsigned long long)s->lostMsgs, (unsigned long)s->txBps,
+        (unsigned long)s->rxBps, (unsigned long long)s->txTotal,
         (unsigned long long)s->rxTotal, (int)s->rssi,
-        (unsigned long)s->freeHeap,
-        (unsigned long)s->uptimeS,
-        (unsigned long)s->baudRate, logLevel,
-        (unsigned)s->fillMode, (unsigned)s->msgPaused,
-        s->role, version ? version : "");
+        (unsigned long)s->freeHeap, (unsigned long)s->uptimeS,
+        (unsigned long)s->baudRate, logLevel, (unsigned)s->fillMode,
+        (unsigned)s->msgPaused, (unsigned)s->linkMode, s->role,
+        version ? version : "");
 }
 
-int formatLogsJson(const WebLogEntry *ring,
-                   uint32_t head, uint32_t since,
+int formatLogsJson(const WebLogEntry *ring, uint32_t head, uint32_t since,
                    char *out, int outLen)
 {
     if (!ring || !out || outLen <= 0)
         return 0;
-    int len = snprintf(out, (size_t)outLen,
-                       "{\"head\":%lu,\"lines\":[",
+    int len = snprintf(out, (size_t)outLen, "{\"head\":%lu,\"lines\":[",
                        (unsigned long)head);
     if (len < 0 || len >= outLen)
         return len;
 
-    uint32_t start = (head > (uint32_t)WEB_RING_CAP)
-        ? (head - WEB_RING_CAP)
-        : 0;
+    uint32_t start =
+        (head > (uint32_t)WEB_RING_CAP) ? (head - WEB_RING_CAP) : 0;
     if (since > start)
         start = since;
 
@@ -65,25 +46,21 @@ int formatLogsJson(const WebLogEntry *ring,
             continue;
 
         if (!first) {
-            int n =
-                snprintf(out + len,
-                         (size_t)(outLen - len), ",");
+            int n = snprintf(out + len, (size_t)(outLen - len), ",");
             if (n < 0 || n >= outLen - len)
                 break;
             len += n;
         }
         first = false;
 
-        int n = snprintf(
-            out + len, (size_t)(outLen - len),
-            "{\"seq\":%lu,\"sev\":\"%c\",\"text\":\"",
-            (unsigned long)i, e.sev);
+        int n = snprintf(out + len, (size_t)(outLen - len),
+                         "{\"seq\":%lu,\"sev\":\"%c\",\"text\":\"",
+                         (unsigned long)i, e.sev);
         if (n < 0 || n >= outLen - len)
             break;
         len += n;
 
-        for (const char *p = e.line;
-             *p && len < outLen - 4; p++) {
+        for (const char *p = e.line; *p && len < outLen - 4; p++) {
             switch (*p) {
             case '"':
                 out[len++] = '\\';
@@ -112,8 +89,7 @@ int formatLogsJson(const WebLogEntry *ring,
         }
     }
 
-    int n = snprintf(out + len, (size_t)(outLen - len),
-                     "]}");
+    int n = snprintf(out + len, (size_t)(outLen - len), "]}");
     if (n > 0 && n < outLen - len)
         len += n;
     return len;
