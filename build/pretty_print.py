@@ -12,6 +12,12 @@ breaks. The project root's `.clang-format` already has
 splits are introduced going forward; any legacy splits have
 already been cleaned up in earlier versions.
 
+The `.clang-format` also sets
+`AllowShortFunctionsOnASingleLine: All`, so single-statement
+bodies (and bodies short enough to fit on one line) collapse
+to a single line. The default `Linux` brace style is
+preserved for multi-statement bodies.
+
 clang-format is only run on C/C++ source files (.c, .cc,
 .cpp, .cxx, .h, .hh, .hpp, .hxx, .ino). Running it on
 Python or Markdown would mangle those files since
@@ -41,6 +47,22 @@ def _have_clang_format() -> bool:
     )
 
 
+def _user_clang_format_path() -> str:
+    """Return the absolute path where a `pip install --user`
+    would land the clang-format wrapper, even if that path
+    is not on the current PATH. Empty string if no HOME
+    is set (shouldn't happen on supported platforms)."""
+    home = subprocess.run(
+        ['python3', '-c', 'import os; print(os.path.expanduser("~/.local/bin"))'],
+        capture_output=True, text=True).stdout.strip()
+    candidate = f'{home}/clang-format'
+    if (subprocess.run(
+            ['test', '-x', candidate],
+            capture_output=True).returncode == 0):
+        return candidate
+    return ''
+
+
 def _have(cmd: str) -> bool:
     return (
         subprocess.run(
@@ -52,39 +74,72 @@ def _have(cmd: str) -> bool:
 def _install_clang_format() -> bool:
     """Try to install clang-format with the
     platform package manager. Returns True
-    on success. Best-effort: only apt and
-    brew are attempted (the two package
-    managers in use on AutoLink CI —
-    GitHub Actions Ubuntu and macOS dev
-    boxes). Other platforms (Alpine,
-    Nix, Windows) fall through and the
-    user must install it manually.
+    on success. Best-effort: apt, brew, and
+    pip are attempted in that order (apt +
+    brew are the GitHub Actions Ubuntu and
+    macOS dev box channels; pip is the
+    fallback for sandboxes and minimal
+    containers where the apt repo doesn't
+    carry clang-format). Other platforms
+    (Alpine, Nix, Windows) fall through and
+    the user must install it manually.
 
     For apt-get we try `sudo` first
     (interactive dev box), then fall
     back to no-sudo (CI runner, root
     container, sandbox). For brew we
     always go without sudo (brew
-    doesn't need it).
+    doesn't need it). For pip we try
+    the system install first, then
+    `--break-system-packages` for
+    PEP 668-managed distros (Debian
+    12+, Ubuntu 23.04+) that refuse
+    the default. The pip installs use
+    `--no-warn-script-location` and we
+    verify the resulting binary is on
+    PATH after each attempt -- `pip
+    install` returns rc=0 even when
+    it places the script in a
+    directory that is NOT on PATH
+    (e.g. `~/.local/bin` for a
+    `--user` install running as root),
+    so we don't trust the return code
+    alone.
     """
     if _have_clang_format():
         return True
-    apt_cmds = []
+    cmds = []
     if _have('apt-get'):
-        apt_cmds = [
+        cmds += [
             ['sudo', '-n', 'apt-get', 'install', '-y', 'clang-format'],
             ['apt-get', 'install', '-y', 'clang-format'],
         ]
-    brew_cmds = []
     if _have('brew'):
-        brew_cmds = [['brew', 'install', 'clang-format']]
-    for cmd in apt_cmds + brew_cmds:
+        cmds += [['brew', 'install', 'clang-format']]
+    if _have('pip') or _have('pip3'):
+        pip = 'pip3' if _have('pip3') else 'pip'
+        cmds += [
+            [pip, 'install', '--break-system-packages', 'clang-format'],
+            [pip, 'install', 'clang-format'],
+            [pip, 'install', '--user', '--break-system-packages', 'clang-format'],
+            [pip, 'install', '--user', 'clang-format'],
+        ]
+    for cmd in cmds:
         try:
             r = subprocess.run(
                 cmd, capture_output=True, text=True,
                 timeout=120)
-            if r.returncode == 0 and _have_clang_format():
+            if r.returncode != 0:
+                continue
+            if _have_clang_format():
                 return True
+            user_path = _user_clang_format_path()
+            if user_path:
+                import os
+                os.environ['PATH'] = (
+                    f'{os.path.dirname(user_path)}:{os.environ.get("PATH", "")}')
+                if _have_clang_format():
+                    return True
         except (FileNotFoundError, OSError,
                 subprocess.TimeoutExpired):
             continue
