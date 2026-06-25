@@ -1,14 +1,14 @@
 // SYNC-mode two-Link loopback end-to-end.
-// Regression for v5.3.46.
 //
 // Same pipe as loopback_test.cpp, but uses
 // the test-only split API
-// (test_sendMsgBeginForTest /
-// test_sendMsgStillWaitingForTest) because
-// the SYNC wait blocks the calling thread
-// waiting for the link task to deliver the
-// ACK, and the itest is single-threaded.
+// (LinkTestAccessor::sendMsgBegin /
+// sendMsgStillWaiting) because the SYNC
+// wait blocks the calling thread waiting
+// for the link task to deliver the ACK,
+// and the itest is single-threaded.
 #include "al/link/Link.h"
+#include "LinkTestAccessor.h"
 #include "al/util/Log.h"
 #include "al/util/UtilCrc.h"
 #include "MockHal.h"
@@ -27,8 +27,7 @@ static MockHal *g_pingHal = nullptr;
 static MockHal *g_pongHal = nullptr;
 static std::atomic<bool> g_pumpStop{ false };
 
-static void pump_thread()
-{
+static void pump_thread() {
     auto lastTick = clk::now();
     while (!g_pumpStop.load()) {
         auto now = clk::now();
@@ -60,8 +59,7 @@ static void pump_thread()
     }
 }
 
-static int run_loopback_sync(int seconds)
-{
+static int run_loopback_sync(int seconds) {
     AutoLinkConfig cfg;
     cfg.maxMsg = 256;
     cfg.idleTimeoutMs = 5000;
@@ -112,11 +110,12 @@ static int run_loopback_sync(int seconds)
             wallMs - lastSendMs >= sendEveryMs) {
             for (int i = 0; i < 64; i++)
                 payload[i] = (uint8_t)(wallMs + i);
-            if (ping.test_sendMsgBegin(payload, 64)) {
+            LinkTestAccessor pingT(ping);
+            if (pingT.sendMsgBegin(payload, 64)) {
                 int budget = cfg.syncAckTimeoutMs + 50;
                 for (int i = 0; i < budget; i++) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                    if (!ping.test_sendMsgStillWaiting()) {
+                    if (!pingT.sendMsgStillWaiting()) {
                         txCount++;
                         lastSendMs = (int)wallMs;
                         break;
@@ -152,8 +151,7 @@ static int run_loopback_sync(int seconds)
     return 0;
 }
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
     int seconds = 5;
     for (int i = 1; i < argc; i++) {
         seconds = std::atoi(argv[i]);
