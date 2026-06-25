@@ -7,21 +7,19 @@
 
 #include "MockHal.h"
 #include "AutoLink.h"
+#include "AutoLinkTestAccessor.h"
 
 #include <cstdint>
 #include <vector>
 #include <cassert>
 #include <iostream>
 
-namespace autolink
-{
-class WireSim
-{
+namespace autolink {
+class WireSim {
 public:
     WireSim(AutoLinkConfig cfg = AutoLinkConfig())
         : mA_(new MockHal()), mB_(new MockHal()), a_(mA_.get(), true, cfg),
-          b_(mB_.get(), false, cfg)
-    {
+          b_(mB_.get(), false, cfg) {
         mA_->peer = mB_.get();
         mB_->peer = mA_.get();
 
@@ -29,8 +27,7 @@ public:
         mB_->now = 0;
     }
 
-    void setFrameDropPct(int pct)
-    {
+    void setFrameDropPct(int pct) {
         mA_->frameDropPct = pct;
         mB_->frameDropPct = pct;
     }
@@ -44,11 +41,12 @@ public:
     AutoLink &linkA() { return a_; }
     AutoLink &linkB() { return b_; }
 
-    void step(uint32_t deltaMs)
-    {
+    void step(uint32_t deltaMs) {
+        AutoLinkTestAccessor at(a_);
+        AutoLinkTestAccessor bt(b_);
         Stats preA, preB;
-        a_.linkForTest()->getStats(preA);
-        b_.linkForTest()->getStats(preB);
+        at.link()->getStats(preA);
+        bt.link()->getStats(preB);
 
         if (dropPending_ ||
             (forcedDropEvery_ > 0 && (++stepCount_) % forcedDropEvery_ == 0)) {
@@ -66,48 +64,62 @@ public:
                 mA_->now >= mA_->nextTimerAtMs) &&
                fireCountA++ < 32) {
             mA_->timerFiredCalls++;
-            a_.linkForTest()->onTimer();
+            at.link()->onTimer();
         }
         while ((mB_->nextTimerAtMs != UINT32_MAX &&
                 mB_->now >= mB_->nextTimerAtMs) &&
                fireCountB++ < 32) {
             mB_->timerFiredCalls++;
-            b_.linkForTest()->onTimer();
+            bt.link()->onTimer();
         }
 
         pipe_data(*mA_, *mB_);
         pipe_data(*mB_, *mA_);
 
+        // Sweep locks the master at the fastest
+        // baud. The slave is still parked at the
+        // slowest baud; if it hasn't gone OK yet,
+        // snap it to the master's locked baud so
+        // the LOCK_CMD frame is delivered.
+        if (a_.getState() == State::OK && b_.getState() != State::OK)
+            mB_->setSpd(mA_->spd);
+
         Stats postA, postB;
-        a_.linkForTest()->getStats(postA);
-        b_.linkForTest()->getStats(postB);
+        at.link()->getStats(postA);
+        bt.link()->getStats(postB);
         int protoDropsThisStep = (int)((postA.discCount - preA.discCount) +
                                        (postB.discCount - preB.discCount));
         if (protoDropsThisStep > 0)
             protoDropsSeen_ += protoDropsThisStep;
     }
 
-    uint64_t bytesTransferredAtoB() const
-    {
+    uint64_t bytesTransferredAtoB() const {
+        AutoLinkTestAccessor at(a_);
+        AutoLinkTestAccessor bt(b_);
         Stats sa, sb;
-        a_.linkForTest()->getStats(sa);
-        b_.linkForTest()->getStats(sb);
+        at.link()->getStats(sa);
+        bt.link()->getStats(sb);
 
         return sb.rx;
     }
-    uint64_t bytesTransferredBtoA() const
-    {
+    uint64_t bytesTransferredBtoA() const {
+        AutoLinkTestAccessor at(a_);
+        AutoLinkTestAccessor bt(b_);
         Stats sa, sb;
-        a_.linkForTest()->getStats(sa);
-        b_.linkForTest()->getStats(sb);
+        at.link()->getStats(sa);
+        bt.link()->getStats(sb);
         return sa.rx;
     }
 
     int dropsInjected() const { return dropsInjected_; }
     int protoDropsSeen() const { return protoDropsSeen_; }
     int framesDropped() const { return mA_->bytesDropped + mB_->bytesDropped; }
-    int pendingCountA() const { return a_.arqCacheSizeForTest(); }
-    int pendingCountB() const { return b_.arqCacheSizeForTest(); }
+    int pendingCountA() const {
+        return AutoLinkTestAccessor(a_).arqCacheSize();
+    }
+    int pendingCountB() const {
+        return AutoLinkTestAccessor(b_).arqCacheSize();
+    }
     State getStateA() const { return a_.getState(); }
     State getStateB() const { return b_.getState(); }
 
@@ -133,11 +145,9 @@ private:
     int protoDropsSeen_ = 0;
 };
 
-class TwoNodeFixture
-{
+class TwoNodeFixture {
 public:
-    explicit TwoNodeFixture(WireSim &sim) : sim_(sim)
-    {
+    explicit TwoNodeFixture(WireSim &sim) : sim_(sim) {
         pendingA_.assign(32, Slot{ false, 0, 0, 0 });
         pendingB_.assign(32, Slot{ false, 0, 0, 0 });
     }
@@ -145,14 +155,12 @@ public:
     AutoLink &nodeA() { return sim_.nodeAForTest(); }
     AutoLink &nodeB() { return sim_.nodeBForTest(); }
 
-    void begin()
-    {
+    void begin() {
         sim_.linkA().begin();
         sim_.linkB().begin();
     }
 
-    uint64_t step(uint32_t deltaMs)
-    {
+    uint64_t step(uint32_t deltaMs) {
         int dropsBefore = sim_.dropsInjected() + sim_.protoDropsSeen();
         sim_.step(deltaMs);
         int dropsAfter = sim_.dropsInjected() + sim_.protoDropsSeen();
@@ -174,13 +182,11 @@ public:
     WireSim &sim() { return sim_; }
     const MockHal &halA() { return sim_.rawA(); }
     const MockHal &halB() { return sim_.rawB(); }
-    int pendingCountA()
-    {
+    int pendingCountA() {
         sim_.halA().now;
         return sim_.pendingCountA();
     }
-    int pendingCountB()
-    {
+    int pendingCountB() {
         sim_.halB().now;
         return sim_.pendingCountB();
     }
@@ -206,20 +212,17 @@ private:
     WireSim &sim_;
     uint32_t seqSeed_ = 0x12345;
 
-    uint8_t nextByte_()
-    {
+    uint8_t nextByte_() {
         seqSeed_ = seqSeed_ * 1103515245u + 12345u;
         return (uint8_t)(seqSeed_ >> 16);
     }
 
-    void fillPayload_(uint8_t *buf, int n)
-    {
+    void fillPayload_(uint8_t *buf, int n) {
         for (int i = 0; i < n; i++)
             buf[i] = nextByte_();
     }
 
-    void drivePing_()
-    {
+    void drivePing_() {
         if (sim_.getStateA() != State::OK)
             return;
 
@@ -266,8 +269,7 @@ private:
         }
     }
 
-    void drivePong_()
-    {
+    void drivePong_() {
         if (sim_.getStateB() != State::OK)
             return;
         uint8_t buf[1024];
