@@ -24,7 +24,7 @@
 #
 # This file lives in build/ alongside build_env.sh (which does the
 # actual install) and verify_build.sh (which compiles the verify sketch).
-# See AGENTS.md rule 17 for the "always use the wrapper" rule.
+# See AGENTS.md rule 14 for the "always use the wrapper" rule.
 
 set -e
 
