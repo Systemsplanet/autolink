@@ -7,10 +7,8 @@
 #    include <freertos/FreeRTOS.h>
 #endif
 
-namespace autolink
-{
-class IBlinkHal
-{
+namespace autolink {
+class IBlinkHal {
 public:
     virtual ~IBlinkHal() {}
     virtual void writePin(bool on) = 0;
@@ -21,8 +19,7 @@ public:
     virtual void yield() {}
 };
 
-class UtilBlink
-{
+class UtilBlink {
     IBlinkHal &hal;
     volatile int left = 0;
     volatile bool on = false;
@@ -31,8 +28,7 @@ class UtilBlink
 public:
     explicit UtilBlink(IBlinkHal &h) : hal(h) {}
 
-    void start(int n, int onTimeMs = 60, int offTimeMs = 60)
-    {
+    void start(int n, int onTimeMs = 60, int offTimeMs = 60) {
         if (n <= 0)
             return;
         cancel();
@@ -42,8 +38,7 @@ public:
         tick();
     }
 
-    void flashBlocking(int n, int onTimeMs, int offTimeMs, long delayMs)
-    {
+    void flashBlocking(int n, int onTimeMs, int offTimeMs, long delayMs) {
         cancel();
 
         hal.yield();
@@ -58,16 +53,14 @@ public:
             hal.delayMs((uint32_t)delayMs);
     }
 
-    void cancel()
-    {
+    void cancel() {
         hal.cancel();
         left = 0;
         on = false;
         hal.writePin(false);
     }
 
-    void tick()
-    {
+    void tick() {
         if (on) {
             hal.writePin(false);
             on = false;
@@ -96,22 +89,18 @@ public:
 #        include "esp_timer.h"
 #    endif
 
-namespace autolink
-{
-class EspBlinkHal : public IBlinkHal
-{
+namespace autolink {
+class EspBlinkHal : public IBlinkHal {
     int pin;
     esp_timer_handle_t timer = nullptr;
     UtilBlink *owner = nullptr;
 
-    static void cb(void *arg)
-    {
+    static void cb(void *arg) {
         EspBlinkHal *self = (EspBlinkHal *)arg;
         if (self->owner)
             self->owner->tick();
     }
-    void ensureTimer()
-    {
+    void ensureTimer() {
         if (timer)
             return;
         esp_timer_create_args_t a = {};
@@ -122,13 +111,11 @@ class EspBlinkHal : public IBlinkHal
     }
 
 public:
-    explicit EspBlinkHal(int ledPin) : pin(ledPin)
-    {
+    explicit EspBlinkHal(int ledPin) : pin(ledPin) {
         pinMode(pin, OUTPUT);
         digitalWrite(pin, LOW);
     }
-    ~EspBlinkHal()
-    {
+    ~EspBlinkHal() {
         if (timer) {
             esp_timer_stop(timer);
             esp_timer_delete(timer);
@@ -137,14 +124,12 @@ public:
     void bind(UtilBlink *o) { owner = o; }
 
     void writePin(bool on) override { digitalWrite(pin, on ? HIGH : LOW); }
-    void startOnce(uint32_t ms) override
-    {
+    void startOnce(uint32_t ms) override {
         ensureTimer();
         esp_timer_stop(timer);
         esp_timer_start_once(timer, (uint64_t)ms * 1000);
     }
-    void cancel() override
-    {
+    void cancel() override {
         if (timer)
             esp_timer_stop(timer);
     }
