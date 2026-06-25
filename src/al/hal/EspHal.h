@@ -22,10 +22,8 @@
 #include <string.h>
 #include <stdlib.h>
 
-namespace autolink
-{
-class EspHal : public IHal
-{
+namespace autolink {
+class EspHal : public IHal {
     static constexpr const char *TAG = "EspHal";
 
     uart_port_t uart_num;
@@ -53,8 +51,7 @@ class EspHal : public IHal
 
     uart_config_t uart_config;
 
-    static void uart_event_task(void *pvParameters)
-    {
+    static void uart_event_task(void *pvParameters) {
         EspHal *hal = (EspHal *)pvParameters;
         uart_event_t event;
         Log::log().info(TAG, "uart_event_task core=%d", xPortGetCoreID());
@@ -103,8 +100,7 @@ class EspHal : public IHal
         vTaskDelete(NULL);
     }
 
-    static void timer_callback(TimerHandle_t xTimer)
-    {
+    static void timer_callback(TimerHandle_t xTimer) {
         EspHal *hal = (EspHal *)pvTimerGetTimerID(xTimer);
         if (hal && hal->link)
             hal->link->onTimer();
@@ -113,8 +109,7 @@ class EspHal : public IHal
 public:
     EspHal(uart_port_t u_num, int rx_pin, int tx_pin,
            const AutoLinkConfig &config)
-        : uart_num(u_num), rx_pin(rx_pin), tx_pin(tx_pin), cfg(config)
-    {
+        : uart_num(u_num), rx_pin(rx_pin), tx_pin(tx_pin), cfg(config) {
         memset(&uart_config, 0, sizeof(uart_config_t));
         uart_config.baud_rate = 9600;
         uart_config.data_bits = UART_DATA_8_BITS;
@@ -124,8 +119,7 @@ public:
         uart_config.rx_flow_ctrl_thresh = 122;
     }
 
-    void begin() override
-    {
+    void begin() override {
         if (running)
             return;
         running = true;
@@ -209,8 +203,7 @@ public:
             link->begin();
     }
 
-    ~EspHal()
-    {
+    ~EspHal() {
         running = false;
         if (task_handle && task_exit_sem)
             xSemaphoreTake(task_exit_sem, portMAX_DELAY);
@@ -227,8 +220,7 @@ public:
 
     bool isHealthy() const override { return healthy; }
 
-    void setSpd(uint32_t spd) override
-    {
+    void setSpd(uint32_t spd) override {
         // Flush before retune: stale bytes
         // at old baud corrupt new-baud frames.
         uart_flush_input(uart_num);
@@ -238,20 +230,17 @@ public:
                              esp_err_to_name(e));
     }
 
-    void sendBreak() override
-    {
+    void sendBreak() override {
         uart_write_bytes_with_break(uart_num, " ", 1, 15);
     }
 
-    int tx(const uint8_t *b, int n) override
-    {
+    int tx(const uint8_t *b, int n) override {
         return uart_write_bytes(uart_num, (const char *)b, n);
     }
 
     void flushTx() override { uart_wait_tx_done(uart_num, pdMS_TO_TICKS(100)); }
 
-    void startTimer(int ms) override
-    {
+    void startTimer(int ms) override {
         if (!timer_handle)
             return;
         const TickType_t blk = pdMS_TO_TICKS(20);
@@ -267,16 +256,14 @@ public:
                          ms);
     }
 
-    void stopTimer() override
-    {
+    void stopTimer() override {
         if (timer_handle)
             xTimerStop(timer_handle, pdMS_TO_TICKS(20));
     }
 
     void delayMs(int ms) override { vTaskDelay(pdMS_TO_TICKS(ms)); }
 
-    uint32_t nowMs() override
-    {
+    uint32_t nowMs() override {
 #ifdef ARDUINO
         return (uint32_t)millis();
 #else
@@ -284,20 +271,17 @@ public:
 #endif
     }
 
-    void lock() const override
-    {
+    void lock() override {
         if (mutex)
             xSemaphoreTake(mutex, portMAX_DELAY);
     }
 
-    void unlock() const override
-    {
+    void unlock() override {
         if (mutex)
             xSemaphoreGive(mutex);
     }
 
-    int pushAppBuf(const uint8_t *b, int n) override
-    {
+    int pushAppBuf(const uint8_t *b, int n) override {
         if (n <= 0)
             return 0;
         if (!stream_buf) {
@@ -313,8 +297,7 @@ public:
         return (int)xStreamBufferSend(stream_buf, b, n, 0);
     }
 
-    int popAppBuf(uint8_t *b, int max_len) override
-    {
+    int popAppBuf(uint8_t *b, int max_len) override {
         int total = 0;
         while (total < max_len && peek_buf_pos_ < peek_buf_len_)
             b[total++] = peek_buf_[peek_buf_pos_++];
@@ -334,8 +317,7 @@ public:
         return total;
     }
 
-    int peekAppBuf() const override
-    {
+    int peekAppBuf() const override {
         if (peek_buf_pos_ < peek_buf_len_)
             return peek_buf_[peek_buf_pos_];
         if (peek_buf == -1 && stream_buf) {
@@ -346,8 +328,7 @@ public:
         return peek_buf;
     }
 
-    int peekAt(uint8_t *out, int n, int offset) const override
-    {
+    int peekAt(uint8_t *out, int n, int offset) const override {
         if (n <= 0 || offset < 0)
             return 0;
         int copied = 0, pos = offset;
@@ -372,16 +353,14 @@ public:
         return copied;
     }
 
-    int appBufAvailable() const override
-    {
+    int appBufAvailable() const override {
         int n = stream_buf ? (int)xStreamBufferBytesAvailable(stream_buf) : 0;
         if (peek_buf != -1)
             n++;
         return n;
     }
 
-    void clearAppBuf() override
-    {
+    void clearAppBuf() override {
         if (stream_buf)
             xStreamBufferReset(stream_buf);
         peek_buf = -1;
@@ -389,10 +368,7 @@ public:
         peek_buf_pos_ = 0;
     }
 
-    void flushRxHw() override
-    {
-        uart_flush_input(uart_num);
-    }
+    void flushRxHw() override { uart_flush_input(uart_num); }
 };
 
 } // namespace autolink
