@@ -1,6 +1,8 @@
-// Public Arduino/ESP-IDF facade: bridges the protocol
-// Link to the user-facing Stream API and owns the
-// payload ARQ cache.
+// Public facade: stream-style API over
+// Link. Owns the ARQ payload cache.
+// arqCacheHasRoomTrampoline must check
+// pool slots AND pendingCount_, or sendMsg
+// passes back-pressure when pool is full.
 #pragma once
 #include "al/link/Link.h"
 #include "al/util/Log.h"
@@ -31,19 +33,10 @@ struct EspHal : public IHal {
     uint32_t nowMs() override { return 0; }
     void lock() const override {}
     void unlock() const override {}
-    int pushAppBuf(const uint8_t *, int) override
-    {
-        return 0;
-    }
-    int popAppBuf(uint8_t *, int) override
-    {
-        return 0;
-    }
+    int pushAppBuf(const uint8_t *, int) override { return 0; }
+    int popAppBuf(uint8_t *, int) override { return 0; }
     int peekAppBuf() const override { return -1; }
-    int peekAt(uint8_t *, int, int) const override
-    {
-        return 0;
-    }
+    int peekAt(uint8_t *, int, int) const override { return 0; }
     int appBufAvailable() const override { return 0; }
     void clearAppBuf() override {}
     void flushRxHw() override {}
@@ -59,27 +52,11 @@ struct EspBlinkHal {
 #    include "al/hal/EspHal.h"
 #endif
 
-#ifdef ARDUINO
-#    include <Stream.h>
-#else
-class Stream
-{
-public:
-    virtual int available() = 0;
-    virtual int read() = 0;
-    virtual int peek() = 0;
-    virtual size_t write(uint8_t) = 0;
-    virtual size_t write(const uint8_t *buffer,
-                         size_t size) = 0;
-    virtual void flush() = 0;
-};
-#endif
-
 namespace autolink
 {
-#define AUTOLINK_VERSION "5.3.28"
+#define AUTOLINK_VERSION "5.3.50"
 
-class AutoLink : public Stream
+class AutoLink
 {
 private:
 #ifdef AUTOLINK_HOST_TEST
@@ -98,29 +75,24 @@ private:
     UtilBlink blinker;
 #endif
 
-
     struct Pending {
         uint16_t len = 0;
         uint8_t poolIdx = 0xFF;
         bool in_use = false;
     };
 
-
     static constexpr int ARQ_CACHE_SLOTS = 256;
-    static constexpr int ARQ_CACHE_POOL_SIZE = 16;
+    static constexpr int ARQ_CACHE_POOL_SIZE = 64; // Memory cost: 64×250 = 16KB
+                                                   // additional RAM.
     static constexpr int ARQ_POOL_BUF_MAX = 256;
     Pending pending_[ARQ_CACHE_SLOTS];
     int pendingCount_ = 0;
-    uint8_t arqPool_[ARQ_CACHE_POOL_SIZE]
-                    [ARQ_POOL_BUF_MAX];
+    uint8_t arqPool_[ARQ_CACHE_POOL_SIZE][ARQ_POOL_BUF_MAX];
     bool arqPoolUsed_[ARQ_CACHE_POOL_SIZE] = {};
 
-
     bool arqCache_hasRoom();
-    void arqCache_insert_unlocked(
-        uint8_t seq, const uint8_t *payload,
-        int payloadLen, uint8_t chunkCount);
-
+    void arqCache_insert_unlocked(uint8_t seq, const uint8_t *payload,
+                                  int payloadLen, uint8_t chunkCount);
 
     int arqCache_findBySeq(uint8_t seq);
     void arqCache_freeBySeq(uint8_t seq);
@@ -128,22 +100,18 @@ private:
     void arqCache_clearAll();
     void assertCacheInvariants() const;
 
-
     static void linkResetHookTrampoline(void *ctx);
 
-    static bool arqAckHookTrampoline(uint8_t ackedSeq,
-                                     void *ctx);
-    static bool arqRetxHookTrampoline(uint8_t retxSeq,
-                                      void *ctx);
+    static bool arqAckHookTrampoline(uint8_t ackedSeq, void *ctx);
+    static bool arqRetxHookTrampoline(uint8_t retxSeq, void *ctx);
     static bool arqCacheHasRoomTrampoline(void *ctx);
-    static void arqCacheInsertTrampoline(
-        uint8_t baseSeq, const uint8_t *payload,
-        int payloadLen, uint8_t chunkCount, void *ctx);
+    static void arqCacheInsertTrampoline(uint8_t baseSeq,
+                                         const uint8_t *payload, int payloadLen,
+                                         uint8_t chunkCount, void *ctx);
     static void arqCacheClearAllTrampoline(void *ctx);
 
 public:
-    static constexpr int ARQ_CACHE_SLOTS_PUBLIC =
-        ARQ_CACHE_SLOTS;
+    static constexpr int ARQ_CACHE_SLOTS_PUBLIC = ARQ_CACHE_SLOTS;
     int arqCacheSizeForTest() const
     {
         int n = 0;
@@ -152,20 +120,43 @@ public:
                 n++;
         return n;
     }
-    Link *linkForTest() { return link.get(); }
+    Link *linkForTest()
+    {
+        return link.get();
+    }
     const Link *linkForTest() const
     {
         return link.get();
     }
-    void test_arqCache_put(uint8_t seq,
-                           const uint8_t *b, int len,
-                           uint8_t)
+    void test_arqCache_put(uint8_t seq, const uint8_t *b, int len, uint8_t)
     {
         arqCache_insert_unlocked(seq, b, len, 1);
     }
     bool test_arqCache_hasRoom()
     {
         return arqCache_hasRoom();
+    }
+    static bool test_arqHasRoomTrampoline(void *ctx)
+    {
+        return arqCacheHasRoomTrampoline(ctx);
+    }
+    static constexpr int test_arqPoolSize()
+    {
+        return ARQ_CACHE_POOL_SIZE;
+    }
+    void test_arqFillPoolForTest()
+    {
+        for (int i = 0; i < ARQ_CACHE_POOL_SIZE; i++)
+            arqPoolUsed_[i] = true;
+    }
+    void test_arqEmptyPoolForTest()
+    {
+        for (int i = 0; i < ARQ_CACHE_POOL_SIZE; i++)
+            arqPoolUsed_[i] = false;
+    }
+    void test_arqFillPendingForTest()
+    {
+        pendingCount_ = ARQ_CACHE_SLOTS;
     }
     void test_arqCache_freeBySeq(uint8_t s)
     {
@@ -189,11 +180,32 @@ public:
         linkResetHookTrampoline(ctx);
     }
 
+    // SYNC-mode host test hooks. The
+    // Arduino build blocks inside send()
+    // while the FreeRTOS link task
+    // concurrently delivers the ACK. The
+    // host build has no concurrent link
+    // task, so the test must drive the
+    // wire step-by-step. Splitting send()
+    // into begin + still-waiting lets the
+    // test pump time between halves.
+    bool test_sendMsgBeginForTest(const uint8_t *b, int len)
+    {
+        return link && link->test_sendMsgBegin(b, len);
+    }
+    bool test_sendMsgStillWaitingForTest()
+    {
+        return link && link->test_sendMsgStillWaiting();
+    }
+    int syncAckTimeoutMsForTest() const
+    {
+        return link ? link->syncAckTimeoutMsForTest() : 500;
+    }
+
     AutoLink(const AutoLink &) = delete;
     AutoLink &operator=(const AutoLink &) = delete;
 
-    AutoLink(uart_port_t u_num, int rx_pin, int tx_pin,
-             bool isMasterNode,
+    AutoLink(uart_port_t u_num, int rx_pin, int tx_pin, bool isMasterNode,
              AutoLinkConfig cfg = AutoLinkConfig())
 #ifdef ARDUINO
         : blinkHal(cfg.ledPin), blinker(blinkHal)
@@ -210,27 +222,19 @@ public:
         size_t need = 2 * 16 * (cfg.maxMsg + kHdr);
         if (cfg.streamBufferSize < need)
             cfg.streamBufferSize = need;
-        size_t need_tx =
-            16 * ((cfg.maxMsg + kHdr) * 5 / 4 + 64);
+        size_t need_tx = 16 * ((cfg.maxMsg + kHdr) * 5 / 4 + 64);
         if (cfg.txBufferSize < need_tx)
             cfg.txBufferSize = need_tx;
-        // Auto-size: caller set 0 → pick from maxMsg.
-        // Manual override honored.
-        hal = IHalPtr(std::make_unique<EspHal>(
-                          u_num, rx_pin, tx_pin, cfg)
-                          .release());
-        link = std::make_unique<Link>(
-            *hal, isMasterNode, cfg);
 
+        hal = IHalPtr(
+            std::make_unique<EspHal>(u_num, rx_pin, tx_pin, cfg).release());
+        link = std::make_unique<Link>(*hal, isMasterNode, cfg);
 
-        link->setArqCacheHooks(
-            &arqAckHookTrampoline,
-            &arqRetxHookTrampoline,
-            &arqCacheHasRoomTrampoline,
-            &arqCacheInsertTrampoline,
-            &arqCacheClearAllTrampoline, this);
-        link->setLinkResetHook(
-            &linkResetHookTrampoline, this);
+        link->setArqCacheHooks(&arqAckHookTrampoline, &arqRetxHookTrampoline,
+                               &arqCacheHasRoomTrampoline,
+                               &arqCacheInsertTrampoline,
+                               &arqCacheClearAllTrampoline, this);
+        link->setLinkResetHook(&linkResetHookTrampoline, this);
     }
 
 #ifdef ARDUINO
@@ -246,30 +250,23 @@ public:
 
 #ifdef AUTOLINK_HOST_TEST
 
-
     AutoLink(IHal *hal_in, bool isMasterNode,
              AutoLinkConfig cfg = AutoLinkConfig())
     {
         size_t need = 2 * 16 * (cfg.maxMsg + 6);
         if (cfg.streamBufferSize < need)
             cfg.streamBufferSize = need;
-        size_t need_tx =
-            16 * ((cfg.maxMsg + 6) * 5 / 4 + 64);
+        size_t need_tx = 16 * ((cfg.maxMsg + 6) * 5 / 4 + 64);
         if (cfg.txBufferSize < need_tx)
             cfg.txBufferSize = need_tx;
         hal = IHalPtr(hal_in);
-        link = std::make_unique<Link>(
-            *hal, isMasterNode, cfg);
-        link->setArqCacheHooks(
-            &arqAckHookTrampoline,
-            &arqRetxHookTrampoline,
-            &arqCacheHasRoomTrampoline,
-            &arqCacheInsertTrampoline,
-            &arqCacheClearAllTrampoline, this);
+        link = std::make_unique<Link>(*hal, isMasterNode, cfg);
+        link->setArqCacheHooks(&arqAckHookTrampoline, &arqRetxHookTrampoline,
+                               &arqCacheHasRoomTrampoline,
+                               &arqCacheInsertTrampoline,
+                               &arqCacheClearAllTrampoline, this);
 
-
-        link->setLinkResetHook(
-            &linkResetHookTrampoline, this);
+        link->setLinkResetHook(&linkResetHookTrampoline, this);
     }
 #endif
 
@@ -282,15 +279,13 @@ public:
 #endif
     }
 
-    void blinkWait(int n, int onMs = 60,
-                   int offMs = 60, long delayMs = 0)
+    void blinkWait(int n, int onMs = 60, int offMs = 60, long delayMs = 0)
     {
         if (n <= 0)
             return;
 #ifdef ARDUINO
         if (delayMs > 0)
-            blinker.flashBlocking(n, onMs, offMs,
-                                  delayMs);
+            blinker.flashBlocking(n, onMs, offMs, delayMs);
         else
             blinker.start(n, onMs, offMs);
 #else
@@ -314,22 +309,46 @@ public:
     {
         return link->getState() == State::OK;
     }
-    void dropLink() { link->dropLink(); }
-    void flushRx() { link->flushRx(); }
-
+    void dropLink()
+    {
+        link->dropLink();
+    }
+    void flushRx()
+    {
+        link->flushRx();
+    }
 
     void setLinkPaused(bool p)
     {
         link->setLinkPaused(p);
     }
 
+    void setMode(AutoLinkConfig::Mode m)
+    {
+        if (link)
+            link->setMode(m);
+    }
+    AutoLinkConfig::Mode mode() const
+    {
+        return link ? link->mode() : AutoLinkConfig::Mode::SYNC;
+    }
+
     void getStats(Stats &s) const
     {
         link->getStats(s);
     }
-    void resetStats() { link->resetStats(); }
-    void resetErrors() { link->resetErrors(); }
-    void resetDiag() { link->resetDiag(); }
+    void resetStats()
+    {
+        link->resetStats();
+    }
+    void resetErrors()
+    {
+        link->resetErrors();
+    }
+    void resetDiag()
+    {
+        link->resetDiag();
+    }
 
     bool isHealthy() const
     {
@@ -340,22 +359,30 @@ public:
 #endif
     }
 
-    int available() override
+    int available()
     {
         return link->available();
     }
-    int read() override { return link->read(); }
-    int peek() override { return link->peek(); }
-    size_t write(uint8_t b) override
+    int read()
+    {
+        return link->read();
+    }
+    int peek()
+    {
+        return link->peek();
+    }
+    size_t write(uint8_t b)
     {
         return link->write(&b, 1);
     }
-    size_t write(const uint8_t *buffer,
-                 size_t size) override
+    size_t write(const uint8_t *buffer, size_t size)
     {
         return link->write(buffer, (int)size);
     }
-    void flush() override { return link->flush(); }
+    void flush()
+    {
+        return link->flush();
+    }
     int read(uint8_t *b, int max_len)
     {
         return link->read(b, max_len);
@@ -372,18 +399,30 @@ public:
         return link->recvMsg(b, max_len);
     }
 
-    void err() { link->err(); }
-    void clearErr() { link->clearErr(); }
+    void err()
+    {
+        link->err();
+    }
+    void clearErr()
+    {
+        link->clearErr();
+    }
     int getErrCount() const
     {
         return link->getErrCount();
     }
-    State getState() const { return link->getState(); }
+    State getState() const
+    {
+        return link->getState();
+    }
     uint32_t getCurrentBaud() const
     {
         return link->getCurrentBaud();
     }
-    void getDiag(Diag &d) const { link->getDiag(d); }
+    void getDiag(Diag &d) const
+    {
+        link->getDiag(d);
+    }
 
     size_t getStreamBufferSize() const
     {
