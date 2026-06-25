@@ -10,8 +10,7 @@
 
 using namespace autolink;
 
-static std::vector<uint8_t> cobsFrame(uint8_t cobsSeq, int payloadLen = 16)
-{
+static std::vector<uint8_t> cobsFrame(uint8_t cobsSeq, int payloadLen = 16) {
     std::vector<uint8_t> raw;
     raw.push_back(cobsSeq);
     for (int i = 0; i < payloadLen; i++)
@@ -26,8 +25,7 @@ static std::vector<uint8_t> cobsFrame(uint8_t cobsSeq, int payloadLen = 16)
     return enc;
 }
 
-void test_first_frame_accepted()
-{
+void test_first_frame_accepted() {
     AutoLinkConfig cfg;
     std::cout << "\n=== Test: First Reliable Frame Sets cobsSeq ==="
               << std::endl;
@@ -48,8 +46,7 @@ void test_first_frame_accepted()
     std::cout << "PASS" << std::endl;
 }
 
-void test_consecutive_frames_advance()
-{
+void test_consecutive_frames_advance() {
     AutoLinkConfig cfg;
     std::cout << "\n=== Test: Consecutive Frames Advance cobsSeq ==="
               << std::endl;
@@ -70,8 +67,7 @@ void test_consecutive_frames_advance()
     std::cout << "PASS" << std::endl;
 }
 
-void test_gap_holds_frame_in_reorder_buffer()
-{
+void test_gap_holds_frame_in_reorder_buffer() {
     AutoLinkConfig cfg;
     std::cout << "\n=== Test: Forward Gap Holds Frame in Reorder Buffer ==="
               << std::endl;
@@ -94,8 +90,7 @@ void test_gap_holds_frame_in_reorder_buffer()
     std::cout << "PASS" << std::endl;
 }
 
-void test_gap_then_retransmit_flushes_in_order()
-{
+void test_gap_then_retransmit_flushes_in_order() {
     AutoLinkConfig cfg;
     std::cout
         << "\n=== Test: Held Gap Frame Flushes When Missing Seq Arrives ==="
@@ -119,8 +114,7 @@ void test_gap_then_retransmit_flushes_in_order()
     std::cout << "PASS" << std::endl;
 }
 
-void test_gap_then_late_duplicate_is_stale()
-{
+void test_gap_then_late_duplicate_is_stale() {
     AutoLinkConfig cfg;
     std::cout << "\n=== Test: Late Frame After Gap is STALE (not delivered) ==="
               << std::endl;
@@ -145,8 +139,7 @@ void test_gap_then_late_duplicate_is_stale()
     std::cout << "PASS" << std::endl;
 }
 
-void test_single_corruption_does_not_cascade()
-{
+void test_single_corruption_does_not_cascade() {
     AutoLinkConfig cfg;
     std::cout
         << "\n=== Test: Single Corruption Does Not Cascade (0 regression) ==="
@@ -177,8 +170,7 @@ void test_single_corruption_does_not_cascade()
     std::cout << "PASS" << std::endl;
 }
 
-void test_duplicate_is_stale()
-{
+void test_duplicate_is_stale() {
     AutoLinkConfig cfg;
     std::cout << "\n=== Test: Duplicate cobsSeq Is Stale ===" << std::endl;
     MockHal mHal, sHal;
@@ -196,8 +188,7 @@ void test_duplicate_is_stale()
     std::cout << "PASS" << std::endl;
 }
 
-void test_wraparound_continuity()
-{
+void test_wraparound_continuity() {
     AutoLinkConfig cfg;
     std::cout << "\n=== Test: cobsSeq Wraparound Is Continuous ==="
               << std::endl;
@@ -217,8 +208,7 @@ void test_wraparound_continuity()
     std::cout << "PASS" << std::endl;
 }
 
-void test_wraparound_then_gap()
-{
+void test_wraparound_then_gap() {
     AutoLinkConfig cfg;
     std::cout << "\n=== Test: Post-Wraparound Gap Holds Frame ===" << std::endl;
     MockHal mHal, sHal;
@@ -239,8 +229,7 @@ void test_wraparound_then_gap()
     std::cout << "PASS" << std::endl;
 }
 
-void test_sender_cobsSeq_increments()
-{
+void test_sender_cobsSeq_increments() {
     std::cout << "\n=== Test: Sender cobsSeq Increments Per Data Frame ==="
               << std::endl;
     MockHal mHal, sHal;
@@ -272,8 +261,7 @@ void test_sender_cobsSeq_increments()
     std::cout << "PASS" << std::endl;
 }
 
-void test_drop_resets_cobsSeq()
-{
+void test_drop_resets_cobsSeq() {
     std::cout << "\n=== Test: dropLink() Resets cobsSeq on Both Sides ==="
               << std::endl;
     MockHal mHal, sHal;
@@ -311,8 +299,7 @@ void test_drop_resets_cobsSeq()
     std::cout << "PASS" << std::endl;
 }
 
-void test_wire_byte_shift_caught_at_cobsSeq()
-{
+void test_wire_byte_shift_caught_at_cobsSeq() {
     AutoLinkConfig cfg;
     std::cout << "\n=== Test: Wire-Byte Shift Accounted, Link Stays in OK ==="
               << std::endl;
@@ -338,8 +325,7 @@ void test_wire_byte_shift_caught_at_cobsSeq()
     std::cout << "PASS" << std::endl;
 }
 
-void test_gap_stale_counters_accessible()
-{
+void test_gap_stale_counters_accessible() {
     AutoLinkConfig cfg;
     std::cout << "\n=== Test: Gap/Stale Counters Are Public API ==="
               << std::endl;
@@ -360,8 +346,7 @@ void test_gap_stale_counters_accessible()
     std::cout << "PASS" << std::endl;
 }
 
-void test_app_buffer_full_does_not_drop_link()
-{
+void test_app_buffer_full_does_not_drop_link() {
     AutoLinkConfig cfg;
     std::cout << "\n=== Test: App Buffer Full Doesn't Trip errThreshold ==="
               << std::endl;
@@ -394,8 +379,7 @@ void test_app_buffer_full_does_not_drop_link()
     std::cout << "PASS" << std::endl;
 }
 
-void test_lost_msgs_burst_vs_single()
-{
+void test_lost_msgs_burst_vs_single() {
     AutoLinkConfig cfg;
     std::cout
         << "\n=== Test: lostMsgs Counts Held Frames on Staleness Expiry ==="
@@ -442,8 +426,7 @@ void test_lost_msgs_burst_vs_single()
     std::cout << "PASS" << std::endl;
 }
 
-int main()
-{
+int main() {
     std::cout << "=== Running ALinkCobsSeq Tests (hold-on-gap) ==="
               << std::endl;
     test_first_frame_accepted();
