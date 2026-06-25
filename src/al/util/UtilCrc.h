@@ -3,10 +3,8 @@
 #pragma once
 #include <stdint.h>
 
-namespace autolink
-{
-class UtilCrc
-{
+namespace autolink {
+class UtilCrc {
 public:
     static uint8_t crc8(const uint8_t *data, int len);
     static uint16_t crc16(const uint8_t *data, int len);
