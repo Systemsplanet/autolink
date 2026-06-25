@@ -4,7 +4,7 @@ BasedOnStyle: LLVM
 IndentWidth: 4
 TabWidth: 4
 UseTab: Never
-ColumnLimit: 55
+ColumnLimit: 80
 Standard: c++14
 
 # Braces
@@ -34,6 +34,8 @@ ContinuationIndentWidth: 4
 # Preserve preprocessor nesting indentation (e.g. `#  if`, `#    include`)
 IndentPPDirectives: AfterHash
 
+BreakStringLiterals: false
+
 # Align
 AlignAfterOpenBracket: Align
 AlignConsecutiveAssignments: false
@@ -55,7 +57,7 @@ IncludeBlocks: Preserve
 SortIncludes: false
 
 # Misc
-KeepEmptyLinesAtTheStartOfBlocks: true
+KeepEmptyLinesAtTheStartOfBlocks: false
 MaxEmptyLinesToKeep: 2
 FixNamespaceComments: true
 ...
