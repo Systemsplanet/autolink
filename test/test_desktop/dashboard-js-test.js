@@ -72,15 +72,25 @@ function eq(a, b, msg) { assert(a === b, msg + ` (got ${JSON.stringify(a)}, want
 function truthy(v, msg) { assert(!!v, msg); }
 
 async function setup() {
-    // Load the dashboard HTML from the .h file. We extract the
-    // DASHBOARD_HTML constant value.
+    // Load the dashboard HTML from the .h file. The constant
+    // can span multiple raw-string segments when AUTOLINK_VERSION
+    // is concatenated in. Walk every `R"HTML(...)HTML"` after
+    // the `DASHBOARD_HTML[] =` opener and concatenate them.
     const htmlSrc = fs.readFileSync(
         path.join(__dirname, '../../src/al/web/AutoLinkWebHtml.h'),
         'utf8'
     );
-    const m = htmlSrc.match(/DASHBOARD_HTML\[\] = R"HTML\(([\s\S]*?)\)HTML";/);
-    if (!m) throw new Error('DASHBOARD_HTML not found in AutoLinkWebHtml.h');
-    const html = m[1];
+    const openerRe = /DASHBOARD_HTML\[\][^=]*=\s*/;
+    const om = htmlSrc.match(openerRe);
+    if (!om) throw new Error('DASHBOARD_HTML not found in AutoLinkWebHtml.h');
+    const start = om.index + om[0].length;
+    const segRe = /R"HTML\(([\s\S]*?)\)HTML"/g;
+    let m, html = '';
+    segRe.lastIndex = start;
+    while ((m = segRe.exec(htmlSrc)) !== null) {
+        html += m[1];
+    }
+    if (!html) throw new Error('No R"HTML(...)HTML" segments after DASHBOARD_HTML[]=');
 
     // Set up jsdom. Disable network (the JS uses fetch; we'll mock it).
     const dom = new JSDOM(html, {
@@ -358,6 +368,85 @@ async function test_three_failures_show_alert() {
     truthy(alert, 'alert element should exist');
     const style = dom.window.getComputedStyle(alert);
     eq(style.display, 'block', 'alert should be display:block after 3 failures');
+    console.log('  PASS');
+}
+
+// v5.3.53: the firmware default flipped paused_=true and the
+// JS init state has been msgPaused=true since v5.3.47. Pin
+// the JS-side init so a future drift here is caught loudly.
+async function test_msgPaused_starts_true() {
+    console.log('\n=== Test: msgPaused starts true (no messages at boot) ===');
+    const dom = await setup();
+    eq(dom.window.msgPaused, true,
+        'msgPaused global must init true (matches firmware paused_=true)');
+    // And the inline button label must read "Start".
+    const topPbtn = dom.window.document.getElementById('topPbtn');
+    const text = topPbtn.innerHTML;
+    truthy(text.indexOf('Start') !== -1,
+        'button should render "Start" at boot, got: ' + text);
+    console.log('  PASS');
+}
+
+// v5.3.53: Copy and Save must emit unix-line-delimited output.
+// Pre-fix: they read parent.textContent which the browser
+// renders with no line breaks at all. Post-fix: al_logAsText
+// walks .children and joins with \n + trailing newline.
+async function test_copy_save_emit_unix_newlines() {
+    console.log('\n=== Test: Copy/Save emit unix-line-delimited output ===');
+    const dom = await setup();
+    // Inject 3 fake log lines into the live log.
+    const log = dom.window.document.getElementById('log');
+    for (const txt of ['line one', 'line two', 'line three']) {
+        const d = dom.window.document.createElement('div');
+        d.className = 'I';
+        d.textContent = txt;
+        log.appendChild(d);
+    }
+    // The helper function exists and is global.
+    assert(typeof dom.window.al_logAsText === 'function',
+        'al_logAsText should be a global function');
+    const out = dom.window.al_logAsText();
+    // Must end with exactly one trailing newline.
+    eq(out.charAt(out.length - 1), '\n',
+        'output must end with a single trailing newline');
+    // Lines must be joined with \n.
+    eq(out, 'line one\nline two\nline three\n',
+        'lines must be joined with \\n and end with trailing \\n');
+    // Empty log returns empty string (not undefined, not '\n').
+    log.innerHTML = '';
+    eq(dom.window.al_logAsText(), '',
+        'empty log should return empty string (no trailing \\n either)');
+    console.log('  PASS');
+}
+
+// v5.3.53: pin that the source for copyLog/saveLog no longer
+// reads `textContent` on the parent (the bug that gave a single
+// line of smashed-together text with no separators).
+async function test_copy_save_no_longer_use_textcontent() {
+    console.log('\n=== Test: copyLog/saveLog do NOT read parent.textContent ===');
+    const src = fs.readFileSync(
+        path.join(__dirname, '../../src/al/web/AutoLinkWebHtml.h'),
+        'utf8'
+    );
+    // Both copyLog and saveLog must reference al_logAsText and
+    // must NOT call .textContent on the log parent.
+    truthy(src.indexOf('function copyLog') !== -1, 'copyLog function exists');
+    truthy(src.indexOf('function saveLog') !== -1, 'saveLog function exists');
+    truthy(src.indexOf('function al_logAsText') !== -1,
+        'al_logAsText helper exists (the v5.3.53 source of truth)');
+    // The exact buggy pattern: getElementById('log').textContent
+    // followed by var t=. This is what produced the no-newlines
+    // bug. Allow it ONLY inside al_logAsText's preamble comment
+    // or in unrelated call sites; pin that copyLog/saveLog go
+    // through al_logAsText instead.
+    const copyFn = src.match(/function copyLog\(\)\{[\s\S]*?\n\}/);
+    truthy(copyFn, 'copyLog function body parseable');
+    truthy(copyFn[0].indexOf('al_logAsText') !== -1,
+        'copyLog must call al_logAsText() — found: ' + copyFn[0].slice(0, 80));
+    const saveFn = src.match(/function saveLog\(\)\{[\s\S]*?\n\}/);
+    truthy(saveFn, 'saveLog function body parseable');
+    truthy(saveFn[0].indexOf('al_logAsText') !== -1,
+        'saveLog must call al_logAsText() — found: ' + saveFn[0].slice(0, 80));
     console.log('  PASS');
 }
 
@@ -1261,6 +1350,9 @@ async function test_fallbackCopy_sets_failed_label_on_throw() {
         await test_logs_after_backlog_are_appended();
         await test_three_failures_show_alert();
         await test_pause_toggle();
+        await test_msgPaused_starts_true();
+        await test_copy_save_emit_unix_newlines();
+        await test_copy_save_no_longer_use_textcontent();
         await test_fill_mode_radio_posts_to_mode_endpoint();
         await test_reboot_button_in_header();
         await test_save_log_button_present();
