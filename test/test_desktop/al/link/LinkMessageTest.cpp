@@ -2,17 +2,40 @@
 #ifndef ARDUINO
 
 #    include <cstdint>
-namespace test_internal
-{
-struct TestCache {
+#    include "al/link/ArqCache.h"
+namespace test_internal {
+// Stub ArqCache for the chunk-boundary
+// test. The production cache stores
+// actual bytes; this stub only counts
+// chunks in flight so hasRoom() can
+// fail at a custom boundary (CAP=240).
+class TestCache : public autolink::ArqCache {
+public:
     int count = 0;
     static constexpr int CAP = 240;
-    bool hasRoom() { return count < CAP; }
-    void insert(uint8_t, const uint8_t *, int, uint8_t chunks)
-    {
-        count += chunks;
+
+    bool hasRoom() const override { return count < CAP; }
+    void insert(uint8_t, const uint8_t *, int) override {
+        // Chunk accounting: real cache
+        // stores bytes; the stub just
+        // counts each insert as one
+        // chunk. (Production caller
+        // passes chunkCount=1 from the
+        // short-msg path, which the
+        // chunking path does not hit
+        // here — this test only sends
+        // short msgs.)
+        count++;
     }
-    void clearAll() { count = 0; }
+    void freeBySeq(uint8_t seq) override {
+        if (count > 0)
+            count--;
+        autolink::ArqCache::freeBySeq(seq);
+    }
+    void clearAll() override {
+        count = 0;
+        autolink::ArqCache::clearAll();
+    }
 };
 } // namespace test_internal
 #    include <iostream>
@@ -25,8 +48,7 @@ struct TestCache {
 
 using namespace autolink;
 
-void test_message_roundtrip()
-{
+void test_message_roundtrip() {
     std::cout << "\n=== Test: Message API Round-Trip (random sizes) ==="
               << std::endl;
     MockHal mHal, sHal;
@@ -56,8 +78,7 @@ void test_message_roundtrip()
     std::cout << "PASS" << std::endl;
 }
 
-void test_message_boundaries_back_to_back()
-{
+void test_message_boundaries_back_to_back() {
     AutoLinkConfig cfg;
     std::cout << "\n=== Test: Back-to-Back Messages Keep Boundaries ==="
               << std::endl;
@@ -80,8 +101,7 @@ void test_message_boundaries_back_to_back()
     std::cout << "PASS" << std::endl;
 }
 
-void test_message_size_sweep()
-{
+void test_message_size_sweep() {
     std::cout << "\n=== Test: Message API Size Sweep (0..10000) ==="
               << std::endl;
     MockHal mHal, sHal;
@@ -209,8 +229,7 @@ void test_message_size_sweep()
     std::cout << "PASS" << std::endl;
 }
 
-void test_flushRx_after_desync()
-{
+void test_flushRx_after_desync() {
     std::cout << "\n=== Test: flushRx() clears stale bytes after desync ==="
               << std::endl;
 
@@ -244,8 +263,7 @@ void test_flushRx_after_desync()
     std::cout << "PASS" << std::endl;
 }
 
-void test_message_crc_reject()
-{
+void test_message_crc_reject() {
     AutoLinkConfig cfg;
     std::cout << "\n=== Test: Corrupt Message Rejected (CRC16) ==="
               << std::endl;
@@ -267,8 +285,7 @@ void test_message_crc_reject()
     std::cout << "PASS" << std::endl;
 }
 
-void test_message_small_size_boundary()
-{
+void test_message_small_size_boundary() {
     AutoLinkConfig cfg;
     std::cout << "\n=== Test: Small-Size Boundary 1..6 ===" << std::endl;
     MockHal mHal, sHal;
@@ -308,8 +325,7 @@ void test_message_small_size_boundary()
     std::cout << "PASS" << std::endl;
 }
 
-void test_message_explicit_size_sweep()
-{
+void test_message_explicit_size_sweep() {
     std::cout << "\n=== Test: Explicit Size Sweep 1..300, 1000..maxMsg ==="
               << std::endl;
     AutoLinkConfig cfg;
@@ -363,8 +379,7 @@ void test_message_explicit_size_sweep()
     std::cout << "PASS" << std::endl;
 }
 
-void test_app_buffer_null_simulates_disconnect()
-{
+void test_app_buffer_null_simulates_disconnect() {
     AutoLinkConfig cfg;
     std::cout << "\n=== Test: App Buffer NULL (0..1 regression shape) ==="
               << std::endl;
@@ -402,8 +417,7 @@ void test_app_buffer_null_simulates_disconnect()
               << std::endl;
 }
 
-void test_corrupt_msg_header_does_not_clear_buffer()
-{
+void test_corrupt_msg_header_does_not_clear_buffer() {
     AutoLinkConfig cfg;
     std::cout
         << "\n=== Test: Corrupt MSG_HDR Drops Single Frame, Not Whole Buffer ==="
@@ -460,8 +474,7 @@ void test_corrupt_msg_header_does_not_clear_buffer()
               << std::endl;
 }
 
-void test_send_rejections_log_errors()
-{
+void test_send_rejections_log_errors() {
     AutoLinkConfig cfg;
     std::cout << "\n=== Test: sendMsg/write Rejections ===" << std::endl;
     MockHal mHal, sHal;
@@ -498,8 +511,7 @@ void test_send_rejections_log_errors()
     std::cout << "PASS" << std::endl;
 }
 
-void test_message_chunk_boundary_carries_then_rejects()
-{
+void test_message_chunk_boundary_carries_then_rejects() {
     std::cout << "\n=== Test: 240-chunk carries, 241st rejected (ARQ cap) ==="
               << std::endl;
 
@@ -512,36 +524,8 @@ void test_message_chunk_boundary_carries_then_rejects()
     cfg.maxMsg = 65535;
     Link a(mHal, true, cfg);
     Link b(sHal, false, cfg);
-    a.setArqCacheHooks(
-        [](uint8_t, void *ctx) -> bool {
-            ((test_internal::TestCache *)ctx)->count--;
-            return false;
-        },
-        [](uint8_t, void *) -> bool { return false; },
-        [](void *ctx) -> bool {
-            return ((test_internal::TestCache *)ctx)->hasRoom();
-        },
-        [](uint8_t baseSeq, const uint8_t *b, int len, uint8_t chunks,
-           void *ctx) {
-            ((test_internal::TestCache *)ctx)->insert(baseSeq, b, len, chunks);
-        },
-        [](void *ctx) { ((test_internal::TestCache *)ctx)->clearAll(); },
-        &cacheA);
-    b.setArqCacheHooks(
-        [](uint8_t, void *ctx) -> bool {
-            ((test_internal::TestCache *)ctx)->count--;
-            return false;
-        },
-        [](uint8_t, void *) -> bool { return false; },
-        [](void *ctx) -> bool {
-            return ((test_internal::TestCache *)ctx)->hasRoom();
-        },
-        [](uint8_t baseSeq, const uint8_t *b, int len, uint8_t chunks,
-           void *ctx) {
-            ((test_internal::TestCache *)ctx)->insert(baseSeq, b, len, chunks);
-        },
-        [](void *ctx) { ((test_internal::TestCache *)ctx)->clearAll(); },
-        &cacheB);
+    a.setArqCache(&cacheA);
+    b.setArqCache(&cacheB);
     while (a.getState() != State::OK || b.getState() != State::OK) {
         mHal.pumpClock(50);
         sHal.pumpClock(50);
@@ -570,8 +554,7 @@ void test_message_chunk_boundary_carries_then_rejects()
               << std::endl;
 }
 
-void test_corrupt_msg_header_oversize_l_resyncs()
-{
+void test_corrupt_msg_header_oversize_l_resyncs() {
     AutoLinkConfig cfg;
     std::cout << "\n=== Test: Corrupt MSG_HDR with L>maxMsg Resyncs Forward ==="
               << std::endl;
@@ -616,8 +599,7 @@ void test_corrupt_msg_header_oversize_l_resyncs()
     std::cout << "PASS (oversize-L header resynced, m1 preserved)" << std::endl;
 }
 
-void test_corrupt_msg_header_resync_drops_bytes()
-{
+void test_corrupt_msg_header_resync_drops_bytes() {
     AutoLinkConfig cfg;
     std::cout << "\n=== Test: Corrupt MSG_HDR Resync Drops Leading Bytes ==="
               << std::endl;
@@ -659,8 +641,7 @@ void test_corrupt_msg_header_resync_drops_bytes()
               << std::endl;
 }
 
-void test_corrupt_msg_header_resync_rejects_false_boundary_v5_1_54()
-{
+void test_corrupt_msg_header_resync_rejects_false_boundary_v5_1_54() {
     AutoLinkConfig cfg;
     std::cout
         << "\n=== Test: Resync rejects false boundary (payload CRC mismatch, fix) ==="
@@ -708,8 +689,7 @@ void test_corrupt_msg_header_resync_rejects_false_boundary_v5_1_54()
         << std::endl;
 }
 
-void test_recvMsg_buffer_too_small()
-{
+void test_recvMsg_buffer_too_small() {
     AutoLinkConfig cfg;
     std::cout << "\n=== Test: recvMsg Buffer Too Small Drains Payload ==="
               << std::endl;
@@ -743,8 +723,7 @@ void test_recvMsg_buffer_too_small()
               << std::endl;
 }
 
-void test_corrupt_msg_header_no_resync_clears_buffer()
-{
+void test_corrupt_msg_header_no_resync_clears_buffer() {
     AutoLinkConfig cfg;
     std::cout << "\n=== Test: Corrupt MSG_HDR With No Resync Clears Buffer ==="
               << std::endl;
@@ -782,8 +761,7 @@ void test_corrupt_msg_header_no_resync_clears_buffer()
               << std::endl;
 }
 
-void test_corrupt_payload_byte_crc_reject()
-{
+void test_corrupt_payload_byte_crc_reject() {
     AutoLinkConfig cfg;
     std::cout << "\n=== Test: Corrupt Payload Byte Rejected by CRC16 ==="
               << std::endl;
@@ -839,8 +817,7 @@ void test_corrupt_payload_byte_crc_reject()
               << std::endl;
 }
 
-void test_recvMsg_empty_buffer()
-{
+void test_recvMsg_empty_buffer() {
     std::cout << "\n=== Test: recvMsg on Empty Buffer Returns 0 ==="
               << std::endl;
     MockHal mHal, sHal;
@@ -852,8 +829,7 @@ void test_recvMsg_empty_buffer()
     std::cout << "PASS (empty recvMsg returns 0)" << std::endl;
 }
 
-void test_zero_byte_send_silent_noop()
-{
+void test_zero_byte_send_silent_noop() {
     AutoLinkConfig cfg;
     std::cout << "\n=== Test: Zero-Byte sendMsg/write is Silent No-Op ==="
               << std::endl;
@@ -890,8 +866,7 @@ void test_zero_byte_send_silent_noop()
         << std::endl;
 }
 
-void test_resetDiag_zeros_cobsseq_counters()
-{
+void test_resetDiag_zeros_cobsseq_counters() {
     AutoLinkConfig cfg;
     std::cout << "\n=== Test: resetDiag() Clears gaps/stale/lostMsgs ==="
               << std::endl;
@@ -932,8 +907,7 @@ void test_resetDiag_zeros_cobsseq_counters()
         << std::endl;
 }
 
-void test_multichunk_loss_returns_minus_one()
-{
+void test_multichunk_loss_returns_minus_one() {
     std::cout
         << "\n=== Test: Multi-chunk loss — recvMsg returns -1, lostMsgs bumps ==="
         << std::endl;
@@ -968,8 +942,7 @@ void test_multichunk_loss_returns_minus_one()
         << std::endl;
 }
 
-int main()
-{
+int main() {
     std::cout << "=== Running ALinkMessage Tests ===" << std::endl;
 
     Log::log().setLevel(Log::DEBUG);
