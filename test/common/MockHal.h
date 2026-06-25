@@ -11,10 +11,8 @@
 #    include <cstdint>
 #    include <cassert>
 
-namespace autolink
-{
-class MockHal : public IHal
-{
+namespace autolink {
+class MockHal : public IHal {
 public:
     uint32_t spd = 9600;
     bool timerActive = false;
@@ -42,24 +40,20 @@ public:
     mutable std::mutex mtx;
 
     void begin() override {}
-    void setSpd(uint32_t s) override
-    {
+    void setSpd(uint32_t s) override {
         spd = s;
         spdHistory.push_back(s);
     }
-    void sendBreak() override
-    {
+    void sendBreak() override {
         sendBreakCalls++;
         if (peer && peer->link)
             peer->link->onBreak();
     }
-    void deliver_break_to_self()
-    {
+    void deliver_break_to_self() {
         if (link)
             link->onBreak();
     }
-    int tx(const uint8_t *b, int n) override
-    {
+    int tx(const uint8_t *b, int n) override {
         if (txFailN > 0) {
             int take = n > txFailN ? n - txFailN : 0;
             if (take > 0) {
@@ -78,21 +72,18 @@ public:
         return n;
     }
     void flushTx() override {}
-    void startTimer(int ms) override
-    {
+    void startTimer(int ms) override {
         timerStartCalls++;
         timerActive = true;
         lastTimerMs = ms;
         nextTimerAtMs = now + (uint32_t)ms;
     }
-    void stopTimer() override
-    {
+    void stopTimer() override {
         timerActive = false;
         nextTimerAtMs = UINT32_MAX;
     }
 
-    void pumpClock(uint32_t deltaMs)
-    {
+    void pumpClock(uint32_t deltaMs) {
         now += deltaMs;
         int safety = 0;
         while (nextTimerAtMs != UINT32_MAX && now >= nextTimerAtMs &&
@@ -103,8 +94,7 @@ public:
         }
     }
 
-    void runFor(uint32_t targetMs)
-    {
+    void runFor(uint32_t targetMs) {
         uint32_t end = now + targetMs;
         while (now < end) {
             uint32_t chunk = end - now;
@@ -114,8 +104,7 @@ public:
         }
     }
     void delayMs(int) override {}
-    void clearTx()
-    {
+    void clearTx() {
         txBuf.clear();
         txBaudPerByte.clear();
     }
@@ -127,11 +116,10 @@ public:
     size_t appBufCap = (size_t)-1;
     int txFailN = 0;
 
-    void lock() const override { mtx.lock(); }
-    void unlock() const override { mtx.unlock(); }
+    void lock() override { mtx.lock(); }
+    void unlock() override { mtx.unlock(); }
 
-    int pushAppBuf(const uint8_t *b, int n) override
-    {
+    int pushAppBuf(const uint8_t *b, int n) override {
         int acc = 0;
         for (int i = 0; i < n; i++) {
             if (appBuf.size() >= appBufCap)
@@ -141,8 +129,7 @@ public:
         }
         return acc;
     }
-    int popAppBuf(uint8_t *b, int max_len) override
-    {
+    int popAppBuf(uint8_t *b, int max_len) override {
         int n = 0;
         while (n < max_len && !appBuf.empty()) {
             b[n++] = appBuf.front();
@@ -150,14 +137,12 @@ public:
         }
         return n;
     }
-    int peekAppBuf() const override
-    {
+    int peekAppBuf() const override {
         if (appBuf.empty())
             return -1;
         return appBuf.front();
     }
-    int peekAt(uint8_t *out, int n, int offset) const override
-    {
+    int peekAt(uint8_t *out, int n, int offset) const override {
         if (n <= 0 || offset < 0 || offset >= (int)appBuf.size())
             return 0;
         std::vector<uint8_t> tmp(appBuf.size());
@@ -174,15 +159,13 @@ public:
         return copied;
     }
     int appBufAvailable() const override { return appBuf.size(); }
-    void clearAppBuf() override
-    {
+    void clearAppBuf() override {
         while (!appBuf.empty())
             appBuf.pop();
     }
 };
 
-inline void pipe_data(MockHal &src, MockHal &dest)
-{
+inline void pipe_data(MockHal &src, MockHal &dest) {
     if (src.txBuf.empty())
         return;
 
@@ -237,8 +220,7 @@ inline void pipe_data(MockHal &src, MockHal &dest)
 }
 
 inline void negotiate_to_ok(Link &ping, Link &pong, MockHal &mHal,
-                            MockHal &sHal)
-{
+                            MockHal &sHal) {
     ping.begin();
     pong.begin();
     int N = (int)ping.getConfig().allowedBaudsCount;
@@ -254,6 +236,18 @@ inline void negotiate_to_ok(Link &ping, Link &pong, MockHal &mHal,
             pipe_data(sHal, mHal);
             if (ping.getState() == State::OK && pong.getState() == State::OK)
                 break;
+        }
+        // Sweep locks the master at the fastest
+        // baud. The slave is still parked at the
+        // slowest baud; snap it to the master's
+        // locked baud so the LOCK_CMD frame is
+        // delivered. After this snap the slave
+        // receives LOCK_CMD, enters OK, and both
+        // sides converge at the master's baud.
+        if (ping.getState() == State::OK && pong.getState() != State::OK) {
+            sHal.setSpd(
+                ping.getConfig().allowedBauds[ping.getCurrentSpdIndex()]);
+            pipe_data(mHal, sHal);
         }
         if (ping.getState() == State::OK && pong.getState() == State::OK)
             break;
