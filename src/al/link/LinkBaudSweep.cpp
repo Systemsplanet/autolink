@@ -1,4 +1,4 @@
-// Per-baud PONG_ACK accumulator. See LinkBaudSweep.h.
+// Per-baud PONG_ACK accumulator.
 #include "al/link/LinkBaudSweep.h"
 
 namespace autolink
@@ -20,20 +20,16 @@ void UtilBaudSweep::resetAll()
 
 int UtilBaudSweep::pickBest() const
 {
-    int minHits = (int)(cfg_.minAcceptRate *
-                        (float)cfg_.expectedSamples);
+    int minHits = (int)(cfg_.minAcceptRate * (float)cfg_.expectedSamples);
     if (minHits < 1)
         minHits = 1;
-    for (int j = 0; j < numBauds_; j++) {
+    for (int j = 0; j < numBauds_; j++)
         if (scores_[j] >= minHits)
             return j;
-    }
-
-
-    for (int j = 0; j < numBauds_; j++) {
+    // Fall back to any baud with a hit.
+    for (int j = 0; j < numBauds_; j++)
         if (scores_[j] > 0)
             return j;
-    }
     return -1;
 }
 
