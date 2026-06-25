@@ -7,6 +7,8 @@
 #    include <chrono>
 #    include <thread>
 #    include "al/link/Link.h"
+#    include "al/link/ArqCache.h"
+#    include "LinkTestAccessor.h"
 #    include "al/util/Log.h"
 #    include "MockHal.h"
 
@@ -21,75 +23,19 @@ static bool g_sync = false;
 // it has to install its own ARQ hooks
 // (otherwise the timer-driven retransmit
 // path is a no-op and every wire drop
-// becomes a permanent loss). The cache
-// is a flat 256-entry table keyed by
-// cobsSeq, just like the production
-// AutoLink facade. The retransmit path
-// re-encodes and re-sends from this
-// buffer; the ACK path frees the entry.
-struct ItestArq {
-    Link *owner;
-    uint8_t buf[256][260];
-    int len[256];
-    bool in_use[256];
-    ItestArq() : owner(nullptr)
-    {
-        memset(len, 0, sizeof len);
-        memset(in_use, 0, sizeof in_use);
-    }
-};
+// becomes a permanent loss). The itest
+// used to install its own 5-trampoline
+// cache so the link's retx path had
+// somewhere to re-send from. The
+// trampolines are gone; the itest now
+// uses the production ArqCache
+// directly. The old g_insertCalls /
+// g_retxCalls / g_ackCalls diagnostic
+// counters dropped with the trampolines.
+static ArqCache g_pingArq;
+static ArqCache g_pongArq;
 
-static ItestArq g_pingArq;
-static ItestArq g_pongArq;
-
-static int g_insertCalls = 0;
-static int g_retxCalls = 0;
-static int g_ackCalls = 0;
-static void itest_arq_insert(uint8_t seq, const uint8_t *b, int n, uint8_t,
-                             void *ctx)
-{
-    g_insertCalls++;
-    ItestArq *a = (ItestArq *)ctx;
-    if (n <= 0 || n > 256)
-        return;
-    if (a->in_use[seq]) {
-        a->in_use[seq] = false;
-    }
-    memcpy(a->buf[seq], b, n);
-    a->len[seq] = n;
-    a->in_use[seq] = true;
-}
-
-static bool itest_arq_retx(uint8_t seq, void *ctx)
-{
-    g_retxCalls++;
-    ItestArq *a = (ItestArq *)ctx;
-    if (!a->in_use[seq])
-        return false;
-    a->owner->resendCobsFrame(seq, a->buf[seq], a->len[seq]);
-    return false;
-}
-
-static void itest_arq_clear(void *ctx)
-{
-    ItestArq *a = (ItestArq *)ctx;
-    for (int i = 0; i < 256; i++) {
-        a->in_use[i] = false;
-        a->len[i] = 0;
-    }
-}
-
-static bool itest_arq_ack(uint8_t seq, void *ctx)
-{
-    g_ackCalls++;
-    ItestArq *a = (ItestArq *)ctx;
-    a->in_use[seq] = false;
-    a->len[seq] = 0;
-    return false;
-}
-
-void test_loopback_noise_triggers_baud_fallback()
-{
+void test_loopback_noise_triggers_baud_fallback() {
     std::cout << "\n=== Test: Loopback under wire  noise "
               << "(mode=" << (g_sync ? "SYNC" : "ASYNC")
               << ") ===" << std::endl;
@@ -126,14 +72,10 @@ void test_loopback_noise_triggers_baud_fallback()
     // a permanent loss. SYNC doesn't need
     // this — SYNC waits for the receiver's
     // ACK inline and never retransmits.
-    g_pingArq = ItestArq();
-    g_pongArq = ItestArq();
-    g_pingArq.owner = &ping;
-    g_pongArq.owner = &pong;
-    ping.setArqCacheHooks(&itest_arq_ack, &itest_arq_retx, nullptr,
-                          &itest_arq_insert, &itest_arq_clear, &g_pingArq);
-    pong.setArqCacheHooks(&itest_arq_ack, &itest_arq_retx, nullptr,
-                          &itest_arq_insert, &itest_arq_clear, &g_pongArq);
+    g_pingArq.clearAll();
+    g_pongArq.clearAll();
+    ping.setArqCache(&g_pingArq);
+    pong.setArqCache(&g_pongArq);
     mHal.peer = &sHal;
     sHal.peer = &mHal;
 
@@ -177,7 +119,8 @@ void test_loopback_noise_triggers_baud_fallback()
             for (int i = 0; i < 64; i++)
                 payload[i] = (uint8_t)('A' + (i % 26));
             if (g_sync) {
-                if (ping.test_sendMsgBegin(payload, 64)) {
+                LinkTestAccessor pingT(ping);
+                if (pingT.sendMsgBegin(payload, 64)) {
                     int budget = cfg.syncAckTimeoutMs + 50;
                     for (int i = 0; i < budget; i++) {
                         std::this_thread::sleep_for(
@@ -186,7 +129,7 @@ void test_loopback_noise_triggers_baud_fallback()
                         sHal.pumpClock(2);
                         pipe_data(mHal, sHal);
                         pipe_data(sHal, mHal);
-                        if (!ping.test_sendMsgStillWaiting()) {
+                        if (!pingT.sendMsgStillWaiting()) {
                             txCount++;
                             break;
                         }
@@ -201,7 +144,8 @@ void test_loopback_noise_triggers_baud_fallback()
             int n;
             while ((n = pong.recvMsg(buf, sizeof(buf))) > 0) {
                 if (g_sync) {
-                    if (pong.test_sendMsgBegin(buf, n)) {
+                    LinkTestAccessor pongT(pong);
+                    if (pongT.sendMsgBegin(buf, n)) {
                         int budget = cfg.syncAckTimeoutMs + 50;
                         for (int i = 0; i < budget; i++) {
                             std::this_thread::sleep_for(
@@ -210,7 +154,7 @@ void test_loopback_noise_triggers_baud_fallback()
                             sHal.pumpClock(2);
                             pipe_data(mHal, sHal);
                             pipe_data(sHal, mHal);
-                            if (!pong.test_sendMsgStillWaiting()) {
+                            if (!pongT.sendMsgStillWaiting()) {
                                 rxCount++;
                                 break;
                             }
@@ -271,8 +215,8 @@ void test_loopback_noise_triggers_baud_fallback()
     std::cout << "Messages TX=" << txCount << " RX=" << rxCount << std::endl;
     std::cout << "Bytes dropped by noise: "
               << (mHal.bytesDropped + sHal.bytesDropped) << std::endl;
-    std::cout << "ARQ hooks: insert=" << g_insertCalls
-              << " retx=" << g_retxCalls << " ack=" << g_ackCalls << std::endl;
+    std::cout << "ARQ caches: ping.in_use=" << g_pingArq.size()
+              << " pong.in_use=" << g_pongArq.size() << std::endl;
 
     int totalDropped = mHal.bytesDropped + sHal.bytesDropped;
     assert(totalDropped > 0 &&
@@ -321,8 +265,7 @@ void test_loopback_noise_triggers_baud_fallback()
               << std::endl;
 }
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
     bool verbose = false;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
