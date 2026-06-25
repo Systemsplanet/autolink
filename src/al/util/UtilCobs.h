@@ -4,10 +4,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
-namespace autolink
-{
-class UtilCobs
-{
+namespace autolink {
+class UtilCobs {
 public:
     static size_t encodedMax(size_t n) { return n + n / 254 + 1; }
 
