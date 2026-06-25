@@ -1,6 +1,6 @@
-// Tracks per-baud PONG_ACK counts across a sweep;
-// picks the index with the highest score subject to a
-// minimum-hit floor.
+// Per-baud PONG_ACK score accumulator.
+// pickBest() returns the first index meeting
+// the minimum-accept-rate floor, or -1.
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
@@ -27,8 +27,7 @@ public:
         if (numBauds > UTIL_BAUD_SWEEP_MAX_BAUDS)
             numBauds = UTIL_BAUD_SWEEP_MAX_BAUDS;
         numBauds_ = numBauds;
-        for (int i = 0; i < UTIL_BAUD_SWEEP_MAX_BAUDS;
-             i++)
+        for (int i = 0; i < UTIL_BAUD_SWEEP_MAX_BAUDS; i++)
             scores_[i] = 0;
     }
 
@@ -45,27 +44,17 @@ public:
             scores_[idx] = 0;
     }
     void resetAll();
-
-
     int pickBest() const;
 
-    int samplesPerBaud() const
-    {
-        return cfg_.pingSamplesPerBaud;
-    }
-
+    int samplesPerBaud() const { return cfg_.pingSamplesPerBaud; }
     int minHitsForReliable() const
     {
-        int m = (int)(cfg_.minAcceptRate *
-                      (float)cfg_.expectedSamples);
+        int m = (int)(cfg_.minAcceptRate * (float)cfg_.expectedSamples);
         return m < 1 ? 1 : m;
     }
-
     int scoreAt(int idx) const
     {
-        return (idx >= 0 && idx < numBauds_)
-            ? scores_[idx]
-            : 0;
+        return (idx >= 0 && idx < numBauds_) ? scores_[idx] : 0;
     }
     int numBauds() const { return numBauds_; }
 
