@@ -1,7 +1,12 @@
 // Shared Ping/Pong config held by
 // COMPOSITION in Ping and Pong.
-// logStats() takes counts as params;
-// no static thunk indirection needed.
+// logStats + resetStatBaseline are
+// free functions (diagnostics is a
+// separate concern from comms/web).
+// setupCommon was split into discrete
+// steps (initSerial / bringUpLink /
+// startWebMonitor) the caller sequences
+// — app lifecycle is the caller's job.
 #pragma once
 #ifdef ARDUINO
 
@@ -9,10 +14,121 @@
 #    include "al/web/AutoLinkWeb.h"
 #    include <Arduino.h>
 
-namespace autolink
-{
+namespace autolink {
+
+// Rolling tx/rx byte-rate baseline
+// for logStats. Owned by Ping / Pong
+// — the rate window lives with the
+// thing being measured, not with the
+// comms handle.
+struct StatBaseline {
+    uint32_t tMs = 0;
+    uint64_t lastTx = 0;
+    uint64_t lastRx = 0;
+};
+
+// Diagnostics: every >5 s, log
+// tx/rx byte rate, mode icon, current
+// baud, disc count, frame errors.
+// Caller holds the rolling baseline
+// so the window survives reconnects
+// across link-lost / resume paths.
+inline void logStats(Log &log, const char *tag, AutoLink &comm, StatBaseline &b,
+                     uint64_t echoCount, uint64_t mismatchCount) {
+    uint32_t now = millis();
+    if (now - b.tMs < 5000)
+        return;
+    Stats s;
+    comm.getStats(s);
+
+    if (s.tx < b.lastTx || s.rx < b.lastRx) {
+        b.lastTx = s.tx;
+        b.lastRx = s.rx;
+        b.tMs = now;
+        return;
+    }
+    uint32_t dt = now - b.tMs;
+    uint64_t txRate = dt ? ((s.tx - b.lastTx) * 1000ULL / dt) : 0;
+    uint64_t rxRate = dt ? ((s.rx - b.lastRx) * 1000ULL / dt) : 0;
+    const char *modeIcon =
+        (comm.mode() == AutoLinkConfig::Mode::SYNC) ? "[S]" : "[A]";
+    log.info(
+        tag,
+        "%s echos=%llu  mismatch=%llu   tx=%llu B/sec  rx=%llu B/sec  baud=%lu   disc=%llu  errs=%llu",
+        modeIcon, (unsigned long long)echoCount,
+        (unsigned long long)mismatchCount, txRate, rxRate,
+        (unsigned long)comm.getCurrentBaud(), (unsigned long long)s.discCount,
+        (unsigned long long)s.frameErrs);
+    b.lastTx = s.tx;
+    b.lastRx = s.rx;
+    b.tMs = now;
+}
+
+inline void resetStatBaseline(StatBaseline &b) {
+    b.lastTx = 0;
+    b.lastRx = 0;
+    b.tMs = 0;
+}
+
+// App-lifecycle step 1: bring up the
+// debug Serial, set log level, print
+// the boot banner. Caller can choose
+// a different baud or skip this.
+inline void initSerial(Log &log, uint32_t debugBaud, const char *role,
+                       const char *ssid) {
+    esp_log_level_set("*", ESP_LOG_VERBOSE);
+    log.setLevel(Log::DEBUG);
+    Serial.begin(debugBaud);
+    log.info("PingPongBase boot: role=%s  baud=%lu  WiFi=%s", role,
+             (unsigned long)debugBaud, ssid ? ssid : "disabled");
+}
+
+// App-lifecycle step 2: blink, bring
+// up the link layer (comm.begin()),
+// log version, blink again. Caller
+// does NOT get the "link layer up"
+// message mid-loop; it's a one-shot
+// here.
+inline void bringUpLink(Log &log, AutoLink &comm) {
+    comm.blinkWait(1, 100, 100, 2000);
+    log.debug("PingPongBase", "calling comm_.begin()");
+    comm.begin();
+    log.info("PingPongBase", "link layer up (comm_.begin returned)");
+    log.info("AutoLink", "v" AUTOLINK_VERSION);
+    comm.blinkWait(2, 100, 100, 2000);
+}
+
+// App-lifecycle step 3: start the
+// web monitor. Caller decides whether
+// to call this at all (current
+// behaviour: only if ssid is set).
+// Returns whether mon.begin() reported
+// ok — caller can log / branch on it.
+inline bool startWebMonitor(Log &log, AutoLinkWeb &mon, const char *role,
+                            const char *ssid, const char *password,
+                            uint16_t webPort) {
+    if (!ssid) {
+        log.info("PingPongBase", "WiFi disabled — skipping web monitor");
+        return false;
+    }
+    log.info("PingPongBase", "starting web monitor (port %u)",
+             (unsigned)webPort);
+    mon.setRole(role);
+    uint32_t monStart = millis();
+    bool monOk = mon.begin(ssid, password, webPort);
+    log.info("PingPongBase web monitor begin returned %s in %lu  ms",
+             monOk ? "true" : "false", (unsigned long)(millis() - monStart));
+    return monOk;
+}
+
 struct PingPongBase {
     static constexpr int BUF_SIZE = 1024;
+
+    // Per-loop send/receive cap for
+    // ASYNC mode. SYNC mode always
+    // transmits at most one frame per
+    // loop regardless.
+    static constexpr int MAX_TX_PER_LOOP = 16;
 
     PingPongBase(uint32_t debugBaud, uart_port_t uartNum, int rxPin, int txPin,
                  bool isPing, const char *ssid = nullptr,
@@ -20,80 +136,10 @@ struct PingPongBase {
         : debugBaud_(debugBaud), isPing_(isPing),
           comm_(uartNum, rxPin, txPin, isPing), mon_(comm_), ssid_(ssid),
           password_(password ? password : ""), webPort_(webPort),
-          log_(Log::log())
-    {
-    }
+          log_(Log::log()) {}
 
     PingPongBase(const PingPongBase &) = delete;
     PingPongBase &operator=(const PingPongBase &) = delete;
-
-    void setupCommon()
-    {
-        esp_log_level_set("*", ESP_LOG_VERBOSE);
-        log_.setLevel(Log::DEBUG);
-        Serial.begin(debugBaud_);
-        log_.info("PingPongBase boot: role=%s  baud=%lu  WiFi=%s",
-                  isPing_ ? "Ping" : "Pong", (unsigned long)debugBaud_,
-                  ssid_ ? ssid_ : "disabled");
-        comm_.blinkWait(1, 100, 100, 2000);
-        log_.debug("PingPongBase", "calling comm_.begin()");
-        comm_.begin();
-        log_.info("PingPongBase", "link layer up (comm_.begin returned)");
-        if (ssid_) {
-            log_.info("PingPongBase", "starting web monitor (port %u)",
-                      (unsigned)webPort_);
-
-            mon_.setRole(isPing_ ? "Ping" : "Pong");
-            uint32_t monStart = millis();
-            bool monOk = mon_.begin(ssid_, password_, webPort_);
-            log_.info("PingPongBase web monitor begin returned %s in %lu  ms",
-                      monOk ? "true" : "false",
-                      (unsigned long)(millis() - monStart));
-        } else {
-            log_.info("PingPongBase", "WiFi disabled — skipping web monitor");
-        }
-
-        log_.info("AutoLink", "v" AUTOLINK_VERSION);
-        comm_.blinkWait(2, 100, 100, 2000);
-    }
-
-    void logStats(const char *tag, uint64_t echoCount, uint64_t mismatchCount)
-    {
-        uint32_t now = millis();
-        if (now - tStat_ < 5000)
-            return;
-        Stats s;
-        comm_.getStats(s);
-
-        if (s.tx < lastTx_ || s.rx < lastRx_) {
-            lastTx_ = s.tx;
-            lastRx_ = s.rx;
-            tStat_ = now;
-            return;
-        }
-        uint32_t dt = now - tStat_;
-        uint64_t txRate = dt ? ((s.tx - lastTx_) * 1000ULL / dt) : 0;
-        uint64_t rxRate = dt ? ((s.rx - lastRx_) * 1000ULL / dt) : 0;
-        const char *modeIcon =
-            (comm_.mode() == AutoLinkConfig::Mode::SYNC) ? "[S]" : "[A]";
-        log_.info(
-            tag,
-            "%s echos=%llu  mismatch=%llu   tx=%llu B/sec  rx=%llu B/sec  baud=%lu   disc=%llu  errs=%llu",
-            modeIcon, (unsigned long long)echoCount,
-            (unsigned long long)mismatchCount, txRate, rxRate,
-            (unsigned long)comm_.getCurrentBaud(),
-            (unsigned long long)s.discCount, (unsigned long long)s.frameErrs);
-        lastTx_ = s.tx;
-        lastRx_ = s.rx;
-        tStat_ = now;
-    }
-
-    void resetStatBaseline()
-    {
-        lastTx_ = 0;
-        lastRx_ = 0;
-        tStat_ = 0;
-    }
 
     uint32_t debugBaud_;
     bool isPing_;
@@ -106,11 +152,6 @@ struct PingPongBase {
 
     uint8_t buf_[BUF_SIZE];
     bool wasReady_ = false;
-
-private:
-    uint32_t tStat_ = 0;
-    uint64_t lastTx_ = 0;
-    uint64_t lastRx_ = 0;
 };
 
 } // namespace autolink
