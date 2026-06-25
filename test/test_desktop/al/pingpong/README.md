@@ -19,11 +19,11 @@ covered by the host unit tests in `test/test_desktop/al/link/`
 and by the host integration tests in `test/itest/test_desktop/`:
 
 - **Unit** (`test/test_desktop/al/link/`) — `LinkArqTest.cpp`,
-  `LinkBaudSweepTest.cpp`, `LinkCobsSeqTest.cpp`,
-  `LinkDecisionTest.cpp`, `LinkErrorTest.cpp`,
+  `LinkBaudSweepTest.cpp`, `LinkBaudPreferenceTest.cpp`,
+  `LinkCobsSeqTest.cpp`, `LinkDecisionTest.cpp`, `LinkErrorTest.cpp`,
   `LinkFrameRxTest.cpp`, `LinkIOTest.cpp`, `LinkMessageTest.cpp`,
-  `LinkReorderTest.cpp`, `LinkV53Test.cpp`, `LinkV531Test.cpp`,
-  `LinkV531NeverLeaveP1Test.cpp`. Pure decision logic, byte I/O,
+  `LinkReorderTest.cpp`, `LinkSweepP1GuardTest.cpp`,
+  `LinkSweepPhaseTest.cpp`. Pure decision logic, byte I/O,
   message API, ARQ, baud sweep, gap/stale, reorder buffer.
 - **Integration** (`test/itest/test_desktop/al/link/`) —
   `loopback_test.cpp` (two-node end-to-end) and
