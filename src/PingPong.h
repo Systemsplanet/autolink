@@ -1,4 +1,2 @@
-// User-facing role-demo: Ping/Pong sketch wrapper
-// around AutoLink. Flat shim so Arduino-IDE 1.x
-// (non-recursive) picks it up.
+// Flat shim for non-recursive include.
 #include "al/pingpong/PingPongMain.h"
