@@ -7,36 +7,37 @@
 #    include "al/util/UtilCrc.h"
 #    include <string.h>
 
-namespace autolink
-{
-class Ping
-{
+namespace autolink {
+class Ping {
 public:
     enum class FillMode : uint8_t { SEQUENTIAL = 0, RANDOM = 1 };
 
     Ping(uint32_t debugBaud, uart_port_t uartNum, int rxPin, int txPin,
          const char *ssid = nullptr, const char *password = nullptr,
          uint16_t webPort = 8765)
-        : base_(debugBaud, uartNum, rxPin, txPin, true, ssid, password, webPort)
-    {
-    }
+        : base_(debugBaud, uartNum, rxPin, txPin, true, ssid, password,
+                webPort) {}
 
     Ping(const Ping &) = delete;
     Ping &operator=(const Ping &) = delete;
 
-    void setup()
-    {
-        base_.log_.debug("Ping", "setup: seeding RNG, calling setupCommon");
+    void setup() {
+        base_.log_.debug("Ping", "setup: seeding RNG, sequencing init steps");
         randomSeed(esp_random());
+        const char *role = "Ping";
+        initSerial(base_.log_, base_.debugBaud_, role, base_.ssid_);
         if (base_.ssid_)
             installWebHooks();
-        base_.setupCommon();
+        bringUpLink(base_.log_, base_.comm_);
+        startWebMonitor(base_.log_, base_.mon_, role, base_.ssid_,
+                        base_.password_, base_.webPort_);
         base_.comm_.setLinkPaused(paused_);
-        base_.log_.info("Ping", "mode=Ping  ready");
+        base_.log_.info("Ping",
+                        "mode=Ping  ready  paused=%s  (push Start to send)",
+                        paused_ ? "true" : "false");
     }
 
-    void loop()
-    {
+    void loop() {
         uint32_t now = millis();
 
         if (!base_.comm_.ready()) {
@@ -45,7 +46,7 @@ public:
                 base_.wasReady_ = false;
                 clearQueue_();
                 tSweepStall_ = now;
-                base_.resetStatBaseline();
+                resetStatBaseline(stat_);
             } else {
                 if (now - tNotReady_ >= 1000) {
                     base_.log_.debug("Ping", "not ready  swpAge=%lu ms",
@@ -102,8 +103,13 @@ public:
         int sentThisLoop = 0;
         const int maxTx = (base_.comm_.mode() == AutoLinkConfig::Mode::SYNC)
             ? 1
-            : MAX_TX_PER_LOOP;
+            : PingPongBase::MAX_TX_PER_LOOP;
+        const int txDelayMs = base_.comm_.txDelayMs();
+        if (txDelayMs > 0 && tNextSendMs_ == 0)
+            tNextSendMs_ = now;
         while (count_ < WINDOW && sentThisLoop < maxTx) {
+            if (txDelayMs > 0 && (int32_t)(now - tNextSendMs_) < 0)
+                break;
             int n = random(1, 1024);
             fillBuf_(sendBuf_, n);
             uint16_t crc = UtilCrc::crc16(sendBuf_, n);
@@ -121,6 +127,8 @@ public:
             count_++;
             sentThisLoop++;
             consecTransient_ = 0;
+            if (txDelayMs > 0)
+                tNextSendMs_ = millis() + (uint32_t)txDelayMs;
         }
 
         int got;
@@ -141,18 +149,29 @@ public:
             consecTransient_ = 0;
         }
 
-        base_.logStats("Ping", successEchoCount_, mismatchCount_);
+        logStats(base_.log_, "Ping", base_.comm_, stat_, successEchoCount_,
+                 mismatchCount_);
     }
 
     void setFillMode(FillMode m) { fillMode_ = m; }
     FillMode fillMode() const { return fillMode_; }
 
-    void setPaused(bool p)
-    {
+    void setPaused(bool p) {
         paused_ = p;
         base_.comm_.setLinkPaused(p);
-        if (!p)
-            base_.resetStatBaseline();
+        if (!p) {
+            // Proactive resume: drop the pending/expectation table
+            // before the next echo can match against a fresh send.
+            // Reactive recovery (CRC/length mismatch in matchEcho_)
+            // would still catch it, but only after one spurious
+            // mismatch is logged and one message lost. Clearing
+            // here means stale in-flight echoes from the pre-pause
+            // window are discarded as "expected empty queue" rather
+            // than polluting mismatchCount_.
+            clearQueue_();
+            resetStatBaseline(stat_);
+            tNextSendMs_ = 0;
+        }
         base_.log_.info("Ping", "device-side pause %s", p ? "ON" : "OFF");
     }
     bool isPaused() const { return paused_; }
@@ -160,39 +179,37 @@ public:
     uint64_t successEchoCount() const { return successEchoCount_; }
     uint64_t mismatchCount() const { return mismatchCount_; }
 
-    void installWebHooks()
-    {
+    void installWebHooks() {
         base_.mon_.setFillModeHook(
             [this]() -> uint8_t { return (uint8_t)fillMode(); },
             [this](uint8_t m) { setFillMode((FillMode)m); });
         base_.mon_.setMsgPauseHook([this]() -> bool { return isPaused(); },
                                    [this](bool p) { setPaused(p); });
+        base_.mon_.setTxDelayHook(
+            [this]() -> int { return base_.comm_.txDelayMs(); },
+            [this](int ms) { base_.comm_.setTxDelayMs(ms); });
     }
 
 private:
-    void fillBuf_(uint8_t *b, int n)
-    {
+    void fillBuf_(uint8_t *b, int n) {
         if (fillMode_ == FillMode::SEQUENTIAL)
             fillSequential_(b, n);
         else
             fillRandom_(b, n);
     }
 
-    void fillSequential_(uint8_t *b, int n)
-    {
+    void fillSequential_(uint8_t *b, int n) {
         static const char HEX_DIGITS[] = "0123456789abcdefghijklmnopqrstuvwxyz";
         for (int i = 0; i < n; i++)
             b[i] = (uint8_t)HEX_DIGITS[i % 36];
     }
 
-    void fillRandom_(uint8_t *b, int n)
-    {
+    void fillRandom_(uint8_t *b, int n) {
         for (int i = 0; i < n; i++)
             b[i] = (uint8_t)random(256);
     }
 
-    void matchEcho_(int got, const uint8_t *buf)
-    {
+    void matchEcho_(int got, const uint8_t *buf) {
         base_.comm_.blinkWait(1);
         if (count_ == 0) {
             base_.log_.error(
@@ -223,8 +240,7 @@ private:
         }
     }
 
-    void clearQueue_()
-    {
+    void clearQueue_() {
         if (count_ > 0) {
             base_.log_.error("Ping", "pending cleared  dropped=%d", count_);
         }
@@ -235,7 +251,6 @@ private:
     }
 
     static constexpr int WINDOW = 32;
-    static constexpr int MAX_TX_PER_LOOP = 16;
 
     static constexpr uint32_t STALL_MS = 10000;
     static constexpr uint32_t SETTLE_MS = 100;
@@ -253,6 +268,7 @@ private:
     uint32_t tReady_ = 0;
     uint32_t tSweepStall_ = 0;
     uint32_t tNotReady_ = 0;
+    uint32_t tNextSendMs_ = 0;
     uint32_t consecTransient_ = 0;
     uint64_t successEchoCount_ = 0;
     uint64_t mismatchCount_ = 0;
@@ -260,8 +276,19 @@ private:
     uint8_t sendBuf_[PingPongBase::BUF_SIZE];
     uint8_t recvBuf_[PingPongBase::BUF_SIZE];
 
+    // Owned by Ping — logStats is a
+    // free function, the rate window
+    // lives with the loop that resets
+    // it.
+    StatBaseline stat_;
+
     FillMode fillMode_ = FillMode::SEQUENTIAL;
-    bool paused_ = false;
+    // Default to PAUSED so a fresh sketch boots
+    // with the Start button pushed-in and no
+    // messages flow until the user releases it.
+    // The dashboard labels "Start" / "Pause"
+    // already encode this state on the JS side.
+    bool paused_ = true;
 
     PingPongBase base_;
 };
