@@ -9,8 +9,7 @@
 
 using namespace autolink;
 
-static void roundtrip(const std::vector<uint8_t> &in)
-{
+static void roundtrip(const std::vector<uint8_t> &in) {
     std::vector<uint8_t> enc(UtilCobs::encodedMax(in.size()) + 8, 0xEE);
     std::vector<uint8_t> dec(in.size() + 8, 0xEE);
     size_t encLen = UtilCobs::encode(in.data(), in.size(), enc.data());
@@ -22,8 +21,7 @@ static void roundtrip(const std::vector<uint8_t> &in)
     assert(memcmp(dec.data(), in.data(), in.size()) == 0);
 }
 
-void test_roundtrip_patterns()
-{
+void test_roundtrip_patterns() {
     std::cout << "\n=== Test: Encode/Decode Round Trips ===" << std::endl;
     roundtrip({});
     roundtrip({ 0x00 });
@@ -41,8 +39,7 @@ void test_roundtrip_patterns()
     std::cout << "PASS" << std::endl;
 }
 
-void test_code_group_boundary()
-{
+void test_code_group_boundary() {
     std::cout << "\n=== Test: 0xFF Code-Group Boundary ===" << std::endl;
     for (int n : { 253, 254, 255, 507, 508, 509 }) {
         std::vector<uint8_t> in;
@@ -60,8 +57,7 @@ void test_code_group_boundary()
     std::cout << "PASS" << std::endl;
 }
 
-void test_malformed_decode_rejected()
-{
+void test_malformed_decode_rejected() {
     std::cout << "\n=== Test: Malformed Input Rejected ===" << std::endl;
     uint8_t out[64];
     uint8_t zero_code[] = { 0x00, 0x11 };
@@ -73,8 +69,7 @@ void test_malformed_decode_rejected()
     std::cout << "PASS" << std::endl;
 }
 
-void test_encoded_max_bound()
-{
+void test_encoded_max_bound() {
     std::cout << "\n=== Test: encodedMax() Is a True Upper Bound ==="
               << std::endl;
     for (int n : { 0, 1, 2, 253, 254, 255, 508, 1000 }) {
@@ -86,8 +81,7 @@ void test_encoded_max_bound()
     std::cout << "PASS" << std::endl;
 }
 
-int main()
-{
+int main() {
     std::cout << "=== Running UtilCobs Tests ===" << std::endl;
     test_roundtrip_patterns();
     test_code_group_boundary();
