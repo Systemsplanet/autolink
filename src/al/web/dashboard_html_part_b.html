@@ -1,0 +1,114 @@
+</style>
+</head>
+<body>
+<header>
+  <div style="flex:1;min-width:160px">
+    <h1>AutoLink Monitor <span class="role-pill empty" id="rolePill"></span></h1>
+    <div class="sub" id="uptime">connecting&#x2026;</div>
+  </div>
+  <button class="btn rbt" id="rebootBtnTop" onclick="reboot()" title="Reboot device">&#9211; Reboot</button>
+  <div class="lvl-group ping-only" id="modeGroup" role="radiogroup" aria-label="Fill mode" style="margin-right:8px">
+    <label><input type="radio" name="mode" value="seq" id="modeSeq"><span>Sequential</span></label>
+    <label><input type="radio" name="mode" value="rand" id="modeRand"><span>Random</span></label>
+  </div>
+  <div class="ping-only" id="startGroup" style="display:flex;flex-direction:column;align-items:stretch;margin-right:8px">
+    <button class="btn pause ping-only" id="topPbtn" onclick="toggleMsgPause()">&#9654; Start</button>
+    <label class="delay-lbl ping-only" for="delayMs" style="font-size:11px;color:#6b7280;margin-top:4px;text-align:center">delay ms</label>
+    <select class="ping-only" id="delayMs" onchange="onDelayChange(this.value)" style="margin-top:2px;padding:2px 4px;font-size:12px;border-radius:4px;border:1px solid #d1d5db;background:#fff">
+      <option value="0">0</option>
+      <option value="10">10</option>
+      <option value="50">50</option>
+      <option value="100">100</option>
+      <option value="500">500</option>
+      <option value="1000">1000</option>
+      <option value="5000">5000</option>
+      <option value="10000">10000</option>
+    </select>
+  </div>
+  <span class="pill swp" id="pill">SWP</span>
+  <span class="pill" id="linkModePill" style="background:#e0e7ff;color:#3730a3">SYNC</span>
+  <button class="btn" id="modeToggleBtn" onclick="toggleLinkMode()" title="Switch SYNC/ASYNC (reboots device)">&#8646; Toggle</button>
+</header>
+<main>
+  <div class="alert" id="alert">Connection lost &#x2014; check power and WiFi</div>
+  <div class="grid">
+    <div class="card">
+      <div class="lbl">TX Rate</div>
+      <div class="val g" id="txbps">&#x2014;</div>
+      <div class="hint" id="txtot">total &#x2014;</div>
+    </div>
+    <div class="card">
+      <div class="lbl">RX Rate</div>
+      <div class="val b" id="rxbps">&#x2014;</div>
+      <div class="hint" id="rxtot">total &#x2014;</div>
+    </div>
+    <div class="card">
+      <div class="lbl">Errors</div>
+      <div class="val r" id="discon">&#x2014;</div>
+      <div class="hint" id="lostmsgs">0 lost msgs</div>
+      <div class="hint" id="errcnt">0 frame errors</div>
+    </div>
+    <div class="card">
+      <div class="lbl">WiFi RSSI</div>
+      <div class="val a" id="rssi">&#x2014;</div>
+      <div class="hint" id="heap">heap &#x2014;</div>
+      <div class="hint" id="baud">baud &#x2014;</div>
+    </div>
+  </div>
+  <div class="row" style="margin-bottom:10px">
+    <span class="section-lbl">Counters</span>
+    <div class="btns">
+      <button class="btn rst" id="rbtn" onclick="resetAll()">&#8635; Reset</button>
+    </div>
+  </div>
+  <div class="row">
+    <span class="section-lbl">Live Log</span>
+    <div class="btns">
+      <div class="lvl-group" id="lvlGroup" role="radiogroup" aria-label="Log level">
+        <!-- "None" is intentionally not exposed: silencing the logger
+             is unrecoverable without a reflash or NVS clear. The
+             server also rejects lv=0 with a 400. -->
+        <label><input type="radio" name="lvl" value="1"><span>Error</span></label>
+        <label><input type="radio" name="lvl" value="2"><span>Warn</span></label>
+        <label><input type="radio" name="lvl" value="3"><span>Info</span></label>
+        <label><input type="radio" name="lvl" value="4"><span>Debug</span></label>
+        <!-- Verbose above Debug: per-frame control traffic (Link
+             sendFrame TX) that is too noisy for normal operation but
+             useful for wire-trace forensics. -->
+        <label><input type="radio" name="lvl" value="5"><span>Verbose</span></label>
+      </div>
+      <button class="btn" onclick="clearLog()">Clear</button>
+      <button class="btn" id="cbtn" onclick="copyLog()">Copy</button>
+      <button class="btn" id="sbtn" onclick="saveLog()" title="Download live log as ping.txt or pong.txt">Save</button>
+      <button class="btn" id="pbtn" onclick="togglePause()">&#9646;&#9646; Pause</button>
+      <button class="btn" onclick="openLogFull()" title="Maximize">&#x26F6;</button>
+    </div>
+  </div>
+  <div class="log-wrap">
+    <div class="log" id="log"></div>
+    <div class="log-fill-bar" id="logFill"></div>
+  </div>
+  <div class="log-overlay" id="logOverlay">
+    <div class="log-overlay-hdr">
+      <span>Live Log (maximized)</span>
+      <div class="btns">
+        <div class="lvl-group" id="lvlGroup2" role="radiogroup" aria-label="Log level">
+          <label><input type="radio" name="lvl2" value="1"><span>Error</span></label>
+          <label><input type="radio" name="lvl2" value="2"><span>Warn</span></label>
+          <label><input type="radio" name="lvl2" value="3"><span>Info</span></label>
+          <label><input type="radio" name="lvl2" value="4"><span>Debug</span></label>
+          <!-- Verbose in the overlay's log-level group too. -->
+          <label><input type="radio" name="lvl2" value="5"><span>Verbose</span></label>
+        </div>
+        <button class="btn" onclick="clearLog()">Clear</button>
+        <button class="btn" id="cbtn2" onclick="copyLog()">Copy</button>
+        <button class="btn" id="pbtn2" onclick="togglePause()">&#9646;&#9646; Pause</button>
+        <button class="btn log-overlay-close" onclick="closeLogFull()">Close</button>
+      </div>
+    </div>
+    <div class="log" id="logFull"></div>
+    <div class="log-fill-bar" id="logFillFull"></div>
+  </div>
+  <div class="footer"><span id="ver">v{{VERSION}}</span> AutoLink Web Monitor &#x2014; <span id="host"></span></div>
+</main>
+<script>
