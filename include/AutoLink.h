@@ -32,24 +32,44 @@ struct EspHal;
 #endif
 
 namespace autolink {
-#define AUTOLINK_VERSION "5.3.93"
+#define AUTOLINK_VERSION "5.3.102"
 
 class AutoLinkTestAccessor;
 
 class AutoLink {
 private:
 #ifdef AUTOLINK_HOST_TEST
-    struct NoOpDeleter {
+    // The host-test ctor takes an IHal by
+    // reference; the caller still owns the
+    // object. RefViewDeleter makes the
+    // unique_ptr non-owning so the test's
+    // MockHal isn't double-freed when the
+    // facade destructs. The production ctor
+    // constructs an EspHal by value and
+    // transfers ownership — the deleter
+    // fires only on that path's release().
+    struct RefViewDeleter {
         void operator()(IHal *) const noexcept {}
     };
-    using IHalPtr = std::unique_ptr<IHal, NoOpDeleter>;
+    using IHalPtr = std::unique_ptr<IHal, RefViewDeleter>;
 #else
     using IHalPtr = std::unique_ptr<IHal>;
 #endif
 
     IHalPtr hal;
     std::unique_ptr<Link> link;
-    ArqCache arqCache_;
+    // ARQ cache sized for Ping's pipeline
+    // window. Ping owns the window (it's
+    // the flow controller); the cache
+    // validates its own pool holds a full
+    // window plus retx headroom. Default
+    // ctor of ArqCache would use the
+    // compile-time fallback; passing
+    // AUTOLINK_ARQ_PIPELINE_WINDOW here
+    // means widening the pipeline on Ping
+    // flows through to the cache at the
+    // same call site.
+    ArqCache arqCache_{ AUTOLINK_ARQ_PIPELINE_WINDOW };
 #ifdef ARDUINO
     EspBlinkHal blinkHal;
     UtilBlink blinker;
@@ -126,25 +146,39 @@ public:
 #endif
 
 #ifdef AUTOLINK_HOST_TEST
-
-    AutoLink(IHal *hal_in, bool isMasterNode,
+    // Host-test seam: inject a non-EspHal IHal
+    // (MockHal or test stub) by reference. The
+    // production ctor above is the only path
+    // sketches can reach; this exists so the
+    // facade is testable against an IHal
+    // implementation the device build can't
+    // construct (no FreeRTOS). Reference
+    // arguments reject null at compile time
+    // and make ownership unambiguous — the
+    // caller still owns the IHal, and
+    // RefViewDeleter above prevents the
+    // facade dtor from double-freeing it.
+    AutoLink(IHal &hal_in, bool isMasterNode,
              AutoLinkConfig cfg = AutoLinkConfig()) {
-        size_t need = 2 * 16 * (cfg.maxMsg + 6);
-        if (cfg.streamBufferSize < need)
-            cfg.streamBufferSize = need;
-        size_t need_tx = 16 * ((cfg.maxMsg + 6) * 5 / 4 + 64);
-        if (cfg.txBufferSize < need_tx)
-            cfg.txBufferSize = need_tx;
-        hal = IHalPtr(hal_in);
+        cfg.clampToMaxBauds();
+        hal = IHalPtr(&hal_in);
         link = std::make_unique<Link>(*hal, arqCache_, isMasterNode, cfg);
     }
 #endif
 
     void begin() {
+        // Order matters: bring up the link
+        // layer first (state init, dwell
+        // compute, ARQ cache reset) and then
+        // the HAL (UART install, event task,
+        // timer). The pre-refactor flow had
+        // hal->begin() call link->begin()
+        // through the HAL's back-pointer;
+        // the ILinkEvents split removed that
+        // path so the facade owns the order.
+        link->begin();
 #ifdef ARDUINO
         hal->begin();
-#else
-        link->begin();
 #endif
     }
 
