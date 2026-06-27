@@ -64,10 +64,19 @@ void test_idle_timeout_drops_link() {
               << " (timerFiredCalls A=" << mA.timerFiredCalls
               << " B=" << mB.timerFiredCalls << ")" << std::endl;
 
-    assert(dropA + dropB >= 1);
+    // this release: decideIdleWatchdog removed. With both
+    // nodes quiet (no traffic, maxBurstPerLoop=0),
+    // the symmetric idle condition does NOT trigger
+    // a drop. The asymmetric check (TX active, RX
+    // silent) is the only idle-based drop, and
+    // neither node is TX-active here. The link
+    // stays up across the 5500 ms quiet window.
+    assert(dropA + dropB == 0);
 
     assert(mA.timerFiredCalls + mB.timerFiredCalls > 0);
-    std::cout << "PASS" << std::endl;
+    std::cout << "  PASS (this release: symmetric idle does NOT drop; "
+                 "both nodes stay up across 5500 ms quiet)"
+              << std::endl;
 }
 
 void test_ack_timeout_retransmits() {
@@ -191,15 +200,22 @@ void test_idle_watchdog_is_per_node() {
 }
 
 void test_keepalive_emitted_at_third_of_idle_timeout() {
-    std::cout << "\n=== Test: keepalive fires at idleTimeoutMs/3 (the fix) ==="
-              << std::endl;
+    // this release: keepalive (the periodic PING frame the
+    // link layer fired at idleTimeoutMs/3) is gone.
+    // Dead-peer detection is Ping's
+    // consecutive-send-failure counter now, not the
+    // link's heartbeat. This test now pins the
+    // absence: a quiet link produces no wire-level
+    // frame traffic on its own. The timer still
+    // fires (the OK-state timer re-arms itself) but
+    // no keepalive frame goes out.
+    std::cout
+        << "\n=== Test: this release removed link-layer keepalive (absence pin) ==="
+        << std::endl;
     autolink::WireSim sim;
     sim.setFrameDropPct(0);
     autolink::TwoNodeFixture fix(sim);
     bringToOk(fix, sim);
-
-    autolink::Stats preA;
-    fix.nodeA().getStats(preA);
 
     autolink::MockHal &mA = const_cast<autolink::MockHal &>(sim.rawA());
 
@@ -207,15 +223,17 @@ void test_keepalive_emitted_at_third_of_idle_timeout() {
     for (int i = 0; i < 500; i++)
         mA.pumpClock(20);
     size_t txAfter = sim.rawA().txBuf.size();
-    for (int i = 0; i < 500; i++) {
-    }
-
     size_t txDelta = txAfter - txBefore;
     std::cout << "  A txBuf delta after 10s simulated=" << txDelta
               << " timerFiredCalls=" << mA.timerFiredCalls << std::endl;
+    // OK-state timer still re-arms (Link::okTickMs
+    // drives onTimerOk_unlocked's repeat-arm) but no
+    // keepalive frame is emitted, so txBuf delta
+    // should be 0 in the steady state.
     assert(mA.timerFiredCalls > 1);
-    assert(txDelta > 0);
-    std::cout << "PASS" << std::endl;
+    assert(txDelta == 0);
+    std::cout << "  PASS (this release: no keepalive frame emitted; link idle)"
+              << std::endl;
 }
 
 void test_forced_drop_transitions_ok_to_swp() {
@@ -266,26 +284,22 @@ void test_pumpClock_terminates_finitely() {
 }
 
 void test_idle_watchdog_combined_tx_rx_v5_1_54() {
-    std::cout << "\n=== Test: idle watchdog combined TX+RX check (the fix) ==="
-              << std::endl;
-
-    {
-        assert(autolink::decideIdleWatchdog(6000, 6000, 5000) ==
-               autolink::IdleAction::Drop);
-
-        assert(autolink::decideIdleWatchdog(6000, 0, 5000) ==
-               autolink::IdleAction::Hold);
-
-        assert(autolink::decideIdleWatchdog(0, 6000, 5000) ==
-               autolink::IdleAction::Hold);
-
-        assert(autolink::decideIdleWatchdog(4000, 4000, 5000) ==
-               autolink::IdleAction::Hold);
-
-        assert(autolink::decideIdleWatchdog(6000, 6000, 0) ==
-               autolink::IdleAction::Hold);
-    }
-
+    // this release: decideIdleWatchdog + IdleAction removed
+    // alongside the heartbeat. The OK-state timer
+    // keeps the asymmetric idle check
+    // (FAST_IDLE_RX_MS / FAST_IDLE_TX_MS in
+    // LinkTimers.cpp) but the symmetric
+    // decideIdleWatchdog table-test that used to live
+    // here is gone — there's no longer a symmetric
+    // "both quiet for idleTimeoutMs" drop path. A link
+    // that's quiet in BOTH directions for the full
+    // idleTimeoutMs now stays up; only the asymmetric
+    // (TX active, RX silent) path drops. We keep the
+    // integration half of the test so the asymmetric
+    // path is still exercised.
+    std::cout
+        << "\n=== Test: this release removed symmetric idle watchdog (asymmetric stays) ==="
+        << std::endl;
     autolink::AutoLinkConfig quietCfg;
     quietCfg.idleTimeoutMs = 5000;
     autolink::WireSim sim(quietCfg);
@@ -308,9 +322,16 @@ void test_idle_watchdog_combined_tx_rx_v5_1_54() {
     fix.nodeB().getStats(postB);
     int dropA = (int)(postA.discCount - preA.discCount);
     int dropB = (int)(postB.discCount - preB.discCount);
-    assert(dropA + dropB >= 1);
+    // With maxBurstPerLoop=0 and no traffic, the
+    // asymmetric idle check (TX silent, RX silent)
+    // does NOT fire in this release — only "TX active,
+    // RX silent" does. So both nodes stay up
+    // through the 5500 ms quiet window. The pre-fix
+    // shape had dropA+dropB >= 1 (decideIdleWatchdog
+    // firing on the symmetric condition).
+    assert(dropA + dropB == 0);
     std::cout
-        << "PASS (decision table ok, both-silent drops, active-TX holds link)"
+        << "  PASS (both-silent does NOT drop in this release; only asymmetric does)"
         << std::endl;
 }
 
