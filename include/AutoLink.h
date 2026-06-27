@@ -32,7 +32,7 @@ struct EspHal;
 #endif
 
 namespace autolink {
-#define AUTOLINK_VERSION "5.4.0"
+#define AUTOLINK_VERSION "5.4.2"
 
 class AutoLinkTestAccessor;
 
@@ -222,6 +222,12 @@ public:
     AutoLinkConfig::Mode mode() const {
         return link ? link->mode() : AutoLinkConfig::Mode::SYNC;
     }
+
+    // Configured max message size. Forwarded to
+    // Link; falls back to the AutoLinkConfig default
+    // before the facade is constructed so callers
+    // like Ping can read it from any state.
+    size_t maxMsg() const { return link ? link->maxMsg() : (size_t)1024; }
 
     void setTxDelayMs(int ms) {
         if (link)
