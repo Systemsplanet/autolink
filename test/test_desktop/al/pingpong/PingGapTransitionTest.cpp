@@ -51,33 +51,39 @@ struct Row {
 
 const Row rows[] = {
     // From NO_GAP, no NAK → Stay (no entry).
-    { "no-gap / no-nak",                  PING_GAP_NO_GAP, PING_GAP_NO_GAP, PING_GAP_NO_GAP, GapAction::Stay,   PING_GAP_NO_GAP },
+    { "no-gap / no-nak", PING_GAP_NO_GAP, PING_GAP_NO_GAP, PING_GAP_NO_GAP,
+      GapAction::Stay, PING_GAP_NO_GAP },
     // From NO_GAP, NAK for seq 5 with lastAck = 3 (predates gap)
     // → Enter gap-stop on seq 5.
-    { "no-gap / nak 5 / ack 3 (entry)",   PING_GAP_NO_GAP, 5,               3,               GapAction::Enter,   5 },
+    { "no-gap / nak 5 / ack 3 (entry)", PING_GAP_NO_GAP, 5, 3, GapAction::Enter,
+      5 },
     // From NO_GAP, NAK for seq 5 with lastAck = 5 (already ACKed before
     // the NAK — the ACK predates the gap) → Stay, do not enter.
-    { "no-gap / nak 5 / ack 5 (predates)",PING_GAP_NO_GAP, 5,               5,               GapAction::Stay,   PING_GAP_NO_GAP },
+    { "no-gap / nak 5 / ack 5 (predates)", PING_GAP_NO_GAP, 5, 5,
+      GapAction::Stay, PING_GAP_NO_GAP },
     // From NO_GAP, NAK for seq 0xFF sentinel → Stay (no NAK).
-    { "no-gap / nak 0xFF (sentinel)",     PING_GAP_NO_GAP, 0xFF,            0,               GapAction::Stay,   PING_GAP_NO_GAP },
+    { "no-gap / nak 0xFF (sentinel)", PING_GAP_NO_GAP, 0xFF, 0, GapAction::Stay,
+      PING_GAP_NO_GAP },
     // In gap-stop on seq 5, fresh NAK for seq 7 → Update to 7.
-    { "gap 5 / nak 7 (new gap)",          5,               7,               3,               GapAction::Update,  7 },
+    { "gap 5 / nak 7 (new gap)", 5, 7, 3, GapAction::Update, 7 },
     // In gap-stop on seq 5, same NAK for seq 5 → Stay on 5.
-    { "gap 5 / nak 5 (same gap)",         5,               5,               3,               GapAction::Stay,   5 },
+    { "gap 5 / nak 5 (same gap)", 5, 5, 3, GapAction::Stay, 5 },
     // In gap-stop on seq 5, lastAck = 5 → Resume to NO_GAP.
-    { "gap 5 / ack 5 (resume)",           5,               5,               5,               GapAction::Resume, PING_GAP_NO_GAP },
+    { "gap 5 / ack 5 (resume)", 5, 5, 5, GapAction::Resume, PING_GAP_NO_GAP },
     // In gap-stop on seq 5, lastAck = 3 (still missing) → Stay.
-    { "gap 5 / ack 3 (still missing)",    5,               5,               3,               GapAction::Stay,   5 },
+    { "gap 5 / ack 3 (still missing)", 5, 5, 3, GapAction::Stay, 5 },
     // In gap-stop on seq 5, fresh NAK = 7 AND lastAck = 7 (the new gap
     // was already ACKed before we noticed) → Update to 7.
-    { "gap 5 / nak 7 / ack 7",            5,               7,               7,               GapAction::Update,  7 },
+    { "gap 5 / nak 7 / ack 7", 5, 7, 7, GapAction::Update, 7 },
     // In gap-stop on seq 5, NAK = 0xFF (no NAK), lastAck = 5 → Resume.
-    { "gap 5 / nak 0xFF / ack 5",         5,               0xFF,            5,               GapAction::Resume, PING_GAP_NO_GAP },
+    { "gap 5 / nak 0xFF / ack 5", 5, 0xFF, 5, GapAction::Resume,
+      PING_GAP_NO_GAP },
     // In gap-stop on seq 0 (edge of seq space), resume on lastAck=0.
-    { "gap 0 / ack 0 (resume)",           0,               0,               0,               GapAction::Resume, PING_GAP_NO_GAP },
+    { "gap 0 / ack 0 (resume)", 0, 0, 0, GapAction::Resume, PING_GAP_NO_GAP },
     // COBS_SEQ_MAX is 0xFE (the last valid seq); 0xFF is the sentinel.
     // In gap-stop on seq 0xFE, lastAck = 0xFE → Resume.
-    { "gap 0xFE / ack 0xFE (resume)",     0xFE,            0xFE,            0xFE,            GapAction::Resume, PING_GAP_NO_GAP },
+    { "gap 0xFE / ack 0xFE (resume)", 0xFE, 0xFE, 0xFE, GapAction::Resume,
+      PING_GAP_NO_GAP },
 };
 
 } // namespace
@@ -87,12 +93,11 @@ void test_transition_table() {
               << std::endl;
     for (const auto &r : rows) {
         uint8_t next = 0;
-        GapAction a = decideGapTransition(r.currentGap, r.lastNak, r.lastAck,
-                                         next);
+        GapAction a =
+            decideGapTransition(r.currentGap, r.lastNak, r.lastAck, next);
         std::cout << "  " << r.name << " currentGap=" << (int)r.currentGap
                   << " lastNak=" << (int)r.lastNak
-                  << " lastAck=" << (int)r.lastAck
-                  << " -> action=" << (int)a
+                  << " lastAck=" << (int)r.lastAck << " -> action=" << (int)a
                   << " nextGap=" << (int)next;
         assert(a == r.expectedAction);
         assert(next == r.expectedNextGap);
@@ -117,9 +122,8 @@ void test_transition_table() {
 // the action enum conflates them. Branching on
 // gapSeq_ != NO_GAP keeps them separate.
 void test_runtime_send_pause_on_nak() {
-    std::cout
-        << "\n=== Test: runtime — send loop pauses on peer NAK ==="
-        << std::endl;
+    std::cout << "\n=== Test: runtime — send loop pauses on peer NAK ==="
+              << std::endl;
     uint8_t gap = PING_GAP_NO_GAP;
     int sendsThisLoop = 0;
     int pauseIterations = 0;
@@ -140,8 +144,9 @@ void test_runtime_send_pause_on_nak() {
         sendsThisLoop = (gap != PING_GAP_NO_GAP) ? 0 : 1;
         assert(sendsThisLoop == 1);
         assert(gap == PING_GAP_NO_GAP);
-        std::cout << "  loop 1: no NAK -> gapSeq stays NO_GAP, sends proceed \u2713"
-                  << std::endl;
+        std::cout
+            << "  loop 1: no NAK -> gapSeq stays NO_GAP, sends proceed \u2713"
+            << std::endl;
     }
 
     // Loop 2: peer NAK for seq 5 with lastAck=3.
@@ -288,17 +293,16 @@ void test_caller_sends_in_no_gap_steady_state() {
     int suppressed = 0;
     for (int i = 0; i < 5; ++i) {
         uint8_t next = gap;
-        GapAction a = decideGapTransition(gap, PING_GAP_NO_GAP,
-                                          PING_GAP_NO_GAP, next);
+        GapAction a =
+            decideGapTransition(gap, PING_GAP_NO_GAP, PING_GAP_NO_GAP, next);
         gap = next;
         // Apply the FIXED gate (the one we just
         // verified is in the source).
         bool fixedSuppressed = (gap != PING_GAP_NO_GAP);
         // Apply the buggy gate (the regression
         // shape) for cross-check.
-        bool buggySuppressed =
-            (a == GapAction::Stay || a == GapAction::Enter ||
-             a == GapAction::Update);
+        bool buggySuppressed = (a == GapAction::Stay || a == GapAction::Enter ||
+                                a == GapAction::Update);
         if (fixedSuppressed)
             suppressed++;
         else
@@ -337,8 +341,7 @@ void test_caller_sends_in_no_gap_steady_state() {
 // with no prior ACK for that seq drives
 // gapSeq_ from NO_GAP into a paused state.
 void test_link_layer_nak_signal() {
-    std::cout << "\n=== Test: Link::onNak stamps lastNakSeq() ==="
-              << std::endl;
+    std::cout << "\n=== Test: Link::onNak stamps lastNakSeq() ===" << std::endl;
     MockHal hal;
     NullArqCache cache;
     AutoLinkConfig cfg;
@@ -383,8 +386,7 @@ void test_link_layer_nak_signal() {
     a = decideGapTransition(seq + 1, acc.lastNakSeq(), seq + 1, next);
     assert(a == GapAction::Resume);
     assert(next == PING_GAP_NO_GAP);
-    std::cout << "  Resume path: ACK(seq+1) lifts gap-stop \u2713"
-              << std::endl;
+    std::cout << "  Resume path: ACK(seq+1) lifts gap-stop \u2713" << std::endl;
 
     std::cout << "  PASS (signal side wired to gap-stop entry/update/resume)"
               << std::endl;
@@ -461,14 +463,15 @@ void test_unconditional_read_pin() {
         body = pingSrc.substr(pos, end - pos);
         assert(body.find(bugShape) == std::string::npos);
     }
-    std::cout << "  suppression gate is not action-enum-based \u2713" << std::endl;
+    std::cout << "  suppression gate is not action-enum-based \u2713"
+              << std::endl;
     // And: the suppression gate IS gapSeq_-based.
     assert(pingSrc.find("if (gapSeq_ != NO_GAP)") != std::string::npos);
-    std::cout << "  suppression gate branches on `if (gapSeq_ != NO_GAP)` \u2713"
-              << std::endl;
     std::cout
-        << "  PASS (send-suppression keyed off gapSeq_, not GapAction)"
+        << "  suppression gate branches on `if (gapSeq_ != NO_GAP)` \u2713"
         << std::endl;
+    std::cout << "  PASS (send-suppression keyed off gapSeq_, not GapAction)"
+              << std::endl;
 }
 
 int main() {
