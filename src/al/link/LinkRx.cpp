@@ -283,11 +283,10 @@ bool Link::onPayload(uint8_t cobsSeq, const uint8_t *b, int n) {
         // restamps sentAtMs_ (see LinkArq::onNaked), and
         // the sender's retransmit loop brings this chunk
         // back once the app buffer has room.
-        Log::log().warning(
-            TAG,
-            "seq=%u app buf full "
-            "(want %d got %d) — sending NAK",
-            (unsigned)cobsSeq, n, acc);
+        Log::log().warning(TAG,
+                           "seq=%u app buf full "
+                           "(want %d got %d) — sending NAK",
+                           (unsigned)cobsSeq, n, acc);
         sendNakFrame_unlocked(cobsSeq);
         return false;
     }
