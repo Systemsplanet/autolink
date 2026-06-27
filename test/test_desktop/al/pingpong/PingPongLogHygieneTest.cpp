@@ -205,28 +205,29 @@ void test_ping_drains_rx_after_clearQueue() {
     assert(flushPos != std::string::npos);
     assert(flushPos > clearPos);
 
-    // Pin 2b: same drain in matchEcho_
+    // Pin 2b: same drain in the per-recv
     // mismatch path. Without it the
     // local pending table clears but
     // the appBuf still holds the bytes
     // that produced the mismatch, and
     // the next recv() reads them as a
     // fresh (mismatching) frame.
-    std::string matchBody = extractFnBody(src, "void matchEcho_");
-    assert(!matchBody.empty());
-    auto mismatchPos = matchBody.find("mismatchCount_++");
-    assert(mismatchPos != std::string::npos);
-    // Search the mismatch else-branch
-    // forward from mismatchCount_++.
-    // The clearQueue_ + flushRx pair
-    // must both appear after the
-    // counter increment in the same
-    // else arm.
-    auto mClearPos = matchBody.find("clearQueue_()", mismatchPos);
-    auto mFlushPos = matchBody.find("base_.comm_.flushRx()", mismatchPos);
-    assert(mClearPos != std::string::npos);
-    assert(mFlushPos != std::string::npos);
-    assert(mFlushPos > mClearPos);
+    //
+    // this release: matchEcho_ is gone. Pong
+    // does NOT echo the payload back;
+    // the wire-level ACK is the only
+    // Pong-side response. The mismatch
+    // path is no longer in matchEcho_
+    // but in the got<0 branch (CRC /
+    // desync) and the isAcked-driven
+    // drain in loop(). The "got<0 +
+    // clearQueue + flushRx" pin above
+    // already covers the per-recv drain.
+    // We additionally pin the absence
+    // of matchEcho_ — if a future
+    // change re-adds the echo path,
+    // the absence pin trips red.
+    assert(src.find("void matchEcho_") == std::string::npos);
 
     // Pin 2c: the pre-fix "NO flushRx,
     // NO BREAK" comment prose was
@@ -235,12 +236,18 @@ void test_ping_drains_rx_after_clearQueue() {
     // test fails loudly.
     assert(src.find("NO flushRx, NO BREAK") == std::string::npos);
 
-    std::cout << "  PASS (got<0 + mismatch both drain rx via flushRx after "
-                 "clearQueue_)\n";
+    std::cout << "  PASS (got<0 + drain rx via flushRx after clearQueue_; "
+                 "matchEcho_ removed in this release)\n";
 }
 
 void test_pong_send_failed_demoted_to_warning() {
-    std::cout << "\n=== Pong 'send failed' demoted to warning + benign text ==="
+    // this release: Pong no longer echoes the payload back
+    // and therefore has no per-recv send-failure
+    // branch. The whole pin set from 5.3.x is gone
+    // (Pong's loop now only reads). This test now
+    // pins the absence of the pre-fix send path so a
+    // future re-introduction is intentional.
+    std::cout << "\n=== Pong this release: no payload echo (send path gone) ==="
               << std::endl;
     std::string root = projectRoot();
     std::string src = readFile(root + "/src/al/pingpong/Pong.h");
@@ -249,35 +256,20 @@ void test_pong_send_failed_demoted_to_warning() {
     std::string body = extractFnBody(src, "void loop()");
     assert(!body.empty());
 
-    // Pin 3a: the send-failure branch
-    // must call log_.warning(...), not
-    // log_.error(...). The error level
-    // was firing on every echo during
-    // the pre-ready / pause window when
-    // the link legitimately isn't up
-    // yet — that's expected, not a
-    // fault.
-    auto sendPos = body.find("send skipped");
-    assert(sendPos != std::string::npos);
-    // Walk back to find the enclosing
-    // log_. call.
-    auto logPos = body.rfind("log_.", sendPos);
-    assert(logPos != std::string::npos);
-    assert(body.substr(logPos, 16).find("warning") != std::string::npos);
-
-    // Pin 3b: the text must NOT be the
-    // pre-fix "SEND FAILED (link
-    // dropped)" — that message implies
-    // a fault that didn't actually
-    // happen (the link just wasn't
-    // ready). The replacement text
-    // explicitly says "send skipped"
-    // + "(link not ready)".
+    // Pre-fix Pong called base_.comm_.send(...) to
+    // echo the received payload back. this release drops
+    // that path; the wire-level ACK (extended with
+    // bytes-recvd in LinkTx::sendAckFrame_unlocked)
+    // is the entire Pong-side response. Pin the
+    // absence of the echo call site.
     assert(src.find("SEND FAILED (link dropped)") == std::string::npos);
-    assert(src.find("send skipped (link not ready)") != std::string::npos);
-
-    std::cout << "  PASS (Pong send-failed → warning, 'send skipped (link not "
-                 "ready)')\n";
+    assert(src.find("send skipped (link not ready)") == std::string::npos);
+    // The diagnostic ack log line in Pong's loop is
+    // now "echo <seq> <bytes>" (crc=ok implicit).
+    // Pin that the new shape is what's emitted.
+    assert(src.find("echo %u %d") != std::string::npos);
+    std::cout << "  PASS (Pong is ack-only; no echo path; "
+                 "'echo <seq> <bytes>' diagnostic)\n";
 }
 
 void test_link_wiring_spam_ratelimits() {
