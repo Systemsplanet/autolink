@@ -12,7 +12,9 @@ See `docs/Version.md` for the version history and per-release notes.
 
 ## Quick Start: Ping / Pong
 
-The classic use case: two boards bouncing **random-sized messages** back and forth, **logging throughput**, and **self-recovering** from any disruption — with almost no application code. The link's sweep/recovery is automatic; the app just gates on `State::OK`. The `Ping` example pipelines sends and verifies every echo (length + CRC-16) against what it sent, logging a `MISMATCH` the moment a byte goes wrong — the easiest possible end-to-end smoke test.
+The classic use case: two boards bouncing messages back and forth, **logging throughput**, and **self-recovering** from any disruption — with almost no application code. The link's sweep/recovery is automatic; the app just gates on `State::OK`. The `Ping` example pipelines sends and reads the receiver's per-chunk ACK (carrying bytes-recvd) back, logging a `MISMATCH` the moment a byte goes wrong — the easiest possible end-to-end smoke test.
+
+Sequential mode grows each message from 1 byte up to `cfg.maxMsg` and wraps back to 1 (operators see the message size grow monotonically through the link's MTU). Random mode picks a random size in `[1024, maxMsg]` with random data, forcing multi-chunk sends in steady state so the ARQ chunk path is exercised end-to-end. The default per-transmit delay is 100 ms (configurable via the dashboard's delay-ms widget or `cfg.txDelayMs`).
 
 The two sketches live in `examples/PingPong/` as `Ping.ino` (ping) and `Pong.ino` (pong). Cross-wire the two boards (`Ping TX(GPIO17) → Pong RX(GPIO16)` and `Ping RX(GPIO16) ← Pong TX(GPIO17)`, shared GND).
 
