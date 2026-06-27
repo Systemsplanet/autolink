@@ -64,9 +64,8 @@ std::string projectRoot() {
 // Without this the operator has to re-flash to
 // change mode.
 void test_dashboard_has_link_mode_radios() {
-    std::cout
-        << "\n=== Pin 1: dashboard has SYNC + ASYNC link-mode radios ==="
-        << std::endl;
+    std::cout << "\n=== Pin 1: dashboard has SYNC + ASYNC link-mode radios ==="
+              << std::endl;
     std::string root = projectRoot();
     std::string src = readFile(root + "/src/al/web/AutoLinkWebHtml.h");
     assert(!src.empty());
@@ -210,10 +209,10 @@ void test_handle_mode_applies_live_no_reboot() {
         << "\n=== Pin 5: handleMode applies mode live (no esp_restart) ==="
         << std::endl;
     std::string root = projectRoot();
-    std::string src =
-        readFile(root + "/src/al/web/AutoLinkWebHandlers.cpp");
+    std::string src = readFile(root + "/src/al/web/AutoLinkWebHandlers.cpp");
     assert(!src.empty());
-    auto fnPos = src.find("esp_err_t AutoLinkWeb::handleMode(httpd_req_t *req)");
+    auto fnPos =
+        src.find("esp_err_t AutoLinkWeb::handleMode(httpd_req_t *req)");
     assert(fnPos != std::string::npos);
     auto brace = src.find('{', fnPos);
     assert(brace != std::string::npos);
@@ -246,10 +245,9 @@ void test_handle_mode_applies_live_no_reboot() {
     // The body must accept ?m=SYNC and ?m=ASYNC.
     assert(body.find("\"SYNC\"") != std::string::npos);
     assert(body.find("\"ASYNC\"") != std::string::npos);
-    std::cout
-        << "  PASS (link_.setMode + NVS persist; no esp_restart; "
-           "SYNC/ASYNC accepted)"
-        << std::endl;
+    std::cout << "  PASS (link_.setMode + NVS persist; no esp_restart; "
+                 "SYNC/ASYNC accepted)"
+              << std::endl;
 }
 
 // Pin 6: bringUpLink reads the persisted mode from
