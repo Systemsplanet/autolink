@@ -148,15 +148,16 @@ bool Link::processCtrlFrame_unlocked(State cur) {
     uint8_t cs = rxBuf[CTRL_FRAME_SEQ_IDX];
     uint8_t pl = rxBuf[CTRL_FRAME_PAYLOAD_IDX];
     if (cur == State::OK) {
-        // Heartbeat / link-poll. PING →
-        // pong immediately so the peer's
-        // heartbeat-miss counter stays
-        // reset; PONG → clear our own
-        // miss counter.
+        // Heartbeat removed in this release. The OK-state
+        // PING/PONG handling stays as a wire-level
+        // "I heard you" reply so a peer still running
+        // the legacy heartbeat probe sees a PONG back,
+        // but no peer-miss bookkeeping is kept. The
+        // PING_CMD / PONG_CMD constants stay in
+        // LinkContext.h because SWP-state code still
+        // sends PING/PONG during the sweep phases.
         if (pl == PING_CMD)
             sendPongAck_unlocked();
-        else if (pl == PONG_CMD)
-            heartbeatPingsMissed_ = 0;
         return false;
     }
     return ctrlFrameReady_unlocked(cs, pl, cur);
@@ -173,6 +174,11 @@ bool Link::ctrlFrameReady_unlocked(uint8_t cs, uint8_t pl, State cur) {
 bool Link::onPayload(uint8_t cobsSeq, const uint8_t *b, int n) {
     if (state != State::OK)
         return true;
+    // Stamp the seq of the most recently received data
+    // frame so Pong's diagnostic ack log can name the
+    // seq without forcing Pong to expose Link::onPayload
+    // directly. Cleared in reset_unlocked.
+    lastRxSeq_ = cobsSeq;
     // Drop expired reorder slots before
     // classifying this frame. lostMsgs is
     // incremented here, on the per-slot
@@ -266,26 +272,41 @@ bool Link::onPayload(uint8_t cobsSeq, const uint8_t *b, int n) {
     int acc = hw.pushAppBuf(b, n);
     rxBytes += acc;
     if (decideAppBuf(acc, n) == AppBufAction::HoldAck) {
-        Log::log().info(TAG,
-                        "seq=%u app buf full "
-                        "(want %d got %d)",
-                        (unsigned)cobsSeq, n, acc);
-        return true;
+        // App buffer is full (peer is sending faster than
+        // the app can drain). The pre-fix code logged and
+        // returned true, which signaled feed() to drop the
+        // rest of the byte stream with no wire-side
+        // indication — the sender kept re-issuing the same
+        // seq and the wire went quiet from the sender's
+        // point of view. Now we send a NAK so the sender
+        // knows the frame wasn't accepted, the ARQ timer
+        // restamps sentAtMs_ (see LinkArq::onNaked), and
+        // the sender's retransmit loop brings this chunk
+        // back once the app buffer has room.
+        Log::log().warning(
+            TAG,
+            "seq=%u app buf full "
+            "(want %d got %d) — sending NAK",
+            (unsigned)cobsSeq, n, acc);
+        sendNakFrame_unlocked(cobsSeq);
+        return false;
     }
-    sendAckFrame_unlocked(cobsSeq);
+    sendAckFrame_unlocked(cobsSeq, (uint16_t)n);
     reorder_.flushContiguous(*this, hw.nowMs());
     if (errs > 0)
         errs = 0;
     return false;
 }
 
-bool Link::onAck(uint8_t ackedCobsSeq) {
+bool Link::onAck(uint8_t ackedCobsSeq, uint16_t bytesRecvd) {
     if (state != State::OK)
         return false;
     if (!arq_.isPending(ackedCobsSeq))
         return false;
     arq_.onAcked(ackedCobsSeq);
     arqCache_.freeBySeq(ackedCobsSeq);
+    bytesRecvd_[ackedCobsSeq] = bytesRecvd;
+    lastAckSeq_ = ackedCobsSeq;
     return false;
 }
 
@@ -297,6 +318,7 @@ bool Link::onNak(uint8_t missingCobsSeq) {
     arq_.onNaked(missingCobsSeq, hw.nowMs());
     pendingRetxBase_ = missingCobsSeq;
     hasPendingRetx_ = true;
+    lastNakSeq_ = missingCobsSeq;
     return false;
 }
 
