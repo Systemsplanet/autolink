@@ -49,7 +49,7 @@ void Link::buildAndTxCobsFrame_unlocked(uint8_t seq, const uint8_t *b, int n) {
         memcpy(unenc + 1, b, n);
     unenc[1 + n] = UtilCrc::crc8(unenc, 1 + n);
     size_t rawLen = (size_t)(1 + n) + 1;
-    uint8_t frame[MAX_CHUNK + 6];
+    uint8_t frame[MAX_CHUNK + MSG_HDR];
     frame[0] = 0x00;
     size_t encLen = UtilCobs::encode(unenc, rawLen, frame + 1);
     frame[1 + encLen] = 0x00;
@@ -87,8 +87,36 @@ void Link::sendCtrlCobsFrame_unlocked(uint8_t type, uint8_t seq) {
     hw.tx(frame, (int)(el + 2));
 }
 
-void Link::sendAckFrame_unlocked(uint8_t ackedCobsSeq) {
-    sendCtrlCobsFrame_unlocked(ACK_TYPE, ackedCobsSeq);
+void Link::sendAckFrame_unlocked(uint8_t ackedCobsSeq, uint16_t bytesRecvd) {
+    // 5-byte raw ACK frame:
+    //   [0xFF, seq, bytes_lo, bytes_hi, frame_crc8]
+    // frame_crc8 covers bytes 0..3. The receiver's
+    // onAck listener picks up bytesRecvd so Ping's
+    // "echo <seq> <bytes> <pending>" log line shows
+    // the actual payload length, not just the seq.
+    //
+    // Inline the encode rather than routing through
+    // sendCtrlCobsFrame_unlocked() because that
+    // helper produces a 3-byte payload and the new
+    // ACK is 5 bytes. The two encodings share the
+    // [type, seq, ..., crc8] structure but the body
+    // length and CRC coverage differ; a parameterized
+    // helper would need a payload-length + per-byte
+    // CRC table, which costs more on the hot path
+    // than the 6 extra bytes of frame-buffer code.
+    uint8_t u[5] = {
+        ACK_TYPE,
+        ackedCobsSeq,
+        (uint8_t)(bytesRecvd & 0xFF),
+        (uint8_t)((bytesRecvd >> 8) & 0xFF),
+        0
+    };
+    u[4] = UtilCrc::crc8(u, 4);
+    uint8_t frame[16];
+    frame[0] = 0x00;
+    size_t el = UtilCobs::encode(u, 5, frame + 1);
+    frame[1 + el] = 0x00;
+    hw.tx(frame, (int)(el + 2));
 }
 
 void Link::sendNakFrame_unlocked(uint8_t missingCobsSeq) {
