@@ -115,6 +115,7 @@ inline void portYIELD() {}
     "Print.h": "#pragma once\n#include <Arduino.h>\n",
     "Preferences.h": """#pragma once
 #include <Arduino.h>
+#include <WString.h>
 class Preferences { public:
   bool begin(const char *, bool = false) { return true; }
   void end() {}
