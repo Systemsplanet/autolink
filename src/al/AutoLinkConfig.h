@@ -32,15 +32,18 @@ constexpr int AUTOLINK_ARQ_PIPELINE_WINDOW = 32;
 struct AutoLinkConfig {
     uint32_t allowedBauds[AUTOLINK_MAX_BAUDS] = { 115200, 57600, 38400, 19200,
                                                   9600 };
-    // Allowed baud count is clamped at
-    // construction (AutoLink clamps via
-    // clampToMaxBauds()) and at every
-    // accessor (Link::allowedBaudsCount
-    // returns min(value, AUTOLINK_MAX_BAUDS))
-    // — the field stays public so existing
-    // sketches can keep setting it
-    // directly, but out-of-range values
-    // cannot reach the array indexing path.
+    // Allowed baud count is clamped at the
+    // choke-point accessors in Link (see
+    // Link::allowedBaudsCount() and
+    // Link::allowedBaud(i)) — every read
+    // goes through those, so a post-
+    // construction write to this public
+    // field with an out-of-range value
+    // (e.g. 20) cannot drive spdI into an
+    // OOB read of allowedBauds[]. The field
+    // stays public so existing sketches can
+    // keep setting it directly; the choke
+    // points do the bounding.
     int allowedBaudsCount = 5;
 
     // In-place clamp. AutoLink calls this
@@ -56,6 +59,21 @@ struct AutoLinkConfig {
             allowedBaudsCount = 0;
         if (allowedBaudsCount > AUTOLINK_MAX_BAUDS)
             allowedBaudsCount = AUTOLINK_MAX_BAUDS;
+        return allowedBaudsCount;
+    }
+
+    // Const clamp. Returns the clamped value
+    // without mutating the field. The link
+    // layer's per-call read paths use this
+    // (cfg is stored by value in Link but the
+    // field stays mutable, so a const this is
+    // mostly useful when the cfg is `const
+    // AutoLinkConfig &` at a call site — the
+    // ctor of Link has that signature).
+    int clampedCount() const {
+        if (allowedBaudsCount < 0) return 0;
+        if (allowedBaudsCount > AUTOLINK_MAX_BAUDS)
+            return AUTOLINK_MAX_BAUDS;
         return allowedBaudsCount;
     }
 
@@ -142,7 +160,20 @@ struct AutoLinkConfig {
     // txDelayMs only adds idle time when
     // the wire is fast enough to clear
     // the ACK before the delay expires.
-    int txDelayMs = 0;
+    //
+    // this release: default raised 0 -> 100 ms.
+    // The pre-this release default of 0 caused
+    // Ping to flood the wire at full
+    // link speed, which made ARQ-level
+    // retransmits harder to diagnose and
+    // starved the dashboard's /logs poll
+    // for entries. The 100 ms default
+    // gives the wire enough idle time
+    // for /stats + /logs to keep up at
+    // 5 bauds and makes gap-stop /
+    // dropLink-on-N paths visible in
+    // the log.
+    int txDelayMs = 100;
 };
 
 } // namespace autolink
