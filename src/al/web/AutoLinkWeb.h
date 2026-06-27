@@ -1,10 +1,18 @@
 // Arduino-only: WiFi STA, esp_http_server,
 // live dashboard. Core in AutoLinkWebCore.
 #pragma once
+
+// WebSnapshot / WebLogEntry are unconditional (no
+// Arduino-only types inside) so include the core
+// header outside the ARDUINO guard. This guarantees
+// the type aliases below resolve even on device
+// builds whose include path resolution is fussy
+// about nested quoted includes.
+#include "al/web/AutoLinkWebCore.h"
+
 #ifdef ARDUINO
 
 #    include "AutoLink.h"
-#    include "al/web/AutoLinkWebCore.h"
 #    include <WiFi.h>
 #    include "esp_http_server.h"
 #    include "esp_timer.h"
@@ -117,7 +125,7 @@ private:
     static esp_err_t handleReset(httpd_req_t *req);
     static esp_err_t handleLevel(httpd_req_t *req);
     static esp_err_t handleMode(httpd_req_t *req);
-    static esp_err_t handleModeToggle(httpd_req_t *req);
+    static esp_err_t handleFillMode(httpd_req_t *req);
     static esp_err_t handleMsgPause(httpd_req_t *req);
     static esp_err_t handleDelay(httpd_req_t *req);
     static esp_err_t handleReboot(httpd_req_t *req);
