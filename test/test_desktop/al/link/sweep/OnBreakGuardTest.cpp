@@ -52,7 +52,7 @@ static const int kNumBauds = (int)(sizeof(kBauds) / sizeof(kBauds[0]));
 // Pin 1: onBreak() in P1 must NOT hard-reset the
 // sweep. The pre-fix shape called reset_unlocked(true)
 // unconditionally, tearing down SWP state on every
-// spurious break (post-setSpd gltches in P1 →
+// spurious break (post-setSpd glitches in P1 →
 // pingSample resets → sweep restart → another
 // spurious break).
 static void test_onbreak_in_p1_is_noop() {
@@ -106,7 +106,7 @@ static void test_onbreak_in_p1_is_noop() {
 // Pin 2: onBreak() in P2 must NOT hard-reset the
 // sweep. This is the wire-cycle case: master
 // promotes to P2, slave promotes to P2, the baud
-// switch gltches a break, and the pre-fix code
+// switch glitches a break, and the pre-fix code
 // tore P2 down on every gltched break.
 static void test_onbreak_in_p2_is_noop() {
     std::cout
@@ -306,7 +306,7 @@ static void test_ping_setPaused_stamps_sweep_stall() {
               << std::endl;
     FILE *f = fopen("../../src/al/pingpong/Ping.h", "r");
     assert(f);
-    char buf[16384];
+    char buf[65536];
     size_t n = fread(buf, 1, sizeof(buf) - 1, f);
     buf[n] = 0;
     fclose(f);
