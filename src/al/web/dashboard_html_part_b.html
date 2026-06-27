@@ -18,16 +18,18 @@
       <option value="0">0</option>
       <option value="10">10</option>
       <option value="50">50</option>
-      <option value="100">100</option>
+      <option value="100" selected>100</option>
       <option value="500">500</option>
       <option value="1000">1000</option>
       <option value="5000">5000</option>
       <option value="10000">10000</option>
     </select>
   </div>
+  <div class="lvl-group ping-only" id="linkModeGroup" role="radiogroup" aria-label="Link mode" style="margin-right:8px">
+    <label><input type="radio" name="linkMode" value="SYNC" id="linkModeSync"><span>SYNC</span></label>
+    <label><input type="radio" name="linkMode" value="ASYNC" id="linkModeAsync"><span>ASYNC</span></label>
+  </div>
   <span class="pill swp" id="pill">SWP</span>
-  <span class="pill" id="linkModePill" style="background:#e0e7ff;color:#3730a3">SYNC</span>
-  <button class="btn" id="modeToggleBtn" onclick="toggleLinkMode()" title="Switch SYNC/ASYNC (reboots device)">&#8646; Toggle</button>
 </header>
 <main>
   <div class="alert" id="alert">Connection lost &#x2014; check power and WiFi</div>
