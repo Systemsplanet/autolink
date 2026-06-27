@@ -53,8 +53,7 @@ std::string projectRoot() {
     return ".";
 }
 
-std::string extractFnBody(const std::string &src,
-                           const std::string &name) {
+std::string extractFnBody(const std::string &src, const std::string &name) {
     auto start = src.find(name);
     if (start == std::string::npos)
         return "";
@@ -79,9 +78,8 @@ std::string extractFnBody(const std::string &src,
 // ACK; it must not call base_.comm_.send(...) with
 // the received bytes.
 void test_pong_no_payload_echo() {
-    std::cout
-        << "\n=== Pin 1: Pong loop has no payload-echo send ==="
-        << std::endl;
+    std::cout << "\n=== Pin 1: Pong loop has no payload-echo send ==="
+              << std::endl;
     std::string root = projectRoot();
     std::string src = readFile(root + "/src/al/pingpong/Pong.h");
     assert(!src.empty());
@@ -107,41 +105,88 @@ void test_pong_no_payload_echo() {
     // dropped)" prose is gone (no send path).
     assert(src.find("SEND FAILED (link dropped)") == std::string::npos);
     assert(src.find("send skipped (link not ready)") == std::string::npos);
-    std::cout
-        << "  PASS (Pong recv-only; 'echo <seq> <bytes>' diagnostic; "
-           "no payload-echo send)"
-        << std::endl;
+    std::cout << "  PASS (Pong recv-only; 'echo <seq> <bytes>' diagnostic; "
+                 "no payload-echo send)"
+              << std::endl;
 }
 
 // Pin 2: Ping's slot-completion log line uses the
 // new format "echo <seq> <bytes> <pending>". The
-// bytes value is read from Link::bytesRecvdFor(seq)
-// (the bytes-recvd from the peer's wire ACK).
+// bytes value is the message size from the local
+// slot (queue_[head_].len), NOT the per-frame ACK's
+// bytes-recvd — the ACK reports the merged-chunk
+// length the peer pushed into its app buffer
+// (6-byte MSG_HDR + first chunk payload for a
+// multi-chunk message), which is the chunk length,
+// not the user-visible message size.
 void test_ping_echo_log_format() {
     std::cout
-        << "\n=== Pin 2: Ping 'echo <seq> <bytes> <pending>' log format ==="
+        << "\n=== Pin 2: Ping 'echo <seq> <msgBytes> <pending>' log format"
         << std::endl;
     std::string root = projectRoot();
     std::string src = readFile(root + "/src/al/pingpong/Ping.h");
     assert(!src.empty());
 
-    // The format string must be the new 3-arg echo.
+    // The format string must be the 3-arg echo.
     assert(src.find("echo %u %u %d") != std::string::npos);
-    // bytesRecvdFor() is the source of the bytes.
-    assert(src.find("bytesRecvdFor(") != std::string::npos);
-    std::cout
-        << "  PASS ('echo %u %u %d' format; bytesRecvdFor() lookup)"
-        << std::endl;
+    // The bytes value is queue_[head_].len, NOT
+    // bytesRecvdFor() — that was the bug. Pin both
+    // that the slot's len is read and that
+    // bytesRecvdFor() is NOT used in the echo log
+    // path. The link layer still exposes
+    // bytesRecvdFor() for other consumers; this pin
+    // is scoped to the echo log line's bytes source.
+    std::string body = extractFnBody(src, "void loop()");
+    assert(!body.empty());
+    assert(body.find("queue_[head_].len") != std::string::npos);
+    // Extract the slot-completion branches (each
+    // calls base_.log_.debug("Ping", "echo %u %u %d",
+    // ...)). The bytes arg must be queue_[head_].len
+    // in both, and bytesRecvdFor(...) must NOT
+    // appear as the bytes arg in either. We do this
+    // by checking the substring between the echo
+    // format string and the head_++ advance.
+    size_t searchFrom = 0;
+    int echoSites = 0;
+    int lenSites = 0;
+    while (true) {
+        auto fmtPos = body.find("echo %u %u %d", searchFrom);
+        if (fmtPos == std::string::npos)
+            break;
+        echoSites++;
+        // Read the 200 chars after the format string —
+        // the next args are the three %u values, ending
+        // at the call's closing paren.
+        std::string tail = body.substr(fmtPos, 400);
+        auto headAdvance = tail.find("head_ = (head_ + 1)");
+        assert(headAdvance != std::string::npos);
+        std::string echoCall = tail.substr(0, headAdvance);
+        // The bytes arg (second %u) must be the local
+        // slot's len, not a bytesRecvdFor() lookup.
+        assert(echoCall.find("queue_[head_].len") != std::string::npos);
+        // No bytesRecvdFor() call inside the echo log
+        // call (the bytes must come from local state).
+        assert(echoCall.find("bytesRecvdFor(") == std::string::npos);
+        lenSites++;
+        searchFrom = fmtPos + 1;
+    }
+    // Two echo sites: the gap-stop branch and the
+    // main loop's tail queue drain. Both must use
+    // the local slot's len.
+    assert(echoSites == 2);
+    assert(lenSites == 2);
+    std::cout << "  PASS (2 echo sites; both read queue_[head_].len; "
+                 "no bytesRecvdFor() in the echo log path)"
+              << std::endl;
 }
 
 // Pin 3: consecSendFail_ counter drives dropLink
 // + clearQueue at MAX_SEND_FAIL = 5. Pins the
 // escalation path.
 void test_ping_consec_send_fail_counter() {
-    std::cout
-        << "\n=== Pin 3: consecSendFail_ escalates to dropLink + "
-           "clearQueue_"
-        << std::endl;
+    std::cout << "\n=== Pin 3: consecSendFail_ escalates to dropLink + "
+                 "clearQueue_"
+              << std::endl;
     std::string root = projectRoot();
     std::string src = readFile(root + "/src/al/pingpong/Ping.h");
     assert(!src.empty());
@@ -156,8 +201,7 @@ void test_ping_consec_send_fail_counter() {
     std::string body = extractFnBody(src, "void loop()");
     assert(!body.empty());
     assert(body.find("consecSendFail_++") != std::string::npos);
-    assert(body.find("consecSendFail_ >= MAX_SEND_FAIL") !=
-           std::string::npos);
+    assert(body.find("consecSendFail_ >= MAX_SEND_FAIL") != std::string::npos);
     assert(body.find("base_.comm_.dropLink()") != std::string::npos);
     // A successful send must reset the counter.
     assert(body.find("consecSendFail_ = 0") != std::string::npos);
@@ -167,9 +211,13 @@ void test_ping_consec_send_fail_counter() {
 }
 
 // Pin 4: Sequential mode grows the message size
-// from 1 byte up to maxSeqSize_ (== cfg.maxMsg) and
-// wraps back to 1. Random mode picks a random size
-// in [RANDOM_MIN_BYTES=1024, maxSeqSize_].
+// from 1 byte up to maxSeqSize_ (== base.comm.maxMsg())
+// and wraps back to 1. Random mode picks a random
+// size in [RANDOM_MIN_BYTES=1, maxSeqSize_]. The
+// pre-fix values (RANDOM_MIN_BYTES=1024 and a
+// hard-coded maxSeqSize_=1024) collapsed the random
+// range to a single value (always 1024) and capped
+// sequential at 1024 regardless of cfg.maxMsg.
 void test_ping_msg_size_policy() {
     std::cout << "\n=== Pin 4: Ping msg-size policy (sequential + random) ==="
               << std::endl;
@@ -180,9 +228,15 @@ void test_ping_msg_size_policy() {
     // The size-picker is a private method pickMsgSize_
     // that branches on FillMode.
     assert(src.find("int pickMsgSize_(FillMode m)") != std::string::npos);
-    // RANDOM_MIN_BYTES = 1024 (random floor forces
-    // multi-chunk sends in steady state).
-    assert(src.find("RANDOM_MIN_BYTES = 1024") != std::string::npos);
+    // RANDOM_MIN_BYTES = 1 (1-byte floor; the
+    // pre-fix 1024 collapsed the range to one value).
+    assert(src.find("RANDOM_MIN_BYTES = 1") != std::string::npos);
+    // maxSeqSize_ is initialized from
+    // base_.comm_.maxMsg() in setup(), not hard-coded.
+    std::string setupBody = extractFnBody(src, "void setup()");
+    assert(!setupBody.empty());
+    assert(setupBody.find("maxSeqSize_ = (int)base_.comm_.maxMsg()") !=
+           std::string::npos);
     // Sequential advances seqSize_ 1 -> 2 -> ... ->
     // maxSeqSize_ -> 1 (wraps). The increment is in
     // the send-loop after a successful send.
@@ -190,7 +244,8 @@ void test_ping_msg_size_policy() {
     assert(!body.empty());
     assert(body.find("seqSize_++") != std::string::npos);
     assert(body.find("seqSize_ > maxSeqSize_") != std::string::npos);
-    std::cout << "  PASS (sequential 1..maxSeqSize_; random 1024..maxSeqSize_)"
+    std::cout << "  PASS (sequential 1..maxSeqSize_=comm.maxMsg(); "
+                 "random 1..maxSeqSize_)"
               << std::endl;
 }
 
@@ -199,10 +254,9 @@ void test_ping_msg_size_policy() {
 // is ACKed. The signal is Link::lastNakSeq() /
 // lastAckSeq().
 void test_ping_gap_stop_resume() {
-    std::cout
-        << "\n=== Pin 5: Ping gap-stop on peer-detected gap + "
-           "gap-resume on ACK"
-        << std::endl;
+    std::cout << "\n=== Pin 5: Ping gap-stop on peer-detected gap + "
+                 "gap-resume on ACK"
+              << std::endl;
     std::string root = projectRoot();
     std::string src = readFile(root + "/src/al/pingpong/Ping.h");
     assert(!src.empty());
@@ -222,10 +276,9 @@ void test_ping_gap_stop_resume() {
     // Pause log line.
     assert(body.find("gap stop: missing seq=") != std::string::npos);
     assert(body.find("gap resumed: seq=") != std::string::npos);
-    std::cout
-        << "  PASS (gapSeq_ + lastNakSeq()/lastAckSeq() + "
-           "pause/resume logs)"
-        << std::endl;
+    std::cout << "  PASS (gapSeq_ + lastNakSeq()/lastAckSeq() + "
+                 "pause/resume logs)"
+              << std::endl;
 }
 
 // Pin 6: pong-mismatch drain. The recv-rejected
@@ -235,10 +288,9 @@ void test_ping_gap_stop_resume() {
 // migration didn't accidentally drop the rx
 // drain).
 void test_ping_recv_rejected_drains_rx() {
-    std::cout
-        << "\n=== Pin 6: got<0 branch still drains rx via flushRx after "
-           "clearQueue_"
-        << std::endl;
+    std::cout << "\n=== Pin 6: got<0 branch still drains rx via flushRx after "
+                 "clearQueue_"
+              << std::endl;
     std::string root = projectRoot();
     std::string src = readFile(root + "/src/al/pingpong/Ping.h");
     assert(!src.empty());
@@ -269,9 +321,7 @@ void test_ping_recv_rejected_drains_rx() {
     assert(clearPos != std::string::npos);
     assert(flushPos != std::string::npos);
     assert(flushPos > clearPos);
-    std::cout
-        << "  PASS (got<0 + clearQueue_ + flushRx in order)"
-        << std::endl;
+    std::cout << "  PASS (got<0 + clearQueue_ + flushRx in order)" << std::endl;
 }
 
 } // namespace
