@@ -5,7 +5,7 @@ console.log('[autolink] starting up…');
 
 var logPaused=false,msgPaused=true,logFullOpen=false,lastSeq=0,fails=0,busy=false,currentLvl=null;
 var currentMode=null;
-var currentLinkMode='SYNC';
+var currentLinkMode=null;
 
 var deviceRole=null;
 
@@ -241,45 +241,47 @@ function applyMsgPauseLabel(){
   }
 }
 
-// SYNC/ASYNC link-mode toggle. Persisted to NVS on the device;
-// the firmware reboots on success. The dashboard reconciles the
-// pill from /stats once the device comes back.
-async function toggleLinkMode(){
-  var cur=(typeof currentLinkMode!=='undefined'&&currentLinkMode)?currentLinkMode:'SYNC';
-  var nxt=(cur==='SYNC')?'ASYNC':'SYNC';
-  if(!confirm('Switch link mode from '+cur+' to '+nxt+'? The device will reboot.'))return;
-  var b=document.getElementById('modeToggleBtn');
-  if(b){b.textContent='\u2026';b.disabled=true;}
-  console.log('[autolink] button: link mode toggle '+cur+' -> '+nxt+' (sending /mode/toggle)');
+// SYNC/ASYNC link-mode radio buttons. POST the new
+// mode to /mode?m=SYNC|ASYNC; the firmware applies
+// the change live (no reboot). /stats reconciles
+// the radio from linkModeLabel on the next poll.
+async function onLinkModeChange(val){
+  if(!val)return;
+  if(currentLinkMode===val){
+    console.log('[autolink] link mode: no change ('+val+')');
+    return;
+  }
+  var prev=currentLinkMode;
+  console.log('[autolink] button: link mode radio -> '+val+' (sending /mode?m='+val+')');
   try{
-    var r=await tfetch('/mode/toggle',{method:'POST'},5000);
+    var r=await tfetch('/mode?m='+encodeURIComponent(val),{method:'POST'},5000);
     if(r.ok){
       var body=await r.text();
-      console.log('[autolink] /mode/toggle ack: '+body);
-      clearLog();lastSeq=0;
-      show('alert');
-      var tries=0;
-      var iv=setInterval(async function(){
-        tries++;
-        try{
-          var rr=await tfetch('/stats',null,5000);
-          if(rr.ok){clearInterval(iv);console.log('[autolink] mode toggle: device back online after '+(tries+1)+' s, reloading');location.reload();}
-        }catch(_){}
-        if(tries>30){clearInterval(iv);console.warn('[autolink] mode toggle: device did not come back online within 30 s');}
-      },1000);
+      console.log('[autolink] /mode ack: '+body+' (was '+prev+', now '+val+')');
+      // The /stats poll will reconcile the radio via
+      // linkModeLabel; we optimistically update here so
+      // the user's click reflects immediately even if the
+      // next poll is delayed.
+      currentLinkMode=val;
+      highlightLinkMode();
     }else{
-      if(b){b.textContent='\u2717 Err';setTimeout(function(){b.textContent='\u21c6 Toggle';b.disabled=false;},1500);}
-      console.warn('[autolink] /mode/toggle returned '+r.status);
+      console.warn('[autolink] /mode returned '+r.status+' — reverting radio to '+prev);
+      // Revert the radio selection to the previous
+      // value so the UI reflects the actual link mode.
+      var inp=document.querySelector('input[name=linkMode][value="'+(prev||'SYNC')+'"]');
+      if(inp)inp.checked=true;
     }
   }catch(e){
-    if(b){b.textContent='\u2717 Err';setTimeout(function(){b.textContent='\u21c6 Toggle';b.disabled=false;},1500);}
-    console.warn('[autolink] /mode/toggle fetch failed: '+(e&&e.message?e.message:e));
+    console.warn('[autolink] /mode fetch failed: '+(e&&e.message?e.message:e)+' — reverting radio to '+prev);
+    var inp=document.querySelector('input[name=linkMode][value="'+(prev||'SYNC')+'"]');
+    if(inp)inp.checked=true;
   }
 }
-function applyLinkModeLabel(m){
-  var p=document.getElementById('linkModePill');
-  if(p){p.textContent=m;}
-  currentLinkMode=m;
+function highlightLinkMode(){
+  document.querySelectorAll('.lvl-group label').forEach(function(l){
+    var inp=l.querySelector('input');
+    if(inp&&inp.name==='linkMode')l.classList.toggle('on',inp.value===currentLinkMode);
+  });
 }
 
 // Cookie helpers: persist the last delay-ms
@@ -333,6 +335,7 @@ function bindLvlGroup(name){
 }
 bindLvlGroup('lvl');
 bindLvlGroup('lvl2');
+bindLinkModeGroup('linkMode');
 function highlightLvl(){
   document.querySelectorAll('.lvl-group label').forEach(function(l){
     var inp=l.querySelector('input');
@@ -347,7 +350,9 @@ function bindModeGroup(name){
       var m=this.value;
       console.log('[autolink] button: fill mode change -> m='+m);
       try{
-        var r2=await tfetch('/mode?m='+encodeURIComponent(m),{method:'POST'},5000);
+        // fill-mode route renamed /mode -> /fillmode
+        // (the live /mode link-mode toggle takes /mode now).
+        var r2=await tfetch('/fillmode?m='+encodeURIComponent(m),{method:'POST'},5000);
         if(r2.ok){
           currentMode=m;
           highlightMode();
@@ -366,6 +371,15 @@ function highlightMode(){
   document.querySelectorAll('.lvl-group label').forEach(function(l){
     var inp=l.querySelector('input');
     if(inp&&inp.name==='mode')l.classList.toggle('on',inp.value===currentMode);
+  });
+}
+
+function bindLinkModeGroup(name){
+  document.querySelectorAll('input[name='+name+']').forEach(function(r){
+    r.addEventListener('change',async function(){
+      if(!this.checked)return;
+      await onLinkModeChange(this.value);
+    });
   });
 }
 
@@ -450,8 +464,10 @@ async function poll(){
 
     if(d.linkModeLabel!==undefined&&d.linkModeLabel!==null){
       if(d.linkModeLabel!==currentLinkMode){
-        applyLinkModeLabel(d.linkModeLabel);
-        console.log('[autolink] /stats linkModeLabel='+d.linkModeLabel+' — reconciled mode pill');
+        currentLinkMode=d.linkModeLabel;
+        var inp=document.querySelector('input[name=linkMode][value="'+d.linkModeLabel+'"]');
+        if(inp){inp.checked=true;highlightLinkMode();}
+        console.log('[autolink] /stats linkModeLabel='+d.linkModeLabel+' — reconciled mode radio');
       }
     }
 
