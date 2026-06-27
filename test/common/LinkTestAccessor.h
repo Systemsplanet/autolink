@@ -77,6 +77,24 @@ public:
     int phase3Baud() const { return l_.sweep_.phase3Baud(); }
     void setSweepPhase(SweepPhase p) { l_.sweep_.setPhase(p); }
 
+    // spdI access for the OOB-closed-shape test.
+    // The runtime pin sets spdI to a known tail
+    // index and walks the read paths to verify
+    // every one of them is bounded by
+    // AUTOLINK_MAX_BAUDS — the test never
+    // accesses cfg.allowedBauds[i] directly.
+    void setSpdI(int i) { l_.setCurrentSpdI(i); }
+
+    // NAK signal for the gap-stop entry-edge
+    // test. Drives Link::onNak directly so the
+    // test can verify that lastNakSeq() is
+    // stamped (the signal side of the gap-stop
+    // feature, complement to the PingGap.h
+    // decision side).
+    bool onNak(uint8_t seq) { return l_.onNak(seq); }
+    uint8_t lastNakSeq() const { return l_.lastNakSeq(); }
+    uint8_t lastAckSeq() const { return l_.lastAckSeq(); }
+
     // Direct LinkArq handle for tests that
     // drive waitForAck / clearAll by hand
     // (e.g. the ABA-hazard regression in
