@@ -78,6 +78,7 @@ Read this, then `README.md`, then `docs/Version.md`. History is the source of tr
 - `Log::log().info(...)` — singleton accessor.
 - `Stats` has `tx`, `rx`, `discCount`, `frameErrs`. No `txBps`/`rxBps` (computed in dashboard JSON).
 - `make -f build/Makefile clean` runs `build/clean.py --apply` then per-dir `make clean`. Pass `CLEAN_FLAGS="--root /path"` to point it at a fresh extracted zip; `CLEAN_FLAGS=""` for dry-run.
+- Generated headers (`src/al/web/AutoLinkWebHtml.h`) are the byte output of `build/dashboard_assets.py` and are NOT clang-format targets. `build/pretty_print.py` skips them by path suffix (see `_GENERATED_HEADERS`); adding a new generated header requires adding it to that tuple. `make test` auto-regens this header from sources; `make assets_check` (CI gate) verifies the committed copy is current.
 
 ## Stuck
 
