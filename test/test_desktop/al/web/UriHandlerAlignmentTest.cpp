@@ -324,8 +324,9 @@ void test_paths_array_contains_all_ten_routes() {
     // future refactor drops /reboot from PATHS[] (leaving
     // it in URIS[]), this catches it.
     static const char *const mustHave[] = {
-        "/",     "/stats",    "/logs",  "/reset",       "/reboot", "/level",
-        "/mode", "/pausemsg", "/delay", "/mode/toggle", nullptr,
+        "/",     "/stats",  "/logs",   "/reset",
+        "/reboot",         "/level",   "/mode",
+        "/fillmode",       "/pausemsg","/delay", nullptr,
     };
     for (int i = 0; mustHave[i]; i++) {
         assert(seen.count(mustHave[i]) == 1);
