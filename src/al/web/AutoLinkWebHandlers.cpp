@@ -253,8 +253,7 @@ esp_err_t AutoLinkWeb::handleMode(httpd_req_t *req) {
             prefs.putUChar("mode", (uint8_t)newMode);
             prefs.end();
         } else {
-            Log::log().warning(TAG,
-                               "could not open NVS to persist link mode");
+            Log::log().warning(TAG, "could not open NVS to persist link mode");
         }
     }
     Log::log().info(TAG, "Link mode set %s -> %s via web (live, no reboot)",
