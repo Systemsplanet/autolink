@@ -71,7 +71,8 @@ struct AutoLinkConfig {
     // AutoLinkConfig &` at a call site — the
     // ctor of Link has that signature).
     int clampedCount() const {
-        if (allowedBaudsCount < 0) return 0;
+        if (allowedBaudsCount < 0)
+            return 0;
         if (allowedBaudsCount > AUTOLINK_MAX_BAUDS)
             return AUTOLINK_MAX_BAUDS;
         return allowedBaudsCount;
