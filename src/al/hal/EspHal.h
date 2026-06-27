@@ -110,7 +110,7 @@ class EspHal : public IHal {
                     // Suppress self-induced breaks that
                     // fire right after a baud change.
                     // The idle line / mismatch on the
-                    // new baud gltches a UART_BREAK
+                    // new baud glitches a UART_BREAK
                     // before the receiver has settled;
                     // we want to drop the post-setSpd
                     // burst regardless of whether
@@ -307,8 +307,6 @@ public:
 
     void setSpd(uint32_t spd) override {
         // Drain in-flight TX before retune. Without
-        // Drain in-flight TX before retune. Without
-        // Drain in-flight TX before retune. Without
         // this, the bytes still in the UART TX FIFO at
         // the old baud land at the receiver while
         // it's still configured for the old baud —
@@ -331,7 +329,7 @@ public:
         // Stamp the wall clock so the UART
         // event task can drop the post-setSpd
         // BREAK burst (the new baud's idle
-        // line gltches a BREAK before the
+        // line glitches a BREAK before the
         // receiver settles).
         last_setspd_ms = (uint32_t)(esp_timer_get_time() / 1000);
     }
