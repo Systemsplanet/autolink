@@ -196,28 +196,6 @@ inline LckAction decideLckTick(int lckRetries, int maxRetries) {
                                      : LckAction::SendReq;
 }
 
-enum class IdleAction { Hold, Drop };
-
-inline IdleAction decideIdleWatchdog(uint32_t rxAgeMs, uint32_t txAgeMs,
-                                     int idleTimeoutMs) {
-    if (idleTimeoutMs <= 0)
-        return IdleAction::Hold;
-    if (rxAgeMs > (uint32_t)idleTimeoutMs && txAgeMs > (uint32_t)idleTimeoutMs)
-        return IdleAction::Drop;
-    return IdleAction::Hold;
-}
-
-enum class KeepaliveAction { Hold, Emit };
-
-inline KeepaliveAction decideKeepalive(uint32_t txAgeMs, int idleTimeoutMs,
-                                       bool linkPaused) {
-    if (linkPaused || idleTimeoutMs <= 0)
-        return KeepaliveAction::Hold;
-    if (txAgeMs >= (uint32_t)(idleTimeoutMs / 3))
-        return KeepaliveAction::Emit;
-    return KeepaliveAction::Hold;
-}
-
 enum class AppBufAction { Accept, HoldAck };
 
 inline AppBufAction decideAppBuf(int accepted, int incoming) {
