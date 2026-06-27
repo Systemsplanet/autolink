@@ -91,7 +91,11 @@ TEST_BINS = run_test_crc run_test_cobs run_test_blink run_test_framerx \
             run_test_pong_p1_guard_outlasts_master_p2 \
             run_test_mode_toggle_ui \
             run_test_onbreak_guard \
-            run_test_boundary_invariants
+            run_test_boundary_invariants \
+            run_test_ping_send_failure \
+            run_test_ack_bytes \
+            run_test_baud_index_bounds \
+            run_test_ping_gap_transition
 
 # 'all' runs every unit suite, captures per-suite runtime, then
 # prints a summary: tests passed, total bytes used by the suite
@@ -646,6 +650,45 @@ run_test_onbreak_guard: $(TSWEEP)/OnBreakGuardTest.cpp $(LINK_SRC)
 run_test_boundary_invariants: al/BoundaryInvariantsTest.cpp
 	$(CXX) $(CXXFLAGS) al/BoundaryInvariantsTest.cpp -o $@
 
+# Source-level + structural pins for the
+# this-release Ping/Pong role changes:
+# Pong-no-echo, Ping "echo <seq> <bytes> <pending>"
+# log, consecSendFail_ escalation, msg-size policy
+# (sequential + random), gap-stop / gap-resume,
+# got<0 drain. Pin set covers the 5.4.0 Ping/Pong
+# surface without constructing either role on host
+# (both are `#ifdef ARDUINO`).
+run_test_ping_send_failure: $(TPING)/PingSendFailureTest.cpp
+	$(CXX) $(CXXFLAGS) $(TPING)/PingSendFailureTest.cpp -o $@
+
+# Runtime + structural pins for the extended
+# 5-byte wire ACK frame (this release carries
+# bytes-recvd in addition to the seq). Covers
+# end-to-end round-trip + pool-exhaustion drop +
+# HoldAck-NAK paths.
+run_test_ack_bytes: $(LINK_SRC) $(TPROTO)/LinkAckBytesTest.cpp
+	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/LinkAckBytesTest.cpp -o $@
+
+# Runtime pin for the post-construction OOB-closed
+# shape: cfg.allowedBaudsCount = 20 (or -1) after
+# link.begin() must not drive spdI into an OOB read.
+# The choke-point accessors in Link clamp the count
+# on the way out; this suite exercises the bound.
+run_test_baud_index_bounds: $(LINK_SRC) $(TPROTO)/LinkBaudIndexBoundsTest.cpp
+	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/LinkBaudIndexBoundsTest.cpp -o $@
+
+# Runtime + table test for the gap-stop transition
+# extracted from Ping::loop into PingGap.h. Exercises
+# the entry edge (NO_GAP -> gap-stop on a NAK), the
+# update path (new NAK while paused), the resume
+# (ACK of gap seq), and the predates-gap edge case
+# (lastAck == lastNak at entry). Plus a source-grep
+# pin that catches a regression where the
+# unconditional read moves back inside the
+# if (gapSeq_ != NO_GAP) block.
+run_test_ping_gap_transition: $(LINK_SRC) $(TPING)/PingGapTransitionTest.cpp
+	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPING)/PingGapTransitionTest.cpp -o $@
+
 test_esphal_begin_and_health: run_test_esphal_begin_and_health
 	./run_test_esphal_begin_and_health
 
@@ -669,6 +712,12 @@ test_onbreak_guard: run_test_onbreak_guard
 
 test_boundary_invariants: run_test_boundary_invariants
 	./run_test_boundary_invariants
+
+test_ping_send_failure: run_test_ping_send_failure
+	./run_test_ping_send_failure
+
+test_ack_bytes: run_test_ack_bytes
+	./run_test_ack_bytes
 
 # ---- dashboard JS tests (Node + jsdom) ---------------------------------
 # Verifies the embedded dashboard JavaScript (poll(), bindLvlGroup(),
