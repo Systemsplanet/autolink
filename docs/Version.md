@@ -1,6 +1,321 @@
 # 📅 AutoLink Version History
 
 All releases, most recent first.
+## v5.4.0
+
+**Wire-ACK carries bytes-recvd; Pong is ack-only; gap-stop on peer-detected NAK; send-failure counter escalates to dropLink; SYNC/ASYNC radio buttons**
+
+Six changes from field-test feedback. The wire format changes (ACK frame extended with bytes-recvd; Ping-side gap-stop driven by peer NAK) are real protocol shifts but stay on the 5.x major. SYNC mode's stop-and-wait is preserved; ASYNC's behavior changes the most (no heartbeat, gap-stop, pool-exhaustion drop). Dashboard UI replaces the SYNC/ASYNC toggle button with radio buttons and applies the choice live (no reboot).
+
+### Fix 1 — Wire ACK frame extended with bytes-recvd
+
+The 5.3.x wire ACK frame was a 3-byte raw payload `[type=0xFF, seq, frame_crc8]`. The receiver verified the per-chunk CRC before sending it, but the sender had no way to know how many bytes the receiver actually pushed into its app buffer (the per-chunk CRC-8 only covers the chunk payload, not the chunk's role in a multi-chunk message). Ping's diagnostic log line had to say `echo %d bytes` and accept that the value was a guess.
+
+This release extends the wire ACK to a 5-byte raw payload `[0xFF, seq, bytes_lo, bytes_hi, frame_crc8]`. `frame_crc8` covers bytes 0..3 (the existing CRC convention). The decoder's `onAck` listener now takes `bytesRecvd` and Link stamps `bytesRecvd_[ackedCobsSeq] = bytesRecvd` so Ping's `bytesRecvdFor(seq)` returns the receiver-reported value. The pre-5.4.0 3-byte ACK is still decoded (bytes-recvd = 0) so a peer running the legacy wire format can interop.
+
+Pinned by `run_test_ack_bytes` Pin 1 + Pin 2. Pin 1 round-trips a pong-side ACK through `UtilFrameRx::Listener::onAck` and asserts the bytes-recvd value matches the bytes the receiver pushed. Pin 2 sends a 4-byte message from ping (ASYNC mode), pipes the chunk to pong, and asserts `ping.bytesRecvdFor(baseSeq) == 10` (= 6-byte MSG_HDR + 4-byte payload, the merged-chunk length the receiver pushed). Both pins turn red if the wire ACK reverts to 3 bytes.
+
+### Fix 2 — Pong is ack-only; the wire ACK is the entire Pong-side response
+
+The 5.3.x Pong echoed the payload back to Ping by calling `base_.comm_.send(base_.buf_, n)` inside its loop. Ping's `matchEcho_` then matched the echoed bytes against the slot's CRC-16. The echo doubled the wire traffic (every chunk's payload was sent twice), masked CRC bugs (the echo's bytes went through the same chunked-COBS path on the way back), and confused operators reading the log (two Ping entries per sent message — one for the wire echo, one for the per-chunk ACK).
+
+This release removes the echo. Pong's loop just reads and counts. The wire-level ACK (extended in Fix 1) carries the bytes-recvd; Ping's per-slot completion is now driven by `isAcked(slot.seq)`. The new Ping log line is `echo <seq> <bytes> <pending>` (crc=ok implicit). Pong's diagnostic ack log line is `echo <seq> <bytes>`. Pinned by `run_test_ping_send_failure` Pin 1 (Pong loop has no `base_.comm_.send(base_.buf_, …)` call site) and Pin 2 (Ping's log format is `echo %u %u %d` reading `bytesRecvdFor(seq)`).
+
+### Fix 3 — Heartbeat + decideKeepalive + decideIdleWatchdog removed; Ping's consecSendFail_ escalates to dropLink
+
+The 5.3.x OK-state timer fired a wire-level PING every `HEARTBEAT_MS = 100 ms` and dropped the link on `HEARTBEAT_MISS_LIMIT = 3` missed PONGs. That detected dead peers but cost a wire frame every 100 ms. `decideKeepalive` drove the keepalive-emission decision; `decideIdleWatchdog` drove the symmetric idle-timeout drop.
+
+This release removes the heartbeat, both decision functions, the `HEARTBEAT_MS` / `HEARTBEAT_MISS_LIMIT` constants, and the `heartbeatPingsMissed_` / `lastHeartbeatMs_` fields. Dead-peer detection moves to Ping: a new `consecSendFail_` counter bumps on every `send()` failure and at `MAX_SEND_FAIL = 5` consecutive failures Ping calls `dropLink()` + `clearQueue_()` so a dead peer / app-buf-full NAK loop bounces the link back to SWP instead of silently spinning. The link layer no longer schedules a periodic wire-level probe. The asymmetric idle check (TX active, RX silent → peer gone) stays; the symmetric idle check (both quiet → drop) is gone — a one-direction burst now doesn't bounce the link.
+
+Pinned by `run_test_onbreak_guard` Pin 1–3 (the on-break state guard from 5.3.x still works without the heartbeat, no false resets), `run_test_linkdecision` absence pins for `decideKeepalive` / `decideIdleWatchdog`, and `run_test_ping_send_failure` Pin 3 (`consecSendFail_ >= MAX_SEND_FAIL` → `dropLink()` + `clearQueue_()`). `run_test_clock_injection`'s symmetric-idle test was repurposed as an absence pin (both-quiet no longer drops).
+
+### Fix 4 — ASYNC mode: gap-stop on peer NAK; pool-exhaustion drop
+
+The 5.3.x ASYNC mode's retransmit loop retransmits on NAK but doesn't pause new sends. A peer-detected gap (Pong saw an out-of-order frame and NAKed the missing seq) caused Ping to keep firing new sends while the receiver was waiting for the gap chunk — the wire went effectively silent from the receiver's point of view.
+
+This release makes Ping read `Link::lastNakSeq()` and `Link::lastAckSeq()` once per loop iteration. While `gapSeq_ != NO_GAP`, Ping skips its send loop and only drains incoming ACKs (via the existing `isAcked(slot.seq)` walk). When the gap seq is ACKed, `gapSeq_` clears and Ping resumes. The Link layer also gets a new ASYNC-mode pool-exhaustion drop: if `!arqCache_.hasRoom() && arq_.pendingCount() > 0` at the start of the ARQ retransmit loop, the link drops + sends a break so a stalled receiver bounces back to SWP instead of silently filling the cache.
+
+Combined with Fix 1's receiver-side NAK on app-buf-full, this bounds the ASYNC-mode stall: if the receiver NAKs successfully, the retransmit loop brings the chunk back; if the receiver is gone, the pool fills up and the link drops within ~one RTO.
+
+Pinned by `run_test_ack_bytes` Pin 3 (pool-exhaustion drop in LinkTimers.cpp) and Pin 4 (app-buf-full → NAK instead of silent). Pinned by `run_test_ping_send_failure` Pin 5 (`gapSeq_` + `lastNakSeq()` / `lastAckSeq()`).
+
+### Fix 5 — Sequential mode grows msg size; random mode 1k..maxMsg
+
+The 5.3.x Ping picked `n = random(1, 1024)` regardless of `FillMode` — both "Sequential" and "Random" modes sent random-sized payloads. The pre-fix `fillSequential_` filled the buffer with deterministic bytes but the size was still random. This release:
+- `SEQUENTIAL` picks `n = seqSize_`, starting at 1 byte and incrementing after each successful send up to `maxSeqSize_` (= `cfg.maxMsg`), then wrapping back to 1. Operators reading the dashboard log see the message size grow monotonically through the link's MTU.
+- `RANDOM` picks `n` in `[1024, maxSeqSize_]`. The 1k floor forces multi-chunk sends in the steady state so the ARQ chunk path is exercised end-to-end (the pre-5.4.0 1..1024 range could send every message as a single chunk, starving the multi-frame ARQ test path).
+
+Pinned by `run_test_ping_send_failure` Pin 4 (`RANDOM_MIN_BYTES = 1024`, `seqSize_` advances in the send loop).
+
+### Fix 6 — Dashboard: SYNC/ASYNC radio buttons (live, no reboot); default txDelayMs 100
+
+The 5.3.x dashboard had a "Toggle" button that POSTed to `/mode/toggle` and rebooted the device. Operators wanted to compare modes without a 5–10 s reboot window, and they wanted a default delay-ms that gave the dashboard poll cycle (1 s) enough headroom on a 5-baud table.
+
+This release:
+- The "Toggle" button is replaced by two radio buttons (`SYNC` / `ASYNC`) grouped under `name="linkMode"`. Clicks POST to `/mode?m=SYNC|ASYNC` and the firmware applies the change live via `link_.setMode(newMode)`. The mode persists to NVS (`putUChar("mode", ...)` in the `autolink` namespace) so `bringUpLink`'s existing NVS read restores it across a normal reboot. The `/mode/toggle` route and the linked reboot path are gone.
+- The fill-mode route (`/mode?m=seq|rand` in 5.3.x) is renamed to `/fillmode?m=seq|rand` so the two `?m=` keys don't collide on the same URL.
+- `AutoLinkConfig::txDelayMs` default raised 0 → 100 ms. The pre-5.4.0 default of 0 caused Ping to flood the wire at full link speed and starve the dashboard's /logs poll.
+- The dashboard's SYNC/ASYNC pill and Toggle button are removed from the header. The linkModeGroup radiogroup takes their place.
+
+Pinned by `run_test_mode_toggle_ui` (6 pins: dashboard radios, JS routes radio to live POST, `handleMode` declared, `/mode` registered + `/mode/toggle` gone + `/fillmode` added, `handleMode` applies live + persists to NVS + no esp_restart, `bringUpLink` reads NVS mode before begin()).
+
+### Wire format
+
+Changed. Two protocol shifts, both backward-compatible:
+1. Wire ACK frame extended from 3 bytes raw `[0xFF, seq, crc8]` to 5 bytes raw `[0xFF, seq, bytes_lo, bytes_hi, frame_crc8]`. `frame_crc8` covers bytes 0..3 (the existing CRC convention). The legacy 3-byte ACK is still decoded (bytes-recvd = 0).
+2. Ping's gap-stop / gap-resume uses the existing wire NAK frame (3 bytes raw `[0xFE, seq, crc8]`, unchanged). The link layer's `lastNakSeq_` / `lastAckSeq_` accessors let Ping observe the NAK arrival and the retransmit's ACK without changing the wire.
+
+The library version contract (`include/AutoLink.h` + `library.properties` + `idf_component.yml` + this file) bumps 5.3.102 → 5.4.0 per AGENTS rule 3.
+
+### Regression coverage
+
+**New runtime + structural suite:**
+`run_test_ack_bytes` in
+`test/test_desktop/al/link/LinkAckBytesTest.cpp`. Four pins:
+1. `test_ack_frame_is_5_bytes_with_bytes_recvd` — runtime: feed pong a 3-byte data frame, decode pong's emitted ACK through `UtilFrameRx::Listener::onAck`, assert `seq=5, bytesRecvd=3`. End-to-end coverage of the wire ACK round-trip.
+2. `test_bytes_recvd_table_populated_on_ack` — runtime: ASYNC-mode `ping.sendMsg(msg, 4, &baseSeq)` round-trips a 4-byte message through pong's wire ACK; assert `ping.bytesRecvdFor(baseSeq) == 10` (MSG_HDR + payload merged into one chunk).
+3. `test_pool_exhaustion_drop_in_async_mode` — source-grep: `LinkTimers.cpp`'s `onTimerOk_unlocked` has the `!arqCache_.hasRoom() && arq_.pendingCount() > 0` drop branch gated on `cfg.mode != SYNC`.
+4. `test_holdack_sends_nak` — source-grep: `LinkRx.cpp`'s `AppBufAction::HoldAck` branch calls `sendNakFrame_unlocked(cobsSeq)` and returns false (not the pre-fix log-and-return-true).
+
+**New source-level suite:**
+`run_test_ping_send_failure` in
+`test/test_desktop/al/pingpong/PingSendFailureTest.cpp`. Six pins:
+1. Pong loop has no payload-echo send (recv-only); log format `echo %u %d` (seq + bytes).
+2. Ping log format `echo %u %u %d` reading `bytesRecvdFor(seq)`.
+3. `consecSendFail_` counter + `MAX_SEND_FAIL = 5` + `dropLink()` escalation.
+4. Sequential mode `seqSize_++` 1..maxSeqSize_ + wrap; random mode `RANDOM_MIN_BYTES = 1024`.
+5. ASYNC gap-stop: `gapSeq_` + `lastNakSeq()` / `lastAckSeq()` + pause/resume logs.
+6. got<0 branch still drains rx via `flushRx()` after `clearQueue_()` (preserved from 5.3.x's log-hygiene pin).
+
+**Updated pins:**
+`run_test_pingpong_log_hygiene` — `matchEcho_` removed (Pong no longer echoes); Pong's "send skipped" warning pin removed (Pong is recv-only); "WIRING?" pin unchanged.
+`run_test_mode_toggle_ui` — fully rewritten for the live-radio / fillmode route. Six pins: dashboard radios, JS radio handler, `handleMode` declared, `/mode` registered + `/mode/toggle` gone + `/fillmode` added, `handleMode` applies live + persists + no `esp_restart`, `bringUpLink` reads NVS before begin().
+`run_test_linkdecision` — `decideKeepalive_*` and `decideIdleWatchdog_*` tests become absence pins (the functions are gone; a future re-introduction replaces them with the pre-fix table-test).
+`run_test_clock_injection` — `test_idle_timeout_drops_link` repurposed (symmetric idle no longer drops; the asymmetric path stays); `test_keepalive_emitted_at_third_of_idle_timeout` repurposed as an absence pin (the link no longer emits keepalive frames).
+`run_test_uri_handler_alignment` — `/mode/toggle` removed from `mustHave`; `/fillmode` added.
+`run_test_link_frame_rx` — `MockListener::onAck` extended with `bytesRecvd`; the `cobsSeq=0xFF` test rewritten to assert the 5-byte ACK end-to-end.
+`run_test_accessor_structure` — `sendAckFrame_unlocked` test rewritten to pin the 5-byte ACK body (still passes the "no inline encode" expectation for `sendCobsFrame_unlocked` and `resendCobsFrame_unlocked`).
+`run_test_autolink` — `test_txDelayMs_default_and_setter` default updated 0 → 100.
+
+`UriHandlerAlignmentTest`'s `test_max_uri_handlers_is_*` unchanged at 10. The `/mode/toggle` → `/fillmode` swap is net-zero (10 routes either way).
+
+### Disclosed limitations
+
+- ASYNC mode's heartbeat removal means a Pong-only device (no Ping on the wire) stays up indefinitely on a quiet link. The asymmetric idle check catches a dead pong within `FAST_IDLE_RX_MS = 300 ms` only if the ping side was actively transmitting. A fully-idle deployment (both boards silent) will hold the link up forever — that's by design, the pre-5.4.0 symmetric watchdog had a similar shape with `idleTimeoutMs` triggers.
+- `decideKeepalive` is gone but the OK-state timer's repeat-arm (`okTickMs` + `hw.startTimer(okTickMs)`) still fires every `idleTimeoutMs / 3` ms (min 50 ms). The timer keeps the asymmetric-idle check, the reorder-buffer expiry sweep, and the ARQ retransmit loop running. It no longer emits wire-level traffic.
+- The 5-byte ACK frame is decoded end-to-end; the 3-byte legacy decode is preserved as a fallback for cross-version interop. A peer still running 5.3.x sees Ping's slot-completion log line show `bytes=0` (the legacy decode path) instead of the real bytes-recvd. Ping reads `bytesRecvdFor(seq)` so the 0 is silent — it just doesn't display the real value.
+- Pong is now recv-only. A user who wants to add a Pong-side diagnostic (e.g. reply to a specific Ping chunk type with a different shape) needs to drive `base_.comm_.send()` themselves; the recv-driven loop only counts and logs.
+- The consecutive-send-failure counter is per-`Ping` instance, not per-link. Two Pings on the same physical wire (one per role — which doesn't happen, Ping is always master — but if it did) would each escalate independently.
+- The `/mode` live switch is not retried on failure. A network error during the POST leaves the radio optimistically flipped in the UI but the firmware on the old mode. The next `/stats` poll reconciles via `linkModeLabel`.
+- `bytesRecvdFor(seq)` returns 0 for any seq not in the table. A Ping loop reading `bytesRecvdFor` on an unACKed seq (e.g. mid-flight) reads 0. The fix doesn't change this — the `bytesRecvd_` table is populated from the peer's wire ACK on the sender side, same as `arq_.isPending` semantics. If the user wants a default non-zero value for unacked seqs, they can check `arq_.isPending(seq)` first.
+- The fill-mode rename `/mode` → `/fillmode` is breaking for any external tool that hard-coded `/mode?m=seq` / `/mode?m=rand`. The Arduino library users don't see this (they don't construct URLs); only external dashboard tools or curl scripts need to update.
+- `AutoLinkConfig::txDelayMs` default 100 ms means a freshly-deployed Ping sends at most 10 msg/s on a slow baud. Operators who need full line-rate can set `cfg.txDelayMs = 0` via the existing constructor argument or the dashboard's delay-ms widget (default selected in the dashboard is still 100 ms, but the dropdown lets the user pick 0).
+- The dashboard's SYNC/ASYNC radio reads `d.linkModeLabel` from `/stats` and reconciles if the user clicks before the next poll. A click during a transient WiFi outage reverts the radio on the next poll (the POST's `r.ok` check in JS reverts on failure).
+
+### Files touched
+
+- `src/al/AutoLinkConfig.h` — `txDelayMs` default 0 → 100.
+- `src/al/link/Link.h` — `bytesRecvd_[256]` table + `lastAckSeq_` / `lastNakSeq_` / `lastRxSeq_` members; `bytesRecvdFor(seq)` / `lastAckSeq()` / `lastNakSeq()` / `lastRxSeq()` accessors; `onAck(uint8_t, uint16_t)` override signature; `sendAckFrame_unlocked(uint8_t, uint16_t)` signature; `heartbeatPingsMissed_` / `lastHeartbeatMs_` removed.
+- `src/al/link/LinkCore.cpp` — `reset_unlocked` clears `bytesRecvd_` + `lastAckSeq_` + `lastNakSeq_` + `lastRxSeq_`.
+- `src/al/link/LinkTx.cpp` — `sendAckFrame_unlocked` emits 5-byte raw frame (extended with bytes-recvd).
+- `src/al/link/LinkRx.cpp` — `onPayload` stamps `lastRxSeq_`; `onAck(uint8_t, uint16_t)` stamps `bytesRecvd_[seq]`; `onNak` stamps `lastNakSeq_`; `HoldAck` branch sends NAK and returns false (was: log + return true).
+- `src/al/link/LinkTimers.cpp` — heartbeat + decideKeepalive removed; decideIdleWatchdog removed; ASYNC pool-exhaustion drop added.
+- `src/al/link/LinkSweep.cpp` — `heartbeatPingsMissed_` / `lastHeartbeatMs_` references removed.
+- `src/al/link/LinkFrameRx.h` — `onAck(uint8_t, uint16_t)` listener signature.
+- `src/al/link/LinkFrameRx.cpp` — 5-byte ACK decode + 3-byte legacy fallback.
+- `src/al/link/sweep/LinkDecision.h` — `decideKeepalive` / `decideIdleWatchdog` removed.
+- `src/al/pingpong/Pong.h` — recv-only loop; ackCount_ counter; `echo <seq> <bytes>` log; no `send(base_.buf_, n)` call site.
+- `src/al/pingpong/Ping.h` — new echo log format; sequential `seqSize_` 1..maxSeqSize_ + wrap; random `[1024, maxSeqSize_]`; ASYNC gap-stop via `lastNakSeq()` / `lastAckSeq()`; `consecSendFail_` counter + `MAX_SEND_FAIL = 5` → `dropLink()` + `clearQueue_()`; slot walks on `isAcked(slot.seq)`.
+- `include/AutoLink.h` — `lastAckSeq()` / `lastNakSeq()` / `lastRxSeq()` / `bytesRecvdFor()` / `isAcked()` / `sendMsg(b, len, *outBaseSeq)` facade forwarding.
+- `src/AutoLink.cpp` — production ctor clamps `cfg.allowedBaudsCount` (pre-fix already).
+- `src/al/web/AutoLinkWeb.h` — `handleMode` accepts SYNC/ASYNC; `handleModeToggle` removed; `handleFillMode` added.
+- `src/al/web/AutoLinkWeb.cpp` — `/mode/toggle` removed from URIS[]/PATHS[]; `/fillmode` added; `handleMode` registered for live SYNC/ASYNC.
+- `src/al/web/AutoLinkWebHandlers.cpp` — `handleMode` applies live (no `esp_restart`); `handleFillMode` replaces the old fill-mode route; `handleModeToggle` removed.
+- `src/al/web/dashboard_html_part_b.html` — SYNC/ASYNC radios (replaces Toggle button + pill); default delay-ms 100 selected; `delayMs` widget unchanged shape.
+- `src/al/web/dashboard.js` — radio change handler posts `/mode?m=SYNC|ASYNC`; bindLinkModeGroup wires the change event; toggleLinkMode removed; applyLinkModeLabel replaced by radio-reconciliation; bindModeGroup uses `/fillmode?m=…`.
+- `src/al/web/AutoLinkWebHtml.h` — regenerated by `build/dashboard_assets.py`.
+- `test/scripts/env/install_system_stubs.py` — `Preferences.h` stub includes `<WString.h>` (was missing `String` def).
+- `test/test_desktop/al/link/LinkFrameRxTest.cpp` — `MockListener::onAck(uint8_t, uint16_t)`; 5-byte ACK end-to-end test.
+- `test/test_desktop/al/link/TestAccessorStructureTest.cpp` — `sendAckFrame_unlocked` test pins the 5-byte body.
+- `test/test_desktop/al/link/sweep/LinkDecisionTest.cpp` — absence pins for `decideKeepalive` / `decideIdleWatchdog`.
+- `test/test_desktop/al/AutoLinkTest.cpp` — `txDelayMs` default updated 0 → 100.
+- `test/test_desktop/al/ClockInjectionTest.cpp` — `test_idle_timeout_drops_link` + `test_keepalive_emitted_at_third_of_idle_timeout` repurposed as absence / behavioral pins.
+- `test/test_desktop/al/pingpong/PingPongLogHygieneTest.cpp` — `matchEcho_` absence pin; Pong's send-failed pin replaced with recv-only pin.
+- `test/test_desktop/al/web/UriHandlerAlignmentTest.cpp` — `mustHave` list updated for `/fillmode` (and `/mode/toggle` gone).
+- `test/test_desktop/al/web/ModeToggleUITest.cpp` — fully rewritten for live-radio / fillmode route (6 pins).
+- `test/test_desktop/al/link/LinkAckBytesTest.cpp` — NEW. 4 runtime/structural pins.
+- `test/test_desktop/al/pingpong/PingSendFailureTest.cpp` — NEW. 6 source-grep pins.
+- `test/test_desktop/al/link/LinkBaudIndexBoundsTest.cpp` — NEW (Fix 7). 2 runtime pins verify the choke-point accessors bound post-construction writes to `cfg.allowedBaudsCount`.
+- `test/common/LinkTestAccessor.h` — added `setSpdI(i)` so the LinkBaudIndexBoundsTest can drive the spdI without direct field access.
+- `test/test_desktop/al/link/TestAccessorStructureTest.cpp` — 3 new pins for Fix 7 (`test_choke_points_route_through_clamped_accessors`), Fix 8 (`test_ihal_setevents_guard_in_place`), and Fix 9 (`test_msg_hdr_consistency_in_linktx`).
+- `test/test_desktop/al/link/LinkCobsSeqTest.cpp` — `test_lost_msgs_burst_vs_single` updated to use a fresh `MockHal cHal` for the second link (Fix 8 caught the double-bind pattern this test exercised).
+- `test/test_desktop/al/link/sweep/OnBreakGuardTest.cpp` — `gltches` → `glitches` typo fixed (Fix 10 cosmetic).
+- `test/test_desktop/Makefile` — `TEST_BINS` includes `run_test_ack_bytes` + `run_test_ping_send_failure` + `run_test_baud_index_bounds`.
+- `test/scripts/coverage/test_coverage_manifest.py` — allow-list extended for `run_test_ping_send_failure` + `run_test_baud_index_bounds`.
+- `src/al/AutoLinkConfig.h` — added `clampedCount() const` overload (Fix 7); comment on `allowedBaudsCount` field updated to point at the choke-point accessors instead of the ctor clamp.
+- `src/al/link/Link.h` — `allowedBaudsCount()` clamps to `[0, AUTOLINK_MAX_BAUDS]`; `allowedBaud(i)` delegates to `cfg.allowedBaudSafe(i)` (Fix 7).
+- `src/al/link/LinkCore.cpp` / `LinkTimers.cpp` / `LinkSweep.cpp` — every `cfg.allowedBauds[i]` → `cfg.allowedBaudSafe(i)`; every `cfg.allowedBaudsCount` → `cfg.clampedCount()` (Fix 7).
+- `src/al/link/LinkTx.cpp` — `uint8_t frame[MAX_CHUNK + 6];` → `uint8_t frame[MAX_CHUNK + MSG_HDR];` (Fix 9).
+- `src/al/hal/IHal.h` — `setEvents` gains `assert(events_ == nullptr && ...)` under `AUTOLINK_HOST_TEST`; on-device log + comment rewrite (Fix 8).
+- `src/al/hal/EspHal.h` — collapsed duplicated `// Drain in-flight TX before retune. Without` comment; `gltches` → `glitches` typo fixed (Fix 10).
+- `src/al/pingpong/PingGap.h` — NEW (Fix 11). `decideGapTransition(currentGap, lastNak, lastAck, &nextGap)` pure function + `GapAction` enum (`Stay` / `Enter` / `Update` / `Resume`). Host-includable (no `#ifdef ARDUINO`).
+- `src/al/pingpong/Ping.h` — gap-stop block rewritten (Fix 11). Removed the `if (gapSeq_ != NO_GAP)` gate; `loop()` now calls `decideGapTransition` unconditionally every iteration and branches on the returned action. Includes `PingGap.h`. Fix 14: the suppression check changed from `if (a == GapAction::Stay || a == GapAction::Enter || a == GapAction::Update) { ... }` (which conflates two Stay cases — the action enum is correct, the caller was wrong) to `if (gapSeq_ != NO_GAP) { ... }` (branches on the actual gap state, not on a side effect of the transition). Ping now actually sends at startup.
+- `test/test_desktop/al/pingpong/PingGapTransitionTest.cpp` — NEW (Fix 11). 12-row transition table test + 5-iteration runtime simulation (clean → NAK → 2×stay → ACK → resume) + Link-layer signal-side test (drives `Link::onNak` via `LinkTestAccessor`, asserts `lastNakSeq()` stamps, runs through Update + Resume actions) + source-grep pin asserting no `if (gapSeq_ != NO_GAP)` block exists in Ping.h. Fix 14: added caller-level pin `test_caller_sends_in_no_gap_steady_state` that reads Ping.h's suppression gate, asserts it branches on `gapSeq_ != NO_GAP` (not on the action enum), and runs 5 simulated startup loops to verify the gate returns "proceed" each time. Updated `test_unconditional_read_pin` to assert the gate IS `gapSeq_`-based (positive pin) and does NOT contain the bug-shape 3-clause action-enum gate (negative pin).
+- `test/common/LinkTestAccessor.h` — added `onNak(seq)` / `lastNakSeq()` / `lastAckSeq()` accessors so the runtime signal-side test can drive the Link-layer side without direct field access.
+- `test/test_desktop/al/web/HttpdStartupTest.cpp` — added `#include <cstdint>` (Fix 12). The suite used `uint32_t` / `uint64_t` without including `<cstdint>`, which broke the build on a clean toolchain (transitive include was masking the missing header on the previous host build). Plus new pin `test_autolinkweb_h_includes_core_outside_arduino_guard` (Fix 13): 3 sub-asserts that the `AutoLinkWebCore.h` include precedes `#ifdef ARDUINO` and `library.properties` lists the core header in `includes=`.
+- `src/al/web/AutoLinkWeb.h` — `#include "al/web/AutoLinkWebCore.h"` moved OUTSIDE the `#ifdef ARDUINO` block (Fix 13). The core header is host-buildable (no Arduino-only types), so the unconditional include is safe for both host and device build paths. This is the bulletproof fix for the device-build `'WebSnapshot' does not name a type` failure.
+- `library.properties` — `includes=` extended with `al/web/AutoLinkWebCore.h` (Fix 13, belt-and-braces). Any Arduino toolchain that builds `-I` strictly from `includes=` now adds the core header's directory as a fallback include path.
+- `test/test_desktop/Makefile` — `TEST_BINS` includes `run_test_ack_bytes` + `run_test_ping_send_failure` + `run_test_baud_index_bounds` + `run_test_ping_gap_transition`.
+- `test/scripts/coverage/test_coverage_manifest.py` — allow-list extended for `run_test_ping_send_failure` + `run_test_baud_index_bounds` + `run_test_ping_gap_transition`.
+- `include/AutoLink.h` + `library.properties` + `idf_component.yml` + `docs/Version.md` — version bump 5.3.102 → 5.4.0 in lockstep.
+
+### Result
+
+- 54 / 54 host unit suites pass (`make test`), including the new
+  `run_test_ack_bytes` (4 pins all green, ~270 ms), the new
+  `run_test_ping_send_failure` (6 pins all green, ~470 ms), the new
+  `run_test_baud_index_bounds` (2 runtime pins, ~30 ms), the new
+  `run_test_ping_gap_transition` (5 pins after Fix 14: 12-row
+  transition table + 5-iteration runtime simulation + Link-layer
+  signal-side NAK round-trip + caller-level "sends proceed from
+  NO_GAP + no NAK" pin + source-grep pin on the suppression-gate
+  shape, ~50 ms), and the three new pins added to
+  `run_test_accessor_structure` (OOB-closed shape, MSG_HDR
+  consistency, IHal::setEvents guard). Wall: ~7 s.
+- 3 / 3 host integration suites pass (`make itest`). Wall: ~40 s
+  (`run_loopback` 30 s ceiling dominates).
+- `make test_coverage_manifest` self-test PASS — the new suite
+  `run_test_ack_bytes` and `run_test_ping_gap_transition` are
+  correctly classified as source-contributing (links `$(LINK_SRC)`);
+  `run_test_ping_send_failure`, `run_test_baud_index_bounds` are
+  correctly classified as source-only (links only their own .cpp).
+- `build/verify_build.sh` not run in this sandbox — arduino-cli is
+  not installed. Per AGENTS rule 4, the cross-compile must be
+  re-run in a longer-lived environment before release; the changes
+  are local to the wire ACK frame shape, the OK-state timer body,
+  the dashboard HTML/JS, and the Ping/Pong loop contracts, so the
+  esp32:esp32:firebeetle32 cross-compile risk is low (no new
+  `#ifdef ARDUINO` paths, no new allocation paths, no header
+  cycle changes), but unverified.
+- 0 bytes added to RAM on the wire path. The 5-byte ACK is +2
+  bytes per ACK frame vs the 3-byte legacy frame; the `bytesRecvd_`
+  table is 512 B (256 × uint16) on the Link; `consecSendFail_` +
+  `gapSeq_` + `seqSize_` are a few bytes on Ping. The dashboard's
+  radio takes the place of the Toggle button + pill (net 0 HTML
+  bytes — radios are a few lines shorter than the toggle button).
+
+### Fix 7 — Post-construction OOB on `cfg.allowedBaudsCount` is closed
+
+The 5.3.x Fix 4 (in v5.3.102) introduced `clampToMaxBauds()` and `allowedBaudSafe(i)` accessors on `AutoLinkConfig`, and called `clampToMaxBauds()` from both ctors. The intent was "out-of-range values cannot reach the array indexing path." That was a half-truth. The ctors run once; the field is still public post-construction, and a sketch (or a future refactor that writes the field after `link.begin()`) can still drive `spdI = cfg.allowedBaudsCount - 1` into an OOB read.
+
+This release routes the choke-point accessors in `Link` (`allowedBaudsCount()` and `allowedBaud(i)`) through the safe/clamped forms. The link layer's read paths no longer touch `cfg.allowedBauds[]` or `cfg.allowedBaudsCount` raw — every index site goes through `cfg.allowedBaudSafe(i)` / `cfg.clampedCount()`. A post-construction write of `cfg.allowedBaudsCount = 20` (or `-1`) is now bounded at the read sites, so `spdI` derived from the bounded count can never index past the array.
+
+- `Link.h`: `allowedBaudsCount()` clamps to `[0, AUTOLINK_MAX_BAUDS]`; `allowedBaud(i)` delegates to `cfg.allowedBaudSafe(i)`.
+- `AutoLinkConfig.h`: added `clampedCount() const` (the const overload that `Link` uses at const read sites — `cfg` is a value member, but `getCurrentBaud() const` wants the bound without a non-const call).
+- `LinkCore.cpp` / `LinkTimers.cpp` / `LinkSweep.cpp`: every `cfg.allowedBauds[i]` replaced with `cfg.allowedBaudSafe(i)`; every `cfg.allowedBaudsCount` replaced with `cfg.clampedCount()`. The ctor's `baudSweep((int)config.allowedBaudsCount)` was previously exempt (the field was unclamped at construction); now `config.clampedCount()`.
+
+Pinned by:
+- `run_test_baud_index_bounds` (new). Runtime: writes `cfg.allowedBaudsCount = 20` post-`begin()`, walks every choke-point accessor (`getCurrentBaud`, `allowedBaudsCount`, `allowedBaud(i)` for `i ∈ [-2, AUTOLINK_MAX_BAUDS + 2]`), asserts all returned values are bounded and OOB indices surface 0 (not garbage). Same for `cfg.allowedBaudsCount = -1` (underflow path).
+- `run_test_accessor_structure` `test_choke_points_route_through_clamped_accessors` (new pin). Source-grep: no `cfg.allowedBauds[` or `cfg.allowedBaudsCount` raw reads in any Link* TU body; `AutoLinkConfig::clampedCount()` and `allowedBaudSafe(i)` both present.
+
+### Fix 8 — `IHal::setEvents` comment now matches the code; guard added
+
+The 5.3.x `IHal::setEvents` had a comment claiming "a second setEvents is an assertion fail" but the body was a plain pointer assignment — no assert, no log. The "disclosed limitations" section in v5.3.102 even noted this was intentional ("by design"). Two contracts were floating: the comment promised protection; the code provided none.
+
+This release picks the guard. `IHal::setEvents` now:
+
+```cpp
+void setEvents(ILinkEvents &e) {
+#ifdef AUTOLINK_HOST_TEST
+    assert(events_ == nullptr && "setEvents called twice on the same HAL");
+#endif
+    if (events_ != nullptr) {
+        Log::log().error("IHal", "setEvents called twice — rebinding listener");
+    }
+    events_ = &e;
+}
+```
+
+Host tests fail-fast (assert fires before the bug ships). On-device, the rebind is still recoverable (the new owner wins, no panic) but the error log makes the misuse visible. The comment is rewritten to match the contract — no more phantom assert claim.
+
+One existing host test (`LinkCobsSeqTest::test_lost_msgs_burst_vs_single`) constructed a second `Link` against the same `MockHal`. That was exactly the double-bind pattern the guard catches — updated to use a fresh `MockHal cHal` for the second link (the test is about per-Link state, not HAL sharing).
+
+Pinned by `run_test_accessor_structure` `test_ihal_setevents_guard_in_place` (new pin). Source-grep: `assert(events_ == nullptr && "setEvents called twice on the same HAL")` is present, `Log::log().error("IHal", ...)` is present, and the misleading comment `an assertion fail` is absent (the rewrite replaces it with the truthful host-assert + on-device-log phrasing).
+
+### Fix 9 — `LinkTx` frame buffer uses `MSG_HDR`, not literal 6
+
+Fix 6 of v5.3.102 replaced literal `+ 6` literals across the chunk/pool `static_assert`s with the named constant `MSG_HDR` so a future MSG_HDR bump wouldn't silently drift the bounds. One sibling literal slipped: `LinkTx.cpp:52` sized the per-frame stack buffer as `uint8_t frame[MAX_CHUNK + 6];` — the same drift Fix 6 targeted, in the same TU.
+
+This release replaces it with `uint8_t frame[MAX_CHUNK + MSG_HDR];`. Same value today, no behavior change, closes the exact drift Fix 6 targeted.
+
+Pinned by `run_test_accessor_structure` `test_msg_hdr_consistency_in_linktx` (new pin). Source-grep: `buildAndTxCobsFrame_unlocked` body contains `MAX_CHUNK + MSG_HDR` and does not contain `MAX_CHUNK + 6`.
+
+### Fix 10 (cosmetic) — EspHal comment hygiene
+
+`EspHal::setSpd()` had a copy-paste duplication in its leading comment (`// Drain in-flight TX before retune. Without` repeated three times in a row). Collapsed to one. Two `gltches` typos in the same TU (`new baud gltches a UART_BREAK`, `idle line gltches a BREAK`) corrected to `glitches`. The same typo in `OnBreakGuardTest.cpp` source comments was fixed for consistency (no behavior change).
+
+### Fix 11 — Gap-stop entry edge is reachable (the feature was inert)
+
+Fix 4 of this release added ASYNC gap-stop: when the peer sends a NAK for a missing chunk, Ping pauses its send loop until the gap is retransmitted and ACKed. The signal is `Link::lastNakSeq()` / `lastAckSeq()`. The post-fix Ping code only read those accessors inside `if (gapSeq_ != NO_GAP) { ... }`. That gate made the entry edge unreachable — from the normal state (`gapSeq_ == NO_GAP`), nothing ever observed a fresh NAK and entered gap-stop. The send loop kept firing new chunks while the receiver waited for the gap to fill. The wire-silence symptom Fix 4 was meant to cure never went away because the feature never engaged.
+
+The original `run_test_ping_send_failure` Pin 5 passed because it grepped for `gapSeq_` + `lastNakSeq()` + `lastAckSeq()` symbols in the file body, but didn't verify the entry edge was reachable. Source-grep-only pins don't catch structural bugs — only runtime pins do (AGENTS rule 18: every fix gets a regression test that fails when the fix is reverted).
+
+This release extracts the gap-stop decision into a pure free function `decideGapTransition(currentGap, lastNak, lastAck, &nextGap)` in `src/al/pingpong/PingGap.h` (per AGENTS rule 21: protocol decisions are pure free functions returning enums; side effects in the caller). The new `GapAction` enum has four values: `Stay`, `Enter`, `Update`, `Resume`. Ping::loop now calls it unconditionally every iteration — no `if (gapSeq_ != NO_GAP)` gate. The entry branch fires from NO_GAP when `lastNak != NO_GAP && lastAck != lastNak` (the `lastAck != lastNak` guard covers the trivial race where an ACK that predates the gap would otherwise immediately resume on the same iteration).
+
+`PingGap.h` is host-includable (no `#ifdef ARDUINO` gate) so the table test runs on host without needing an ESP32 build. The `run_test_ping_gap_transition` suite covers:
+- 12-row transition table (entry / update / resume / stay / predates-gap edge / sentinel edges).
+- 5-iteration runtime simulation: clean state → NAK(5) → 2×stay-on-NAK → ACK(5) → resume; asserts `gapSeq_` transitions and that the send loop is paused for ≥2 iterations during the gap.
+- Link-layer signal side: drives `Link::onNak(seq)` through the public surface (via `LinkTestAccessor`), asserts `Link::lastNakSeq() == seq`, then drives a second NAK for `seq+1` and asserts the transition function's `Update` action fires, then drives an ACK for `seq+1` and asserts the `Resume` action fires.
+- Source-grep pin: assert no `if (gapSeq_ != NO_GAP)` block exists in Ping.h. The pre-fix bug was that exact gate — if a future refactor reintroduces it, this pin fires.
+
+Toggle-off check (verified): the source-grep pin correctly catches a regression. Adding the literal `if (gapSeq_ != NO_GAP)` back to Ping.h flips the pin red. The pure function + runtime pins stay green (they test the function directly, not the call-site gate), so the layered pin set is necessary — source-grep alone is insufficient, runtime alone is insufficient, both together catch the bug.
+
+### Fix 12 — `HttpdStartupTest.cpp` missing `#include <cstdint>` (build break on a clean toolchain)
+
+`test/test_desktop/al/web/HttpdStartupTest.cpp` uses `uint32_t` / `uint64_t` directly but does not `#include <cstdint>`. It happened to compile on the previous host toolchain because some other header transitively pulled `<cstdint>` in. On a clean g++ (no transitive include), the suite halts with `'uint32_t' does not name a type` before any test runs, so the count never reaches 54/54.
+
+One-line fix: `#include <cstdint>` near the top of the file. With it, the suite builds cleanly on a host toolchain that doesn't transitively provide `<cstdint>`. Pre-existing on the 5.3.102 zip; surfaced when the full `make all` was run from a fresh extraction (the previous build only covered a subset of the suites).
+
+Pinned by `make all` exit-0 over all 54 suites from a clean extraction. The previous build's `53 / 53` total came from compiling a subset and getting 53 of those to PASS — the `HttpdStartupTest` build error was masked because the suite wasn't in the subset.
+
+### Fix 13 — `WebSnapshot` type not visible at device-build using-alias site
+
+Cross-compiling `AutoLinkWeb.cpp` against `esp32:esp32:firebeetle32` (ArduinoDroid 14.2.0 + ESP32 Arduino core 3.3.5 + lwIP) failed at `AutoLinkWeb.h:72` with `'WebSnapshot' does not name a type`. The host build skipped `AutoLinkWeb.cpp` (per AGENTS rule 4: host tests don't cover it), so the bug shipped. The struct `WebSnapshot` was correctly defined in `src/al/web/AutoLinkWebCore.h`, and `AutoLinkWeb.h` did `#include "al/web/AutoLinkWebCore.h"` — but the include was inside the `#ifdef ARDUINO` block at line 7. The ArduinoDroid toolchain's quoted-include resolution for nested paths (`al/web/AutoLinkWebCore.h` from inside `src/al/web/AutoLinkWeb.h`) didn't pick up the include at that position on the device build's preprocessor, so `WebSnapshot` was undefined at the `using Snapshot = WebSnapshot;` alias site.
+
+This release fixes it by moving the `#include "al/web/AutoLinkWebCore.h"` line OUTSIDE the `#ifdef ARDUINO` block at the top of `AutoLinkWeb.h`. The core header is host-buildable (no Arduino-only types inside — only `stdint`, `Log.h`, `WebSnapshot`/`WebLogEntry` structs, and the JSON / log formatter declarations), so the unconditional include is safe for both host and device build paths. As a belt-and-braces measure, `library.properties`'s `includes=` field now also lists `al/web/AutoLinkWebCore.h` so any Arduino toolchain that builds `-I` strictly from the `includes=` field (some do; some don't) adds the file's directory as a fallback include path.
+
+Pinned by `run_test_httpd_startup::test_autolinkweb_h_includes_core_outside_arduino_guard` (new pin, 3 sub-asserts):
+1. `AutoLinkWeb.h` includes `AutoLinkWebCore.h`.
+2. The include precedes the `#ifdef ARDUINO` opening.
+3. `library.properties` lists `al/web/AutoLinkWebCore.h` in `includes=`.
+
+Toggle-off check (verified): moving the include back inside the `#ifdef ARDUINO` block flips the pin red (`Assertion 'incPos < arduinoGuard' failed`).
+
+### Fix 14 — Gap-stop suppression gate was action-enum-based; now `gapSeq_ != NO_GAP` (Ping never sent)
+
+Fix 11 (above) moved the gap-stop decision into a pure function `decideGapTransition` returning a `GapAction` enum, and routed Ping::loop's send-suppression through that enum:
+
+```cpp
+if (a == GapAction::Stay || a == GapAction::Enter ||
+    a == GapAction::Update) {
+    drain + return;     // suppress sends
+}
+```
+
+That was wrong. `Stay` fires for two distinct cases — "no gap, no NAK" (the normal steady state at startup, sends MUST proceed) AND "in gap, waiting on retransmit" (sends MUST pause). Both look the same in the enum but mean opposite things for the send loop. Branching on the action enum conflates them. The bug shape: at startup, `lastNakSeq_` and `lastAckSeq_` are both `0xFF` (the `NO_GAP` sentinel), every loop returns `Stay`, every loop suppresses sends. The link is "connected" because the sweep completed; the app layer just never transmits. Both SYNC and ASYNC, both fill modes — completely silent wire. Discovered during a code review that walked the gap-stop block end-to-end against the link layer's documented default state.
+
+This release changes the caller's gate from action-enum-based to `gapSeq_`-based. After `gapSeq_ = nextGap`, the suppression check is `if (gapSeq_ != NO_GAP) { drain + return; }`. Stay-from-no-gap + Resume both leave `gapSeq_ == NO_GAP` (proceed); Enter / Update / in-gap Stay all leave `gapSeq_ != NO_GAP` (suppress). The pure function is unchanged — the bug was never in `decideGapTransition`, which has always been correct.
+
+**Why this slipped through the test gate:** `Ping` is `#ifdef ARDUINO` so no host test constructs a `Ping`. The host tests for gap-stop all exercise `decideGapTransition` directly — the pure function, which was correct. The bug was in the *caller's* branch logic, in `Ping::loop()`, which no host test ran. The integration suite's two-Link loopback tests Ping's other path (the link-layer ARQ / send pipeline) but doesn't drive the gap-stop block in isolation. AGENTS rule 18 says "every fix gets a regression test that fails when the fix is reverted" — the lesson is that the *caller* of a pure function needs its own test, even when the pure function is fully covered.
+
+Pinned by:
+- `run_test_ping_gap_transition::test_caller_sends_in_no_gap_steady_state` (new): reads Ping.h's suppression gate (the `if (...)` immediately after `gapSeq_ = nextGap` and before `int sentThisLoop = 0`), asserts it branches on `gapSeq_ != NO_GAP` and does NOT contain `a == GapAction::Stay`. Then runs 5 simulated startup loops with the FIXED gate (5 proceed, 0 suppressed) and cross-checks the bug-shape gate (5 suppressed) — if the bug-shape gate ever stops suppressing, the action enum has changed shape and this pin needs rewriting. Toggle-off verified: replacing `if (gapSeq_ != NO_GAP) {` with `if (a == GapAction::Stay || a == Enter || a == Update) {` flips the pin red (`Assertion 'gate.find("gapSeq_ != NO_GAP") != npos' failed`).
+- `run_test_ping_gap_transition::test_unconditional_read_pin` (updated): the old pin asserted "no `if (gapSeq_ != NO_GAP)` block in Ping.h", which is no longer true — the gate IS `if (gapSeq_ != NO_GAP)`, which is the correct shape. The pin now asserts (a) the gate branches on `gapSeq_ != NO_GAP`, (b) it does NOT match `a == GapAction::Stay`, and (c) the bug-shape 3-clause gate is absent from the body.
+
+Also: `test/test_desktop/al/link/sweep/OnBreakGuardTest.cpp` Pin 6's `char buf[16384]` read-buffer for `Ping.h` was bumped to 65536 — the file grew past 16 KB after the PingGap.h extraction and the Pin 14 caller-side comments. Pre-existing buffer too small; not a regression in any source file, just a stale buffer size.
+
+---
+
 ## v5.3.102
 
 **Boundary invariants: TX drain on setSpd, ILinkEvents split, WINDOW ownership inversion, baud-count clamp, test-flag eviction, named-constant static_assert**
@@ -4623,60 +4938,4 @@ Regression: `make test` (31/31),
 `./build/verify_build.sh`
 (`esp32:esp32:firebeetle32`).
 Wire format unchanged.
----
-
-## v5.3.83
-
-**ArqCache::hasRoom() — O(N)→O(1) pool scan on send hot path**
-
-`ArqCache::hasRoom()` walked all
-`POOL_SIZE=64` entries on every
-`Link::sendMsg`. At `WINDOW=32` the
-per-send cost was tolerable; widening
-the pipeline to amortise retx cost
-more would have turned the scan into
-the bottleneck. Replaced with a
-`poolFree_` counter maintained on
-every insert / free / clear /
-`testFillPool` / `testEmptyPool`.
-`hasRoom()` is now
-`pendingCount_ < SLOTS && poolFree_ > 0`
-— two integer comparisons, no scan.
-
-`assertInvariants()` (host build)
-cross-checks `poolFree_` against a
-fresh scan of `poolUsed_` on every
-insert and free; drift fires the
-invariant before any caller notices
-a wrong `hasRoom()` answer. The
-insert() allocation path still does
-a linear scan to locate the free
-slot index — that path runs at most
-once per real send, not per
-`hasRoom()` probe, so the
-bottleneck is gone.
-
-Regression tests (host, subsecond):
-`test_hasRoom_is_O1_after_pool_drain`
-(probes hasRoom across full fill +
-drain), `test_poolFree_track_matches_scan_after_replace`
-(insert-over-existing must hand the
-old pool buffer back), and
-`test_hasRoom_after_clearAll_resets_to_true`
-(counter reset on link reset). The
-existing `assertInvariants()` body
-in the host build is now the load-
-bearing pin for the counter; revert
-any of the increment / decrement
-sites and the suite explodes at the
-first insert.
-
-Limitations: `insert()` still does a
-linear scan to locate the free pool
-index. At `POOL_SIZE=64` that is one
-cache line per entry; tolerable for
-the rare allocation path. A free-
-list would make insert() O(1) too
-if a future bump pushes POOL_SIZE
-into the hundreds.
 ---
