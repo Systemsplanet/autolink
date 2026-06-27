@@ -449,8 +449,9 @@ void test_dead_code_boundary() {
     // method bodies across LinkCore / LinkTx /
     // LinkRx / LinkSweep / LinkTimers / LinkApi
     // — so dead-code searches must cover all six.
-    for (const char *tu : {"LinkCore.cpp", "LinkTx.cpp", "LinkRx.cpp",
-                           "LinkSweep.cpp", "LinkTimers.cpp", "LinkApi.cpp"}) {
+    for (const char *tu :
+         { "LinkCore.cpp", "LinkTx.cpp", "LinkRx.cpp", "LinkSweep.cpp",
+           "LinkTimers.cpp", "LinkApi.cpp" }) {
         chk((std::string("src/al/link/") + tu).c_str(), "retxNeeded_");
     }
 
@@ -460,8 +461,9 @@ void test_dead_code_boundary() {
     // there must be no definition
     // `void Link::sendFrame(` (no
     // _unlocked suffix).
-    for (const char *tu : {"LinkCore.cpp", "LinkTx.cpp", "LinkRx.cpp",
-                           "LinkSweep.cpp", "LinkTimers.cpp", "LinkApi.cpp"}) {
+    for (const char *tu :
+         { "LinkCore.cpp", "LinkTx.cpp", "LinkRx.cpp", "LinkSweep.cpp",
+           "LinkTimers.cpp", "LinkApi.cpp" }) {
         chk((std::string("src/al/link/") + tu).c_str(),
             "void Link::sendFrame(");
     }
@@ -473,8 +475,9 @@ void test_dead_code_boundary() {
     // uses arq_.decideSlot + applyRetx
     // directly).
     chk("src/al/link/Link.h", "popRetransmitSlot");
-    for (const char *tu : {"LinkCore.cpp", "LinkTx.cpp", "LinkRx.cpp",
-                           "LinkSweep.cpp", "LinkTimers.cpp", "LinkApi.cpp"}) {
+    for (const char *tu :
+         { "LinkCore.cpp", "LinkTx.cpp", "LinkRx.cpp", "LinkSweep.cpp",
+           "LinkTimers.cpp", "LinkApi.cpp" }) {
         chk((std::string("src/al/link/") + tu).c_str(), "popRetransmitSlot");
     }
     chk("src/al/link/arq/LinkArq.h", "popRetransmitSlot");
@@ -515,8 +518,9 @@ void test_dead_code_boundary() {
     // reset_unlocked(), never read,
     // never exposed in Diag or Stats.
     chk("src/al/link/Link.h", "swpRxBytes");
-    for (const char *tu : {"LinkCore.cpp", "LinkTx.cpp", "LinkRx.cpp",
-                           "LinkSweep.cpp", "LinkTimers.cpp", "LinkApi.cpp"}) {
+    for (const char *tu :
+         { "LinkCore.cpp", "LinkTx.cpp", "LinkRx.cpp", "LinkSweep.cpp",
+           "LinkTimers.cpp", "LinkApi.cpp" }) {
         chk((std::string("src/al/link/") + tu).c_str(), "swpRxBytes");
     }
 
