@@ -53,8 +53,7 @@ public:
     // in production.
     void setEvents(ILinkEvents &e) {
 #ifdef AUTOLINK_HOST_TEST
-        assert(events_ == nullptr &&
-               "setEvents called twice on the same HAL");
+        assert(events_ == nullptr && "setEvents called twice on the same HAL");
 #endif
         if (events_ != nullptr) {
             Log::log().error("IHal",
