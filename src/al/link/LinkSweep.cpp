@@ -47,18 +47,16 @@ int Link::bestSpd_unlocked() const {
 void Link::lockOk_unlocked(int idx, const char *tag) {
     // Record preferred baud so reset can
     // start next sweep there.
-    hw.setSpd(cfg.allowedBauds[idx]);
+    hw.setSpd(cfg.allowedBaudSafe(idx));
     spdI = idx;
     errs = 0;
     preferredBaud_ = (uint8_t)idx;
     baudRetries_ = 0;
     errWindowStartMs_ = hw.nowMs();
     errWindowCount_ = 0;
-    heartbeatPingsMissed_ = 0;
-    lastHeartbeatMs_ = hw.nowMs();
     lastRxMs = lastTxMs = hw.nowMs();
     Log::log().info(TAG, "Locked %lu baud (%s)",
-                    (unsigned long)cfg.allowedBauds[idx], tag);
+                    (unsigned long)cfg.allowedBaudSafe(idx), tag);
     changeState_unlocked(State::OK);
     wasEverOk_ = true;
     if (cfg.idleTimeoutMs > 0)
@@ -68,8 +66,8 @@ void Link::lockOk_unlocked(int idx, const char *tag) {
 bool Link::handleSwp_unlocked(uint8_t cobsSeq, uint8_t payload) {
     (void)cobsSeq;
     int lockIdx = -1;
-    if (isLockPayload(payload, cfg.allowedBaudsCount, &lockIdx)) {
-        hw.setSpd(cfg.allowedBauds[lockIdx]);
+    if (isLockPayload(payload, cfg.clampToMaxBauds(), &lockIdx)) {
+        hw.setSpd(cfg.allowedBaudSafe(lockIdx));
         spdI = lockIdx;
         sweep_.reset();
         lockOk_unlocked(lockIdx,
@@ -139,7 +137,7 @@ bool Link::applyMasterSwpAction_unlocked(SwpPhaseAction a) {
     case SwpPhaseAction::Lock: {
         int baud = sweep_.phase3Baud();
         sweep_.reset();
-        hw.setSpd(cfg.allowedBauds[baud]);
+        hw.setSpd(cfg.allowedBaudSafe(baud));
         spdI = baud;
         sendFrame_unlocked(LOCK_CMD + (uint8_t)baud);
         lockOk_unlocked(baud, "phase3");
@@ -152,7 +150,7 @@ bool Link::applyMasterSwpAction_unlocked(SwpPhaseAction a) {
         // we still owe the wire a probe PING.
         int baud = sweep_.phase3Baud();
         sendFrame_unlocked(PING_CMD);
-        int rt = roundTripMs(cfg.allowedBauds[baud]);
+        int rt = roundTripMs(cfg.allowedBaudSafe(baud));
         if (rt < 50)
             rt = 50;
         int acks = sweep_.phase3Acks();
@@ -160,7 +158,6 @@ bool Link::applyMasterSwpAction_unlocked(SwpPhaseAction a) {
         if (t3 < 200)
             t3 = 200;
         hw.startTimer(t3);
-        heartbeatPingsMissed_ = 0;
         return false;
     }
     case SwpPhaseAction::FallbackLockSlowest:
@@ -176,17 +173,15 @@ bool Link::applyPongSwpAction_unlocked(SwpPhaseAction a) {
     switch (a) {
     case SwpPhaseAction::SendPongAck:
         sendPongAck_unlocked();
-        heartbeatPingsMissed_ = 0;
         return false;
     case SwpPhaseAction::PromoteToPhase3:
         sweep_.enterPhase3(*this, spdI);
         sendPongAck_unlocked();
-        heartbeatPingsMissed_ = 0;
         return false;
     case SwpPhaseAction::Lock: {
         int lb = sweep_.phase3Baud();
         sweep_.reset();
-        hw.setSpd(cfg.allowedBauds[lb]);
+        hw.setSpd(cfg.allowedBaudSafe(lb));
         spdI = lb;
         sendFrame_unlocked(LOCK_CMD + (uint8_t)lb);
         lockOk_unlocked(lb, "p3-pong");
@@ -194,7 +189,6 @@ bool Link::applyPongSwpAction_unlocked(SwpPhaseAction a) {
     }
     case SwpPhaseAction::Stay:
         sendPongAck_unlocked();
-        heartbeatPingsMissed_ = 0;
         return false;
     case SwpPhaseAction::PromoteToPhase2:
         sendPongAck_unlocked();
@@ -212,7 +206,7 @@ bool Link::applyPongSwpAction_unlocked(SwpPhaseAction a) {
 bool Link::handleLck_unlocked(uint8_t cobsSeq, uint8_t payload) {
     (void)cobsSeq;
     if (isMaster) {
-        if (payload < (int)cfg.allowedBaudsCount)
+        if (payload < (int)cfg.clampToMaxBauds())
             lockOk_unlocked((int)payload, "REQ");
         return false;
     }
