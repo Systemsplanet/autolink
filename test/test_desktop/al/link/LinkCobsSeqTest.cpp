@@ -424,7 +424,12 @@ void test_lost_msgs_burst_vs_single() {
         NullArqCache cache;
         AutoLinkConfig cfg2 = cfg;
         cfg2.reorderHoldMs = 0;
-        Link c(sHal, cache, false, cfg2);
+        // Fresh MockHal — a second Link against the same HAL
+        // would double-bind the listener (the IHal.setEvents
+        // guard asserts on this in the host build). The test
+        // is about per-Link state, not HAL sharing.
+        MockHal cHal;
+        Link c(cHal, cache, false, cfg2);
         c.onRx(cobsFrame(0).data(), (int)cobsFrame(0).size());
         c.onRx(cobsFrame(4).data(), (int)cobsFrame(4).size());
         c.onRx(cobsFrame(5).data(), (int)cobsFrame(5).size());
