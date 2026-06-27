@@ -23,14 +23,12 @@ int UtilFrameRx::feed(const uint8_t *data, int len) {
             // Wire NAK is 3 bytes raw:
             //   [0xFE, seq, frame_crc8]
             // Data is at least 2 bytes raw (seq + crc8).
-            if (decLen >= 5 &&
-                decoded[0] == ACK_TYPE &&
+            if (decLen >= 5 && decoded[0] == ACK_TYPE &&
                 UtilCrc::crc8(decoded, 4) == decoded[4]) {
-                uint16_t bytesRecvd = (uint16_t)decoded[2] |
-                    ((uint16_t)decoded[3] << 8);
+                uint16_t bytesRecvd =
+                    (uint16_t)decoded[2] | ((uint16_t)decoded[3] << 8);
                 dropped = lis.onAck(decoded[1], bytesRecvd);
-            } else if (decLen >= 3 &&
-                       decoded[0] == ACK_TYPE &&
+            } else if (decLen >= 3 && decoded[0] == ACK_TYPE &&
                        UtilCrc::crc8(decoded, 2) == decoded[2]) {
                 // Legacy 3-byte ACK frame (no bytes-recvd):
                 // a peer still running the 5.3.x wire format.
