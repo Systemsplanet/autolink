@@ -150,43 +150,53 @@ void test_esphal_begin_does_not_retry_on_esp_fail_and_logs_oom() {
 }
 
 void test_esphal_derives_stream_buffer_size_from_maxmsg_and_mode() {
-    std::cout << "\n=== EspHal::begin() derives stream buffer size from "
-                 "cfg.maxMsg + cfg.mode (HAL owns the decision) ==="
+    std::cout << "\n=== EspHal::begin() reserves the ASYNC 16-slot floor "
+                 "regardless of boot mode (HAL owns the decision) ==="
               << std::endl;
     std::string src = readFile(projectRoot() + "/src/al/hal/EspHal.h");
     assert(!src.empty());
 
     // The HAL must derive the stream buffer floor from
-    // cfg.maxMsg and cfg.mode internally. The pre-fix
-    // facade mutator (clampBuffers) computed this in
-    // src/AutoLink.cpp; the new contract is that the
-    // facade does NOT touch cfg.streamBufferSize and
-    // EspHal::begin() chooses its own size.
+    // cfg.maxMsg internally. The pre-fix facade mutator
+    // (clampBuffers) computed this in src/AutoLink.cpp;
+    // the new contract is that the facade does NOT
+    // touch cfg.streamBufferSize and EspHal::begin()
+    // chooses its own size.
 
     // Pin: a method or helper that takes AutoLinkConfig
-    // and returns a size_t, referencing both maxMsg and
-    // mode. The simplest shape is a static method
-    // `streamBufferFloor(const AutoLinkConfig&)` whose
-    // body references `cfg.maxMsg` and `cfg.mode`. Also
-    // accept an inline lambda / block with the same
-    // shape. We require the pattern inside EspHal.h.
+    // and returns a size_t, referencing cfg.maxMsg. The
+    // pre-fix shape branched on cfg.mode (SYNC=2 slots,
+    // ASYNC=16 slots); a FreeRTOS stream buffer can't be
+    // resized in flight, so the live SYNC->ASYNC switch
+    // had no effect on the stream buffer (SYNC boot
+    // sized for 2 slots, ASYNC pressed but couldn't
+    // grow it). The fix is to size for the 16-slot
+    // pipeline unconditionally and let the user-set
+    // cfg.streamBufferSize raise the floor if they
+    // want a larger buffer. The mode branch is gone.
     auto floorPos = src.find("streamBufferFloor");
     bool hasFloorFn = floorPos != std::string::npos;
     bool hasInlineDerive = src.find("cfg.maxMsg") != std::string::npos &&
-        src.find("cfg.mode") != std::string::npos &&
         src.find("xStreamBufferCreate") != std::string::npos;
     assert(hasFloorFn || hasInlineDerive);
     if (hasFloorFn) {
-        // If a streamBufferFloor helper exists, it must
-        // reference both cfg.maxMsg and cfg.mode and
-        // branch on ASYNC vs SYNC.
-        auto floorEnd = src.find('\n', floorPos);
-        std::string floorSlice = src.substr(floorPos, floorEnd - floorPos);
-        assert(floorSlice.find("AutoLinkConfig") != std::string::npos);
-        assert(src.substr(floorPos, 400).find("cfg.maxMsg") !=
-               std::string::npos);
-        assert(src.substr(floorPos, 400).find("cfg.mode") != std::string::npos);
-        assert(src.substr(floorPos, 400).find("ASYNC") != std::string::npos);
+        // The helper must reference cfg.maxMsg. The
+        // 16-slot floor must be unconditional (no
+        // ternary on cfg.mode, no SYNC slot count).
+        std::string floorWindow = src.substr(floorPos, 600);
+        assert(floorWindow.find("cfg.maxMsg") != std::string::npos);
+        // The slots constant is 16 (the ASYNC value),
+        // not 2. Reject a slots count of 2 in any
+        // branch — that was the SYNC boot's floor.
+        assert(floorWindow.find("slots = 16") != std::string::npos ||
+               floorWindow.find("slots  = 16") != std::string::npos ||
+               floorWindow.find("constexpr int slots = 16") !=
+                   std::string::npos);
+        // No mode-based ternary choosing between
+        // 16 and 2 slots. The pre-fix shape was
+        // `int slots = (cfg.mode == ASYNC) ? 16 : 2;`.
+        assert(floorWindow.find("(cfg.mode == ") == std::string::npos);
+        assert(floorWindow.find("ASYNC) ? 16 : 2") == std::string::npos);
     }
 
     // The facade must NOT define or use clampBuffers
@@ -198,8 +208,8 @@ void test_esphal_derives_stream_buffer_size_from_maxmsg_and_mode() {
     assert(!facadeHdr.empty());
     assert(facadeHdr.find("clampBuffers") == std::string::npos);
 
-    std::cout << "  PASS (EspHal derives stream buffer size from "
-                 "cfg.maxMsg + cfg.mode; facade has no clampBuffers)\n";
+    std::cout << "  PASS (EspHal reserves 16-slot floor unconditionally "
+                 "from cfg.maxMsg; facade has no clampBuffers)\n";
 }
 
 void test_esphal_no_legacy_single_byte_peek_buf() {
