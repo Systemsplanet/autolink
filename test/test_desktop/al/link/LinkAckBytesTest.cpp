@@ -48,9 +48,8 @@ static const int kNumBauds = (int)(sizeof(kBauds) / sizeof(kBauds[0]));
 // OK via the standard negotiator, then read the
 // bytes on the wire and verify the shape.
 static void test_ack_frame_is_5_bytes_with_bytes_recvd() {
-    std::cout
-        << "\n=== Pin 1: sendAckFrame_unlocked emits 5-byte ACK frame ==="
-        << std::endl;
+    std::cout << "\n=== Pin 1: sendAckFrame_unlocked emits 5-byte ACK frame ==="
+              << std::endl;
     NullArqCache cache;
     AutoLinkConfig cfg;
     for (int i = 0; i < kNumBauds; i++)
@@ -98,9 +97,7 @@ static void test_ack_frame_is_5_bytes_with_bytes_recvd() {
     // inspect the resulting onAck callback.
     struct AckCollector : public UtilFrameRx::Listener {
         std::vector<std::pair<uint8_t, uint16_t>> events;
-        bool onPayload(uint8_t, const uint8_t *, int) override {
-            return false;
-        }
+        bool onPayload(uint8_t, const uint8_t *, int) override { return false; }
         bool onAck(uint8_t s, uint16_t bytesRecvd) override {
             events.emplace_back(s, bytesRecvd);
             return false;
@@ -120,10 +117,9 @@ static void test_ack_frame_is_5_bytes_with_bytes_recvd() {
         }
     }
     assert(matched);
-    std::cout
-        << "  PASS (ack seq=5 bytes=3 received; this-release 5-byte "
-           "wire shape end-to-end)"
-        << std::endl;
+    std::cout << "  PASS (ack seq=5 bytes=3 received; this-release 5-byte "
+                 "wire shape end-to-end)"
+              << std::endl;
 }
 
 // Pin 2: Link::bytesRecvdFor(seq) populates from
@@ -147,9 +143,8 @@ static void test_ack_frame_is_5_bytes_with_bytes_recvd() {
 // ACK is the only Pong-side response in this
 // release.
 static void test_bytes_recvd_table_populated_on_ack() {
-    std::cout
-        << "\n=== Pin 2: Link::bytesRecvdFor(seq) populated on ACK ==="
-        << std::endl;
+    std::cout << "\n=== Pin 2: Link::bytesRecvdFor(seq) populated on ACK ==="
+              << std::endl;
     NullArqCache cache;
     AutoLinkConfig cfg;
     for (int i = 0; i < kNumBauds; i++)
@@ -200,10 +195,9 @@ static void test_bytes_recvd_table_populated_on_ack() {
     // and payload as separate chunks would change
     // the expected value.
     assert(ping.bytesRecvdFor(baseSeq) == 10);
-    std::cout
-        << "  PASS (bytesRecvd_[baseSeq] = 10 after ping.sendMsg + "
-           "pong's 5-byte ACK round-trip)"
-        << std::endl;
+    std::cout << "  PASS (bytesRecvd_[baseSeq] = 10 after ping.sendMsg + "
+                 "pong's 5-byte ACK round-trip)"
+              << std::endl;
 }
 
 // Pin 3: pool-exhaustion drop. With the ARQ cache
@@ -211,9 +205,8 @@ static void test_bytes_recvd_table_populated_on_ack() {
 // the link so a stalled receiver bounces back to
 // SWP rather than spinning on maxRetx.
 static void test_pool_exhaustion_drop_in_async_mode() {
-    std::cout
-        << "\n=== Pin 3: pool exhaustion drops the link in ASYNC mode ==="
-        << std::endl;
+    std::cout << "\n=== Pin 3: pool exhaustion drops the link in ASYNC mode ==="
+              << std::endl;
     // Pin via source-grep: LinkTimers.cpp's
     // onTimerOk_unlocked has the
     // !arqCache_.hasRoom() && pendingCount() > 0
@@ -242,9 +235,8 @@ static void test_pool_exhaustion_drop_in_async_mode() {
     assert(sendBreak);
     // Order: hasRoom check BEFORE reset.
     assert(hasRoom < reset);
-    std::cout
-        << "  PASS (pool-full + pending > 0 drops link in ASYNC mode)"
-        << std::endl;
+    std::cout << "  PASS (pool-full + pending > 0 drops link in ASYNC mode)"
+              << std::endl;
 }
 
 // Pin 4: HoldAck path sends a NAK. Pin the new
@@ -270,9 +262,8 @@ static void test_holdack_sends_nak() {
     // byte stream.
     const char *retFalse = strstr(nak, "return false;");
     assert(retFalse);
-    std::cout
-        << "  PASS (HoldAck -> sendNakFrame_unlocked + return false)"
-        << std::endl;
+    std::cout << "  PASS (HoldAck -> sendNakFrame_unlocked + return false)"
+              << std::endl;
 }
 
 int main() {
