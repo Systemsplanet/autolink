@@ -1,5 +1,14 @@
-// Pong role: RX-driven echo.
+// Pong role: RX-driven ack-only.
 // Holds PingPongBase by composition.
+//
+// Pong does NOT echo the received payload. For each received
+// frame the link layer sends a wire-level ACK carrying the
+// acked cobsSeq and the number of bytes received (extended
+// wire ACK frame; see LinkTx::sendAckFrame_unlocked). Pong's
+// loop just tracks the ack count and verifies the per-chunk
+// CRC was correct (the link layer already drops frames with
+// a bad CRC before they reach onPayload, so an ACK means
+// the CRC was correct by construction).
 #pragma once
 #ifdef ARDUINO
 
@@ -44,8 +53,8 @@ public:
     void loop() {
         if (!base_.comm_.ready()) {
             if (base_.wasReady_) {
-                base_.log_.info("Pong", "link lost  echoes_sent=%lu",
-                                (unsigned long)echoCount_);
+                base_.log_.info("Pong", "link lost  acks_sent=%lu",
+                                (unsigned long)ackCount_);
                 base_.wasReady_ = false;
                 tNotReady_ = millis();
 
@@ -74,37 +83,41 @@ public:
             base_.wasReady_ = true;
         }
 
+        // Drain incoming frames. The link layer already
+        // sent the per-frame wire ACK with the cobsSeq and
+        // bytes-recvd as soon as onPayload fired (see
+        // LinkRx::onPayload -> sendAckFrame_unlocked with
+        // the bytes-recvd). Pong does NOT echo the
+        // payload back; the wire ACK is the entire
+        // Pong-side response. Just count the receive
+        // and let the app buffer fill; nothing else to
+        // send.
         int n;
         int recvThisLoop = 0;
-        const int maxEcho = (base_.comm_.mode() == AutoLinkConfig::Mode::SYNC)
+        const int maxAck = (base_.comm_.mode() == AutoLinkConfig::Mode::SYNC)
             ? 1
             : PingPongBase::MAX_TX_PER_LOOP;
         while ((n = base_.comm_.recv(base_.buf_, sizeof base_.buf_)) > 0 &&
-               recvThisLoop < maxEcho) {
+               recvThisLoop < maxAck) {
             recvThisLoop++;
-            if (base_.comm_.send(base_.buf_, n)) {
-                echoCount_++;
-                base_.log_.debug("Pong", "echo #%lu  %d bytes  ok",
-                                 (unsigned long)echoCount_, n);
-            } else {
-                base_.log_.warning(
-                    "Pong",
-                    "echo #%lu  %d bytes  send skipped (link not ready)",
-                    (unsigned long)echoCount_, n);
-            }
+            ackCount_++;
+            base_.log_.debug(
+                "Pong",
+                "echo %u %d",
+                (unsigned)base_.comm_.lastRxSeq(), n);
             base_.comm_.blinkWait(1);
         }
         if (n < 0) {
             base_.log_.error("Pong",
-                             "recv rejected (CRC/desync)  echoCount=%lu",
-                             (unsigned long)echoCount_);
+                             "recv rejected (CRC/desync)  ackCount=%lu",
+                             (unsigned long)ackCount_);
         }
 
-        logStats(base_.log_, "Pong", base_.comm_, stat_, echoCount_, 0);
+        logStats(base_.log_, "Pong", base_.comm_, stat_, ackCount_, 0);
     }
 
 private:
-    uint64_t echoCount_ = 0;
+    uint64_t ackCount_ = 0;
     uint32_t tNotReady_ = 0;
     StatBaseline stat_;
 
