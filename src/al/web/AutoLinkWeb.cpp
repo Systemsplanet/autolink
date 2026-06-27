@@ -7,7 +7,7 @@
 //
 // The HTTP request handlers (handleRoot, handleStats,
 // handleLogs, handleReset, handleLevel, handleMode,
-// handleModeToggle, handleMsgPause, handleDelay,
+// handleFillMode, handleMsgPause, handleDelay,
 // handleReboot) live in AutoLinkWebHandlers.cpp. Same
 // class, same namespace, separate TU -- the linker
 // resolves static / private member references across
@@ -438,15 +438,16 @@ bool AutoLinkWeb::setupHttpAndLogging_() {
         const httpd_uri_t r4 = { "/reboot", HTTP_POST, handleReboot, this };
         const httpd_uri_t r5 = { "/level", HTTP_POST, handleLevel, this };
         const httpd_uri_t r6 = { "/mode", HTTP_POST, handleMode, this };
-        const httpd_uri_t r7 = { "/pausemsg", HTTP_POST, handleMsgPause, this };
-        const httpd_uri_t r8 = { "/delay", HTTP_POST, handleDelay, this };
-        const httpd_uri_t r9 = { "/mode/toggle", HTTP_POST, handleModeToggle,
+        const httpd_uri_t r7 = { "/fillmode", HTTP_POST, handleFillMode,
                                  this };
+        const httpd_uri_t r8 = { "/pausemsg", HTTP_POST, handleMsgPause,
+                                 this };
+        const httpd_uri_t r9 = { "/delay", HTTP_POST, handleDelay, this };
         static const httpd_uri_t *const URIS[] = { &r0, &r1, &r2, &r3, &r4,
                                                    &r5, &r6, &r7, &r8, &r9 };
         static const char *const PATHS[] = {
             "/",      "/stats", "/logs",     "/reset", "/reboot",
-            "/level", "/mode",  "/pausemsg", "/delay", "/mode/toggle"
+            "/level", "/mode",  "/fillmode", "/pausemsg", "/delay"
         };
         for (size_t i = 0; i < sizeof(URIS) / sizeof(URIS[0]); i++) {
             esp_err_t ruh = httpd_register_uri_handler(server_, URIS[i]);
