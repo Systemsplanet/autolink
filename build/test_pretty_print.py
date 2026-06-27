@@ -126,6 +126,40 @@ for suffix in ['.c', '.cc', '.cxx', '.hh', '.hpp', '.hxx']:
        r['ok'] and r['formatted'],
        suffix=suffix, report=r)
 
+# ---------------------------------------------------------------------------
+# Generated-header skip: AutoLinkWebHtml.h is the output of
+# dashboard_assets.py. clang-format re-wraps long raw-string
+# declarations across multiple lines, which then fails the
+# generator's --check byte-for-byte contract (the generator
+# writes one-line, clang-format writes two-line). pretty_print
+# must skip generated headers so the generator's bytes survive.
+# ---------------------------------------------------------------------------
+print('\nGenerated-header skip:')
+
+with tempfile.TemporaryDirectory() as td:
+    # Mirror the real layout: src/al/web/AutoLinkWebHtml.h
+    # so the path-suffix matcher in _is_generated() hits.
+    gen_dir = os.path.join(td, 'src', 'al', 'web')
+    os.makedirs(gen_dir)
+    gen_p = os.path.join(gen_dir, 'AutoLinkWebHtml.h')
+    original = (
+        'static const char DASHBOARD_HTML[] = R"DASH('
+        '<!DOCTYPE html><html></html>'
+        ')DASH";\n')
+    with open(gen_p, 'w') as f:
+        f.write(original)
+
+    r = pp.pretty_print(gen_p)
+    after = open(gen_p).read() if os.path.exists(gen_p) else None
+    _ok(
+        '10. generated header (AutoLinkWebHtml.h): skipped, '
+        'no clang-format, content unchanged',
+        r['ok']
+        and not r['formatted']
+        and any('generated' in n for n in r['notes'])
+        and after == original,
+        report=r, after=after, original=original)
+
 
 # ---------------------------------------------------------------------------
 # CLI smoke test
