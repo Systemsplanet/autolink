@@ -268,7 +268,8 @@ class Link : private UtilFrameRx::Listener,
     // fallbackLockSlowest would refuse to lock
     // on 0 anyway).
     int allowedBaudsCount() const override {
-        if (cfg.allowedBaudsCount < 0) return 0;
+        if (cfg.allowedBaudsCount < 0)
+            return 0;
         if (cfg.allowedBaudsCount > AUTOLINK_MAX_BAUDS)
             return AUTOLINK_MAX_BAUDS;
         return cfg.allowedBaudsCount;
@@ -360,6 +361,10 @@ public:
 
     void setMode(AutoLinkConfig::Mode m) { cfg.mode = m; }
     AutoLinkConfig::Mode mode() const { return cfg.mode; }
+
+    // Configured max message size. Ping's sequential
+    // mode grows its per-send size up to this cap.
+    size_t maxMsg() const { return cfg.maxMsg; }
 
     // Runtime-mutable throttle (used by the
     // web dashboard's delay-ms widget).
