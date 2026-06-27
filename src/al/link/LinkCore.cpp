@@ -39,7 +39,7 @@ Link::Link(IHal &h, IArqCache &cache, bool isMasterNode,
            const AutoLinkConfig &config)
     : hw(h), arqCache_(cache), isMaster(isMasterNode), cfg(config),
       state(State::OK), errs(0), spdI(0), pingSample(0), emptySweeps(0),
-      baudSweep((int)config.allowedBaudsCount), rxIdx(0), frameRx(*this),
+      baudSweep((int)config.clampedCount()), rxIdx(0), frameRx(*this),
       rxMsgLen(-1), rxMsgCrc(0), lckRetries(0), lastRxMs(0), lastTxMs(0),
       txBytes(0), rxBytes(0), discCount(0), frameErrs(0) {
     UtilBaudSweep::Config sc;
@@ -123,7 +123,7 @@ void Link::kickoff() {
     } else {
         hw.lock();
         changeState_unlocked(State::SWP);
-        spdI = cfg.allowedBaudsCount - 1;
+        spdI = cfg.clampToMaxBauds() - 1;
         pingSample = 0;
         rxIdx = 0;
         rxMsgLen = -1;
@@ -133,9 +133,9 @@ void Link::kickoff() {
         sweep_.setPhase(SweepPhase::PHASE1);
         hw.unlock();
         hw.clearAppBuf();
-        hw.setSpd(cfg.allowedBauds[spdI]);
+        hw.setSpd(cfg.allowedBaudSafe(spdI));
         Log::log().info(TAG, "SWP Pong P1 baud[%d]=%lu", spdI,
-                        (unsigned long)cfg.allowedBauds[spdI]);
+                        (unsigned long)cfg.allowedBaudSafe(spdI));
         // Slave must outlast one full master P2 dwell so the
         // slave's P1 listen window covers the master's PING
         // without being raced by the master's P2 timer.
@@ -177,6 +177,10 @@ void Link::reset_unlocked(bool count) {
     pendingRetxBase_ = NO_BASE;
     reorder_.clearAll();
     resetSeq_unlocked();
+    lastAckSeq_ = 0xFF;
+    lastNakSeq_ = 0xFF;
+    lastRxSeq_ = 0xFF;
+    memset(bytesRecvd_, 0, sizeof(bytesRecvd_));
     hw.clearAppBuf();
     sweep_.enterPhase1(*this);
     arqCache_.clearAll();
@@ -228,8 +232,8 @@ int Link::getCurrentSpdIndex() const {
 }
 uint32_t Link::getCurrentBaud() const {
     hw.lock();
-    uint32_t b = (spdI >= 0 && spdI < (int)cfg.allowedBaudsCount)
-        ? cfg.allowedBauds[spdI]
+    uint32_t b = (spdI >= 0 && spdI < cfg.clampedCount())
+        ? cfg.allowedBaudSafe(spdI)
         : 0;
     hw.unlock();
     return b;
