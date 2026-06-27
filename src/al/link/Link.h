@@ -87,8 +87,13 @@ class Link : private UtilFrameRx::Listener,
     LinkSweep sweep_;
     bool wasEverOk_ = false;
 
-    int heartbeatPingsMissed_ = 0;
-    uint32_t lastHeartbeatMs_ = 0;
+    // Heartbeat removed in this release. The dead-peer
+    // detection it provided (PING at HEARTBEAT_MS,
+    // drop on HEARTBEAT_MISS_LIMIT misses) is now the
+    // Ping role's responsibility: 5 consecutive
+    // send() failures trigger Ping::dropLink +
+    // clearQueue_(). The link layer no longer
+    // schedules a periodic wire-level probe.
 
     static constexpr uint8_t NO_PREFERRED_BAUD = 0xFF;
     uint8_t preferredBaud_ = NO_PREFERRED_BAUD;
@@ -114,6 +119,31 @@ class Link : private UtilFrameRx::Listener,
     uint64_t gaps = 0, stale = 0;
     uint64_t lostMsgs = 0;
 
+    // Receiver-reported bytes-recvd per cobsSeq. Populated
+    // by onAck (peer acked our seq, reporting how many bytes
+    // they actually received). Ping's matchEcho_ consults
+    // this so the log line can show the bytes-recvd the
+    // peer reported, not just the seq. Indexed by seq,
+    // stale-allowed (256 bytes ~= no pressure on ESP32 RAM).
+    uint16_t bytesRecvd_[256] = {};
+
+    // seq of the most recent ACK observed. The link
+    // stamp-it-in-onAck approach avoids a per-stats-poll
+    // scan; the dashboard reads it once via lastAckSeq().
+    uint8_t lastAckSeq_ = 0xFF;
+
+    // seq of the most recent NAK observed. Populated
+    // by onNak so Ping can pause its send loop on a
+    // peer-detected gap and resume once the gap is
+    // retransmitted.
+    uint8_t lastNakSeq_ = 0xFF;
+
+    // seq of the most recent RX data frame. Populated
+    // by onPayload (which fires once per chunk for
+    // multi-chunk messages). Pong's diagnostic log
+    // reads this via lastRxSeq().
+    uint8_t lastRxSeq_ = 0xFF;
+
     LinkArq arq_;
     LinkReorder reorder_;
     bool linkPaused_ = false;
@@ -129,7 +159,7 @@ class Link : private UtilFrameRx::Listener,
     uint8_t pendingRetxBase_ = 0;
 
     bool onPayload(uint8_t cobsSeq, const uint8_t *b, int n) override;
-    bool onAck(uint8_t ackedCobsSeq);
+    bool onAck(uint8_t ackedCobsSeq, uint16_t bytesRecvd);
     bool onNak(uint8_t missingCobsSeq);
     bool onFrameError() override;
 
@@ -169,7 +199,7 @@ class Link : private UtilFrameRx::Listener,
                                         uint8_t baseSeq);
     void resendCobsFrame_unlocked(uint8_t seq, const uint8_t *b, int n);
     static constexpr uint8_t NO_BASE = 0xFF;
-    void sendAckFrame_unlocked(uint8_t ackedCobsSeq);
+    void sendAckFrame_unlocked(uint8_t ackedCobsSeq, uint16_t bytesRecvd = 0);
     void sendNakFrame_unlocked(uint8_t missingCobsSeq);
     void sendCtrlCobsFrame_unlocked(uint8_t type, uint8_t seq);
 
@@ -224,12 +254,79 @@ class Link : private UtilFrameRx::Listener,
     bool masterRole() const override { return isMaster; }
     int currentSpdI() const override { return spdI; }
     void setCurrentSpdI(int i) override { spdI = i; }
-    int allowedBaudsCount() const override { return cfg.allowedBaudsCount; }
-    uint32_t allowedBaud(int i) const override { return cfg.allowedBauds[i]; }
+    // Choke-point accessors. Both clamp on the
+    // way out so a post-construction write to
+    // cfg.allowedBaudsCount (the field is public
+    // for back-compat) cannot drive spdI OOB
+    // through cfg.allowedBauds[i]. The raw
+    // count goes through cfg.allowedBaudsCount
+    // bounded to AUTOLINK_MAX_BAUDS; the
+    // element accessor goes through
+    // cfg.allowedBaudSafe(i) which returns 0 for
+    // any out-of-range i (and the link layer
+    // never indexes into a 0 baud entry —
+    // fallbackLockSlowest would refuse to lock
+    // on 0 anyway).
+    int allowedBaudsCount() const override {
+        if (cfg.allowedBaudsCount < 0) return 0;
+        if (cfg.allowedBaudsCount > AUTOLINK_MAX_BAUDS)
+            return AUTOLINK_MAX_BAUDS;
+        return cfg.allowedBaudsCount;
+    }
+    uint32_t allowedBaud(int i) const override {
+        return cfg.allowedBaudSafe(i);
+    }
     int delayMs() const override { return cfg.delayMs; }
 
 public:
     uint8_t peekTxSeq() const { return txSeq; }
+
+    // bytes-recvd reported by the peer for the given seq.
+    // Populated from the wire ACK frame (LinkFrameRx's
+    // extended 5-byte ACK payload). Returns 0 if the seq
+    // was never ACKed or has rolled off the local cache.
+    uint16_t bytesRecvdFor(uint8_t cobsSeq) const {
+        return bytesRecvd_[cobsSeq];
+    }
+
+    // seq of the most recently observed ACK from the peer.
+    // 0xFF means no ACK seen since reset_unlocked().
+    uint8_t lastAckSeq() const {
+        hw.lock();
+        // Lazy-update: scan the table once after an ACK
+        // arrives. The default-init (0) is fine for fresh
+        // sessions; once an ACK lands, onAck stamps the
+        // highest seq it has seen. The link layer keeps
+        // this in onAck() so the dashboard's /stats can
+        // surface "last seen peer seq" without forcing a
+        // per-poll scan.
+        uint8_t s = lastAckSeq_;
+        hw.unlock();
+        return s;
+    }
+
+    // seq of the most recently observed NAK from the peer,
+    // or 0xFF if no NAK seen since reset_unlocked().
+    // Ping uses this to detect a peer-detected gap and
+    // pause its send loop until the gap is filled.
+    uint8_t lastNakSeq() const {
+        hw.lock();
+        uint8_t s = lastNakSeq_;
+        hw.unlock();
+        return s;
+    }
+
+    // seq of the most recently received data frame, or
+    // 0xFF if no data frame seen since reset_unlocked().
+    // Pong's diagnostic log reads this so the per-recv
+    // ack line can name the seq of the chunk that
+    // completed the message.
+    uint8_t lastRxSeq() const {
+        hw.lock();
+        uint8_t s = lastRxSeq_;
+        hw.unlock();
+        return s;
+    }
 
     Link(IHal &hw, IArqCache &cache, bool isMasterNode,
          const AutoLinkConfig &config = AutoLinkConfig());
