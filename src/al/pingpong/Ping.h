@@ -74,6 +74,13 @@ public:
         // Step 3: bring up the link layer. prePaused=true so
         // no break fires until the user hits Start.
         bringUpLink(base_.log_, base_.comm_, paused_);
+        // Sequential mode grows the per-send size up
+        // to the configured max. Pull it from the
+        // facade now so loop()'s pickMsgSize_ sees
+        // the live cap, not the pre-fix hard-coded
+        // 1024 (which capped sequential even when the
+        // user configured a larger maxMsg).
+        maxSeqSize_ = (int)base_.comm_.maxMsg();
 
         // Step 4: decide gate mode.
         // If web monitor is up: wait for user to hit Start.
@@ -192,23 +199,20 @@ public:
             uint8_t lastNak = base_.comm_.lastNakSeq();
             uint8_t lastAck = base_.comm_.lastAckSeq();
             uint8_t nextGap = gapSeq_;
-            GapAction a = decideGapTransition(gapSeq_, lastNak, lastAck,
-                                              nextGap);
+            GapAction a =
+                decideGapTransition(gapSeq_, lastNak, lastAck, nextGap);
             if (a == GapAction::Enter) {
-                base_.log_.warning(
-                    "Ping",
-                    "gap stop: missing seq=%u — sending paused",
-                    (unsigned)nextGap);
+                base_.log_.warning("Ping",
+                                   "gap stop: missing seq=%u — sending paused",
+                                   (unsigned)nextGap);
             } else if (a == GapAction::Update) {
                 base_.log_.warning(
                     "Ping",
                     "gap stop: missing seq=%u (was %u) — sending paused",
                     (unsigned)nextGap, (unsigned)gapSeq_);
             } else if (a == GapAction::Resume) {
-                base_.log_.info(
-                    "Ping",
-                    "gap resumed: seq=%u acked",
-                    (unsigned)gapSeq_);
+                base_.log_.info("Ping", "gap resumed: seq=%u acked",
+                                (unsigned)gapSeq_);
             }
             gapSeq_ = nextGap;
             // Suppress sends only when a gap is actually
@@ -237,14 +241,18 @@ public:
                     while (count_ > 0 &&
                            base_.comm_.isAcked(queue_[head_].seq)) {
                         successEchoCount_++;
-                        uint16_t bytesAcked =
-                            base_.comm_.bytesRecvdFor(
-                                queue_[head_].seq);
-                        base_.log_.debug(
-                            "Ping",
-                            "echo %u %u %d",
-                            (unsigned)queue_[head_].seq,
-                            (unsigned)bytesAcked, count_ - 1);
+                        // The peer's wire ACK reports the
+                        // merged-chunk length pushed to its
+                        // app buffer (6-byte MSG_HDR + the
+                        // first chunk's payload for a
+                        // multi-chunk message), not the
+                        // user-visible message size. Log the
+                        // message size from the local slot —
+                        // that's what the operator wants.
+                        base_.log_.debug("Ping", "echo %u %u %d",
+                                         (unsigned)queue_[head_].seq,
+                                         (unsigned)queue_[head_].len,
+                                         count_ - 1);
                         head_ = (head_ + 1) % WINDOW;
                         count_--;
                     }
@@ -279,10 +287,9 @@ public:
                     "pending=%d  consec=%lu",
                     n, count_, (unsigned long)consecSendFail_);
                 if (consecSendFail_ >= MAX_SEND_FAIL) {
-                    base_.log_.error(
-                        "Ping",
-                        "send failed %lu times — dropping link",
-                        (unsigned long)consecSendFail_);
+                    base_.log_.error("Ping",
+                                     "send failed %lu times — dropping link",
+                                     (unsigned long)consecSendFail_);
                     consecSendFail_ = 0;
                     clearQueue_();
                     base_.comm_.dropLink();
@@ -338,16 +345,19 @@ public:
         // Link accessor that reads arq_'s per-seq pending
         // bit without taking the lock twice.
         if (count_ > 0) {
-            while (count_ > 0 &&
-                   base_.comm_.isAcked(queue_[head_].seq)) {
+            while (count_ > 0 && base_.comm_.isAcked(queue_[head_].seq)) {
                 successEchoCount_++;
-                uint16_t bytesAcked =
-                    base_.comm_.bytesRecvdFor(queue_[head_].seq);
-                base_.log_.debug(
-                    "Ping",
-                    "echo %u %u %d",
-                    (unsigned)queue_[head_].seq,
-                    (unsigned)bytesAcked, count_ - 1);
+                // The peer's wire ACK reports the
+                // merged-chunk length pushed to its
+                // app buffer (6-byte MSG_HDR + the
+                // first chunk's payload for a
+                // multi-chunk message), not the
+                // user-visible message size. Log the
+                // message size from the local slot —
+                // that's what the operator wants.
+                base_.log_.debug("Ping", "echo %u %u %d",
+                                 (unsigned)queue_[head_].seq,
+                                 (unsigned)queue_[head_].len, count_ - 1);
                 head_ = (head_ + 1) % WINDOW;
                 count_--;
             }
@@ -489,10 +499,14 @@ private:
 
     static constexpr uint32_t STALL_MS = 10000;
     static constexpr uint32_t SETTLE_MS = 100;
-    // Random mode: 1024-byte floor forces multi-chunk
-    // sends in steady state so the ARQ chunk path is
-    // exercised by the ping/pong loop.
-    static constexpr int RANDOM_MIN_BYTES = 1024;
+    // Random mode: 1-byte floor. The previous 1024
+    // floor matched the cap, collapsing the random
+    // range to a single value (maxSeqSize_ - 1024 +
+    // 1 == 1, so random always picked 1024).
+    // Floor of 1 makes the random range
+    // 1..maxSeqSize_ and exercises the chunk-build
+    // path at every size.
+    static constexpr int RANDOM_MIN_BYTES = 1;
     // Consecutive send() failures before Ping drops the
     // link. 5 was chosen to outlast a single
     // syncAckTimeoutMs window without being so long
