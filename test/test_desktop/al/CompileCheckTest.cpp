@@ -178,15 +178,7 @@ void test_arduino_guarded_files_parse() {
 
         if (out.find("error:") != std::string::npos) {
             std::cout << "  FAIL: " << rel << " has syntax errors:\n";
-            std::istringstream iss(out);
-            std::string line;
-            int printed = 0;
-            while (std::getline(iss, line) && printed < 8) {
-                if (line.find("error:") != std::string::npos) {
-                    std::cout << "    " << line << "\n";
-                    printed++;
-                }
-            }
+            std::cout << "  >>> full output:\n" << out << "\n";
             failures++;
         } else {
             std::cout << "  PASS: " << rel << " parses cleanly\n";
