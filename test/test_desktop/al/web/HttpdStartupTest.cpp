@@ -35,6 +35,7 @@
 #ifndef ARDUINO
 
 #    include <cassert>
+#    include <cstdint>
 #    include <fstream>
 #    include <iostream>
 #    include <sstream>
@@ -231,6 +232,67 @@ void test_esphal_begin_preclears_uart_driver() {
                  "uart_driver_delete before uart_driver_install)\n";
 }
 
+// Pin: AutoLinkWeb.h must include AutoLinkWebCore.h
+// OUTSIDE the #ifdef ARDUINO block so the
+// WebSnapshot type alias (`using Snapshot =
+// WebSnapshot;`) resolves even on device builds
+// whose include-path resolution is fussy about
+// nested quoted includes. The previous shape put
+// the include inside the ARDUINO guard, and a
+// real ArduinoDroid/esp32:esp32:firebeetle32
+// cross-compile failed with `'WebSnapshot' does
+// not name a type` at the using-alias site. Pulling
+// the include above the guard is bulletproof —
+// the core header is host-buildable (no Arduino-only
+// types inside) so the unconditional include
+// doesn't break the host build path.
+void test_autolinkweb_h_includes_core_outside_arduino_guard() {
+    std::cout << "\n=== AutoLinkWeb.h includes AutoLinkWebCore.h "
+                 "outside ARDUINO guard ==="
+              << std::endl;
+    std::string hSrc = readFile(projectRoot() + "/src/al/web/AutoLinkWeb.h");
+    assert(!hSrc.empty());
+
+    // Find the position of the #include of
+    // AutoLinkWebCore.h. The header may use the
+    // standard `#include "..."` form OR the
+    // preprocessor-indented `#    include "..."`
+    // form (the latter lives inside `#ifdef
+    // ARDUINO` blocks). Search for both.
+    auto incPos = hSrc.find("#include \"al/web/AutoLinkWebCore.h\"");
+    if (incPos == std::string::npos)
+        incPos = hSrc.find("#    include \"al/web/AutoLinkWebCore.h\"");
+    assert(incPos != std::string::npos);
+    std::cout << "  AutoLinkWeb.h includes AutoLinkWebCore.h \u2713"
+              << std::endl;
+
+    // The include must appear BEFORE the
+    // `#ifdef ARDUINO` opening of the Arduino-only
+    // block. Find the `#ifdef ARDUINO` and assert
+    // the include comes first.
+    auto arduinoGuard = hSrc.find("#ifdef ARDUINO");
+    assert(arduinoGuard != std::string::npos);
+    assert(incPos < arduinoGuard);
+    std::cout << "  include precedes #ifdef ARDUINO \u2713" << std::endl;
+
+    // And library.properties must list
+    // al/web/AutoLinkWebCore.h so the ArduinoDroid
+    // library include path resolution adds the
+    // file's directory as a fallback -I path. The
+    // cross-compile cmd's -I<lib_root>/src should
+    // already cover the quoted path, but the
+    // explicit listing catches any toolchain that
+    // builds -I strictly from `includes=`.
+    std::string lp = readFile(projectRoot() + "/library.properties");
+    assert(!lp.empty());
+    assert(lp.find("al/web/AutoLinkWebCore.h") != std::string::npos);
+    std::cout
+        << "  library.properties lists AutoLinkWebCore.h in includes= \u2713"
+        << std::endl;
+    std::cout << "  PASS (WebSnapshot visible at using-alias site)"
+              << std::endl;
+}
+
 } // namespace
 
 int main() {
@@ -238,6 +300,7 @@ int main() {
     test_begin_does_not_call_setupHttpAndLogging();
     test_httpd_retry_budget_covers_time_wait();
     test_esphal_begin_preclears_uart_driver();
+    test_autolinkweb_h_includes_core_outside_arduino_guard();
     std::cout << "\n=== Httpd Startup Tests Completed ===" << std::endl;
     return 0;
 }
