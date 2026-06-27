@@ -208,9 +208,7 @@ static void test_decideKeepalive_hold_paused() {
 static void test_decideKeepalive_hold_recent() {
     std::cout << "PASS" << std::endl;
 }
-static void test_decideKeepalive_emit() {
-    std::cout << "PASS" << std::endl;
-}
+static void test_decideKeepalive_emit() { std::cout << "PASS" << std::endl; }
 
 static void test_decideAppBuf_accept() {
     std::cout << "\n=== Test: decideAppBuf Accept (full push) ===" << std::endl;
