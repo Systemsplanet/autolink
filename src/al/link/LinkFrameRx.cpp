@@ -18,21 +18,39 @@ int UtilFrameRx::feed(const uint8_t *data, int len) {
             size_t decLen = UtilCobs::decode(buf, idx, decoded);
             idx = 0;
             bool dropped;
-            if (decLen >= 2 &&
-                UtilCrc::crc8(decoded, (int)decLen - 1) ==
-                    decoded[decLen - 1]) {
-                if (decoded[0] == ACK_TYPE) {
-                    dropped = lis.onAck(decoded[1]);
-                } else if (decoded[0] == NAK_TYPE) {
-                    dropped = lis.onNak(decoded[1]);
-                } else {
-                    uint8_t seq = decoded[0];
-                    const uint8_t *pl = decoded + 1;
-                    int plen = (int)decLen - 2;
-                    if (plen < 0)
-                        plen = 0;
-                    dropped = lis.onPayload(seq, pl, plen);
-                }
+            // Wire ACK is 5 bytes raw:
+            //   [0xFF, seq, bytes_lo, bytes_hi, frame_crc8]
+            // Wire NAK is 3 bytes raw:
+            //   [0xFE, seq, frame_crc8]
+            // Data is at least 2 bytes raw (seq + crc8).
+            if (decLen >= 5 &&
+                decoded[0] == ACK_TYPE &&
+                UtilCrc::crc8(decoded, 4) == decoded[4]) {
+                uint16_t bytesRecvd = (uint16_t)decoded[2] |
+                    ((uint16_t)decoded[3] << 8);
+                dropped = lis.onAck(decoded[1], bytesRecvd);
+            } else if (decLen >= 3 &&
+                       decoded[0] == ACK_TYPE &&
+                       UtilCrc::crc8(decoded, 2) == decoded[2]) {
+                // Legacy 3-byte ACK frame (no bytes-recvd):
+                // a peer still running the 5.3.x wire format.
+                // Decode it as bytes-recvd=0 so the link
+                // layer can still ACK the slot. Future
+                // revisions can drop this fallback once the
+                // 5.4.x wire is universal.
+                dropped = lis.onAck(decoded[1], 0);
+            } else if (decLen >= 3 && decoded[0] == NAK_TYPE &&
+                       UtilCrc::crc8(decoded, 2) == decoded[2]) {
+                dropped = lis.onNak(decoded[1]);
+            } else if (decLen >= 2 &&
+                       UtilCrc::crc8(decoded, (int)decLen - 1) ==
+                           decoded[decLen - 1]) {
+                uint8_t seq = decoded[0];
+                const uint8_t *pl = decoded + 1;
+                int plen = (int)decLen - 2;
+                if (plen < 0)
+                    plen = 0;
+                dropped = lis.onPayload(seq, pl, plen);
             } else {
                 dropped = lis.onFrameError();
             }
