@@ -101,15 +101,12 @@ public:
                recvThisLoop < maxAck) {
             recvThisLoop++;
             ackCount_++;
-            base_.log_.debug(
-                "Pong",
-                "echo %u %d",
-                (unsigned)base_.comm_.lastRxSeq(), n);
+            base_.log_.debug("Pong", "echo %u %d",
+                             (unsigned)base_.comm_.lastRxSeq(), n);
             base_.comm_.blinkWait(1);
         }
         if (n < 0) {
-            base_.log_.error("Pong",
-                             "recv rejected (CRC/desync)  ackCount=%lu",
+            base_.log_.error("Pong", "recv rejected (CRC/desync)  ackCount=%lu",
                              (unsigned long)ackCount_);
         }
 
