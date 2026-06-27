@@ -215,6 +215,61 @@ esp_err_t AutoLinkWeb::handleLevel(httpd_req_t *req) {
 }
 
 esp_err_t AutoLinkWeb::handleMode(httpd_req_t *req) {
+    // this release: /mode?m=SYNC|ASYNC sets the link mode LIVE
+    // (no reboot). The 5.3.x /mode?m=seq|rand fill-mode
+    // route is renamed to /fillmode so the two don't
+    // collide on the same query key.
+    char query[48] = {};
+    char val[12] = {};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "m", val, sizeof(val)) != ESP_OK) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "missing ?m=", 12);
+        return ESP_OK;
+    }
+    auto *self = static_cast<AutoLinkWeb *>(req->user_ctx);
+    AutoLinkConfig::Mode newMode;
+    if (strcmp(val, "SYNC") == 0)
+        newMode = AutoLinkConfig::Mode::SYNC;
+    else if (strcmp(val, "ASYNC") == 0)
+        newMode = AutoLinkConfig::Mode::ASYNC;
+    else {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "m must be SYNC or ASYNC", 24);
+        return ESP_OK;
+    }
+    AutoLinkConfig::Mode prev = self->link_.mode();
+    self->link_.setMode(newMode);
+    // Persist so bringUpLink restores the chosen mode
+    // across a normal reboot. The live switch via the
+    // radio button does NOT itself reboot (5.3.x used
+    // to — the user feedback was that the toggle was
+    // too coarse).
+    {
+        Preferences prefs;
+        if (prefs.begin("autolink", false)) {
+            prefs.putUChar("mode", (uint8_t)newMode);
+            prefs.end();
+        } else {
+            Log::log().warning(TAG,
+                               "could not open NVS to persist link mode");
+        }
+    }
+    Log::log().info(TAG, "Link mode set %s -> %s via web (live, no reboot)",
+                    prev == AutoLinkConfig::Mode::SYNC ? "SYNC" : "ASYNC",
+                    newMode == AutoLinkConfig::Mode::SYNC ? "SYNC" : "ASYNC");
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_set_hdr(req, "Connection", "close");
+    httpd_resp_send(req, "ok", 2);
+    return ESP_OK;
+}
+
+// this release: /fillmode?m=seq|rand sets the Ping fill-mode
+// (sequential vs random). Previously this lived at /mode;
+// the live /mode link-mode toggle takes that route now.
+esp_err_t AutoLinkWeb::handleFillMode(httpd_req_t *req) {
     char query[48] = {};
     char val[8] = {};
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
@@ -248,62 +303,6 @@ esp_err_t AutoLinkWeb::handleMode(httpd_req_t *req) {
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_set_hdr(req, "Connection", "close");
     httpd_resp_send(req, "ok", 2);
-    return ESP_OK;
-}
-
-// Flip the link's SYNC/ASYNC mode, persist to NVS, and reboot.
-// The dashboard reads the persisted mode on next boot (via
-// PingPongBase's bringUpLink NVS read) so the new mode takes
-// effect across the reboot. The response is dispatched on a
-// detached FreeRTOS task so httpd can drain the socket before
-// esp_restart() pulls the rug out.
-static void alinkModeToggleReboot_(void *) {
-    vTaskDelay(pdMS_TO_TICKS(200));
-    esp_restart();
-}
-esp_err_t AutoLinkWeb::handleModeToggle(httpd_req_t *req) {
-    auto *self = static_cast<AutoLinkWeb *>(req->user_ctx);
-    uint8_t cur = (uint8_t)self->link_.mode();
-    uint8_t nxt = (cur == (uint8_t)AutoLinkConfig::Mode::SYNC)
-        ? (uint8_t)AutoLinkConfig::Mode::ASYNC
-        : (uint8_t)AutoLinkConfig::Mode::SYNC;
-
-    Log::log().info(
-        "ALinkWeb",
-        "Link mode toggle %s -> %s via web; "
-        "persisting to NVS and rebooting",
-        cur == (uint8_t)AutoLinkConfig::Mode::SYNC ? "SYNC" : "ASYNC",
-        nxt == (uint8_t)AutoLinkConfig::Mode::SYNC ? "SYNC" : "ASYNC");
-
-    {
-        Preferences prefs;
-        if (prefs.begin("autolink", false)) {
-            prefs.putUChar("mode", nxt);
-            prefs.end();
-            Log::log().info("ALinkWeb",
-                            "Persisted mode=%u to NVS namespace 'autolink'",
-                            (unsigned)nxt);
-        } else {
-            Log::log().error(
-                "ALinkWeb",
-                "Could not open NVS namespace 'autolink' to persist mode; "
-                "reboot will not change the running mode");
-        }
-    }
-
-    httpd_resp_set_type(req, "text/plain");
-    httpd_resp_set_hdr(req, "Connection", "close");
-    httpd_resp_send(req, "rebooting", 9);
-
-    BaseType_t ok = xTaskCreate(alinkModeToggleReboot_, "alink-mode-rbt", 1024,
-                                nullptr, 1, nullptr);
-    if (ok != pdPASS) {
-        Log::log().error("ALinkWeb",
-                         "xTaskCreate for mode-toggle reboot failed; "
-                         "calling esp_restart() inline");
-        vTaskDelay(pdMS_TO_TICKS(200));
-        esp_restart();
-    }
     return ESP_OK;
 }
 
