@@ -191,8 +191,7 @@ void Link::onTimerOk_unlocked() {
         // re-sweep find a clean link.
         if (!arqCache_.hasRoom() &&
             arq_.pendingCount() >= POOL_EXHAUST_DROP_PENDING) {
-            Log::log().warning(TAG,
-                               "ARQ pool exhausted (pending=%d) -> drop",
+            Log::log().warning(TAG, "ARQ pool exhausted (pending=%d) -> drop",
                                arq_.pendingCount());
             reset_unlocked(true);
             hw.unlock();
