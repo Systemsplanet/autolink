@@ -32,7 +32,7 @@ struct EspHal;
 #endif
 
 namespace autolink {
-#define AUTOLINK_VERSION "5.3.102"
+#define AUTOLINK_VERSION "5.4.0"
 
 class AutoLinkTestAccessor;
 
@@ -229,6 +229,26 @@ public:
     }
     int txDelayMs() const { return link ? link->txDelayMs() : 0; }
 
+    // this release: Ping's gap-stop / gap-resume detector
+    // and bytes-recvd log line read these directly.
+    // The facade forwards to the link layer; the
+    // link layer takes its lock internally.
+    uint8_t lastAckSeq() const {
+        return link ? link->lastAckSeq() : (uint8_t)0xFF;
+    }
+    uint8_t lastNakSeq() const {
+        return link ? link->lastNakSeq() : (uint8_t)0xFF;
+    }
+    uint8_t lastRxSeq() const {
+        return link ? link->lastRxSeq() : (uint8_t)0xFF;
+    }
+    uint16_t bytesRecvdFor(uint8_t seq) const {
+        return link ? link->bytesRecvdFor(seq) : (uint16_t)0;
+    }
+    bool isAcked(uint8_t seq) const {
+        return link ? link->isAcked(seq) : false;
+    }
+
     void getStats(Stats &s) const { link->getStats(s); }
     void resetStats() { link->resetStats(); }
     void resetErrors() { link->resetErrors(); }
@@ -256,6 +276,19 @@ public:
         if (len <= 0)
             return link->sendMsg(b, len);
         return link->sendMsg(b, len, nullptr);
+    }
+    // this release: Ping needs the FIRST chunk's cobsSeq after
+    // send() so it can match the peer's wire ACK to the
+    // pending slot. The facade forwards to Link's
+    // sendMsg(b, len, outBaseSeq). nullptr outBaseSeq is
+    // fine when the caller doesn't care.
+    bool sendMsg(const uint8_t *b, int len, uint8_t *outBaseSeq) {
+        if (len <= 0) {
+            if (outBaseSeq)
+                *outBaseSeq = 0;
+            return link->sendMsg(b, len);
+        }
+        return link->sendMsg(b, len, outBaseSeq);
     }
     int recvMsg(uint8_t *b, int max_len) { return link->recvMsg(b, max_len); }
 
