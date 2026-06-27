@@ -34,6 +34,26 @@ from pathlib import Path
 _C_CPP_SUFFIXES = {'.c', '.cc', '.cpp', '.cxx', '.h', '.hh',
                    '.hpp', '.hxx', '.ino'}
 
+# Files that are the output of a code generator and must
+# not be reformatted. The generator's byte output is the
+# single source of truth for the file's contents; clang-format
+# has no semantic context to apply here and will only re-wrap
+# long raw-string-literal declarations across multiple lines,
+# which then fails the generator's --check contract (the
+# generator writes one-line, clang-format writes two-line).
+# Add to this set whenever a new generated header joins the
+# tree. The entries are matched against the absolute path
+# suffix so the same filename under a different directory
+# still matches.
+_GENERATED_HEADERS = (
+    'src/al/web/AutoLinkWebHtml.h',
+)
+
+
+def _is_generated(p: Path) -> bool:
+    s = str(p.resolve()) if p.exists() else str(p)
+    return any(s.endswith(e) or e in s for e in _GENERATED_HEADERS)
+
 
 def _is_c_cpp(p: Path) -> bool:
     return p.suffix.lower() in _C_CPP_SUFFIXES
@@ -182,6 +202,12 @@ def pretty_print(path: str) -> dict:
 
     if not _is_c_cpp(p):
         report['notes'].append('skipped: not a C/C++ source file')
+        return report
+
+    if _is_generated(p):
+        report['notes'].append(
+            'skipped: generated header (canonical bytes owned by '
+            'its generator, clang-format must not reformat)')
         return report
 
     err = _clang_format(p)
