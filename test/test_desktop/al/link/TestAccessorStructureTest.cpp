@@ -283,8 +283,9 @@ void test_link_dedup_helpers_present() {
     // the move; concat every TU into one virtual
     // "Link.cpp" string and search that.
     std::string linkCpp;
-    for (const char *tu : {"LinkCore.cpp", "LinkTx.cpp", "LinkRx.cpp",
-                           "LinkSweep.cpp", "LinkTimers.cpp", "LinkApi.cpp"}) {
+    for (const char *tu :
+         { "LinkCore.cpp", "LinkTx.cpp", "LinkRx.cpp", "LinkSweep.cpp",
+           "LinkTimers.cpp", "LinkApi.cpp" }) {
         linkCpp += slurp(std::string("../../src/al/link/") + tu);
     }
 
@@ -436,8 +437,9 @@ void test_choke_points_route_through_clamped_accessors() {
     size_t bClose = linkH.find('}', bBrace);
     std::string countBody = linkH.substr(bStart, bClose - bStart + 1);
     assert(countBody.find("AUTOLINK_MAX_BAUDS") != std::string::npos);
-    std::cout << "  Link::allowedBaudsCount() clamps to AUTOLINK_MAX_BAUDS \u2713"
-              << std::endl;
+    std::cout
+        << "  Link::allowedBaudsCount() clamps to AUTOLINK_MAX_BAUDS \u2713"
+        << std::endl;
 
     size_t eStart = linkH.find("allowedBaud(int i) const override");
     assert(eStart != std::string::npos);
@@ -454,17 +456,17 @@ void test_choke_points_route_through_clamped_accessors() {
     // (We grep the body TUs because that's where the
     // index sites live.)
     std::string linkCpp;
-    for (const char *tu : {"LinkCore.cpp", "LinkTx.cpp", "LinkRx.cpp",
-                           "LinkSweep.cpp", "LinkTimers.cpp", "LinkApi.cpp"}) {
+    for (const char *tu :
+         { "LinkCore.cpp", "LinkTx.cpp", "LinkRx.cpp", "LinkSweep.cpp",
+           "LinkTimers.cpp", "LinkApi.cpp" }) {
         linkCpp += slurp(std::string("../../src/al/link/") + tu);
     }
     assert(linkCpp.find("cfg.allowedBauds[") == std::string::npos);
     std::cout << "  no raw cfg.allowedBauds[i] reads in Link body TUs \u2713"
               << std::endl;
     assert(linkCpp.find("cfg.allowedBaudsCount") == std::string::npos);
-    std::cout
-        << "  no raw cfg.allowedBaudsCount reads in Link body TUs \u2713"
-        << std::endl;
+    std::cout << "  no raw cfg.allowedBaudsCount reads in Link body TUs \u2713"
+              << std::endl;
 
     // AutoLinkConfig must expose the two safe
     // accessors that the choke points route through.
@@ -507,8 +509,9 @@ void test_msg_hdr_consistency_in_linktx() {
     }
     std::string body = linkTx.substr(ob, i - ob + 1);
     assert(body.find("MAX_CHUNK + MSG_HDR") != std::string::npos);
-    std::cout << "  buildAndTxCobsFrame_unlocked uses MAX_CHUNK + MSG_HDR \u2713"
-              << std::endl;
+    std::cout
+        << "  buildAndTxCobsFrame_unlocked uses MAX_CHUNK + MSG_HDR \u2713"
+        << std::endl;
     assert(body.find("MAX_CHUNK + 6") == std::string::npos);
     std::cout << "  no literal 6 in the stack frame size \u2713" << std::endl;
     std::cout << "PASS" << std::endl;
