@@ -86,8 +86,8 @@ void test_round_trip_ms_lives_in_link_decision() {
     // roundTripMs() lives in LinkDecision.h and is
     // called from LinkSweep.cpp's applyMasterSwpAction
     // (P3 rearm dwell) after the god-class split.
-    std::string linkCpp = readFile(
-        projectRoot() + "/src/al/link/LinkSweep.cpp");
+    std::string linkCpp =
+        readFile(projectRoot() + "/src/al/link/LinkSweep.cpp");
     assert(linkCpp.find("roundTripMs(") != std::string::npos);
     // No more inline round-trip formula
     assert(linkCpp.find("2.0 * (5.0 * 10.0 /") == std::string::npos);
@@ -132,8 +132,8 @@ void test_handle_swp_uses_is_lock_payload() {
     std::cout << "\n=== handleSwp_unlocked uses isLockPayload ===" << std::endl;
     // handleSwp_unlocked lives in LinkSweep.cpp
     // after the god-class split.
-    std::string linkCpp = readFile(
-        projectRoot() + "/src/al/link/LinkSweep.cpp");
+    std::string linkCpp =
+        readFile(projectRoot() + "/src/al/link/LinkSweep.cpp");
     auto fnPos = linkCpp.find("bool Link::handleSwp_unlocked(");
     assert(fnPos != std::string::npos);
     // Scan the function body for isLockPayload call
