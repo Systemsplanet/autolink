@@ -47,11 +47,14 @@ AUTOLINK_SRC = $(SRC)/AutoLink.cpp $(LINK_SRC)
 
 # Unit-test binaries only. Loopback / loopback_noise live under
 # test/itest/test_desktop/ (see ../itest/test_desktop/Makefile).
-dashboard_assets_check:
+# Regenerates AutoLinkWebHtml.h from sources before building.
+# --check-only variant used in CI; see assets_check target.
+dashboard_assets_regen:
+	@cd ../.. && python3 build/dashboard_assets.py
+
+assets_check:
 	@cd ../.. && python3 build/dashboard_assets.py --check || \
-	    (echo 'AutoLinkWebHtml.h is stale (dashboard_assets.py --check failed).' && \
-	     echo 'Run `python3 build/dashboard_assets.py` to regenerate, then re-run the suite.' && \
-	     exit 1)
+	    (echo 'AutoLinkWebHtml.h is stale — run: python3 build/dashboard_assets.py' && exit 1)
 
 TEST_BINS = run_test_crc run_test_cobs run_test_blink run_test_framerx \
             run_test_baudsweep run_test_log run_test_mockhal run_test_autolink \
@@ -103,7 +106,7 @@ TEST_BINS = run_test_crc run_test_cobs run_test_blink run_test_framerx \
 # observed via /usr/bin/time. Unit tests should remain subsecond
 # end-to-end; the per-suite wall time is printed so any regression
 # that pushes a suite over the budget is visible immediately.
-all: dashboard_assets_check $(TEST_BINS)
+all: dashboard_assets_regen $(TEST_BINS)
 	@total_bytes=0; peak_kb=0; pass=0; fail=0; fail_names=""; \
 	start_ns=$$(date +%s%N); \
 	for t in $(TEST_BINS); do \
@@ -469,7 +472,7 @@ clean:
 	rm -f $(TEST_BINS) *.gcno *.gcda
 	rm -rf coverage
 
-.PHONY: all asan test_asan coverage clean test_cpp dashboard_assets_check \
+.PHONY: all asan test_asan coverage clean test_cpp dashboard_assets_regen assets_check \
         test_crc test_cobs test_blink test_framerx test_baudsweep test_log \
         test_mockhal test_alink_io test_alink_message \
         test_alink_error test_alink_cobsseq test_autolink \
