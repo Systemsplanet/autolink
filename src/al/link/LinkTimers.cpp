@@ -1,21 +1,31 @@
-// LinkTimers -- onBreak, onTimer (the dispatcher), onTimerOk_unlocked,
-// pendingAcks / isAcked, onTimerSwp_unlocked, onTimerLck_unlocked.
+// LinkTimers -- onBreak, onTimer (the dispatcher),
+// onTimerOk_unlocked, pendingAcks / isAcked,
+// onTimerSwp_unlocked, onTimerLck_unlocked.
 //
 // onTimer dispatches to onTimerOk_unlocked (OK steady-state),
 // onTimerSwp_unlocked (SWP handshake), or onTimerLck_unlocked
 // (LCK retry). The OK-state timer is the heart of the
-// runtime: it watches idle timeouts, fires heartbeats,
-// emits keepalive frames, and runs the ARQ retransmit
-// loop. The SWP-state timer advances the baud-sweep
-// phase machine. The LCK-state timer retries the
-// handshake when the master doesn't get a baud reply.
+// runtime: it watches the asymmetric idle condition
+// (TX active, RX silent → peer gone), and runs the ARQ
+// retransmit loop. The SWP-state timer advances the
+// baud-sweep phase machine. The LCK-state timer retries
+// the handshake when the master doesn't get a baud reply.
+//
+// No heartbeat. Pre-this release the OK-state timer fired a
+// PING at HEARTBEAT_MS intervals and dropped the link if
+// HEARTBEAT_MISS_LIMIT (=3) PONGs failed to come back.
+// That detected dead peers but cost a wire-level frame
+// every 100 ms. The this release release replaces this with a
+// Ping-side counter: 5 consecutive send() failures
+// trigger dropLink + clearQueue_(). The link layer no
+// longer needs its own dead-peer probe.
 //
 // onBreak is the UART_BREAK dispatcher. Pre the
 // latest BREAK-debounce fix it
 // hard-reset on every break event, which caused a SWP
 // livelock (the post-setSpd UART_BREAK fires immediately
-// after a baud switch and tore down the SWP state on
-// the very tick the link entered P2). The fix mirrors
+// after a baud switch and tore down the SWP state on the
+// very tick the link entered P2). The fix mirrors
 // err_unlocked's state guard: in non-OK states the break
 // is a no-op except for clearing the appBuf.
 #include "al/link/Link.h"
@@ -32,16 +42,29 @@ static_assert(
     MAX_CHUNK + MSG_HDR <= ArqCache::POOL_BUF_MAX,
     "MAX_CHUNK + MSG_HDR > ArqCache::POOL_BUF_MAX: bump POOL_BUF_MAX or shrink MAX_CHUNK");
 
-// Heartbeat constants live in this TU because every
-// heartbeat call site (onTimerOk_unlocked) is here. They
-// stay file-static so the linker enforces single-
-// definition; the other Link TUs don't reference them.
-static constexpr int HEARTBEAT_MS = 100;
-static constexpr int HEARTBEAT_MISS_LIMIT = 3;
 // Asymmetric idle: TX active, RX silent
-// → peer gone, drop fast.
+// → peer gone, drop fast. Symmetric idle (both
+// quiet for idleTimeoutMs) was previously gated by
+// decideIdleWatchdog() — removed in this release alongside
+// the heartbeat. Operators who want a hard idle cap
+// can rely on app-level timeouts; the link itself
+// stays up through quiet windows so a one-direction
+// burst (e.g. Pong-only echo traffic) doesn't bounce
+// the link.
 static constexpr int FAST_IDLE_RX_MS = 300;
 static constexpr int FAST_IDLE_TX_MS = 1000;
+
+// ASYNC ARQ pool exhaustion backstop. If the cache
+// is full and there are still pending frames, the
+// receiver is not draining (either dead or
+// app-buf-full). Drop the link so a re-sweep can
+// happen. Combined with the receiver-side NAK-on-
+// app-buf-full (LinkRx.cpp), this bounds the
+// ASYNC-mode stall: if the receiver NAKs
+// successfully, the retransmit loop brings the
+// chunk back; if the receiver is gone, the pool
+// fills up and the link drops within ~one RTO.
+static constexpr int POOL_EXHAUST_DROP_PENDING = 1;
 
 void Link::onBreak() {
     hw.lock();
@@ -102,7 +125,7 @@ void Link::onTimer() {
             resendCobsFrame_unlocked(base, buf, len);
         } else {
             Log::log().info(TAG,
-                            "ARQ retx cobsSeq=%u (keepalive, no pool buf) — "
+                            "ARQ retx cobsSeq=%u (no pool buf) — "
                             "verbatim 0 bytes",
                             (unsigned)base);
             resendCobsFrame_unlocked(base, nullptr, 0);
@@ -141,31 +164,6 @@ void Link::onTimerOk_unlocked() {
                 return;
             }
         }
-        if (decideIdleWatchdog(rxAge, txAge, cfg.idleTimeoutMs) ==
-            IdleAction::Drop) {
-            reset_unlocked(true);
-            hw.unlock();
-            hw.sendBreak();
-            return;
-        }
-    }
-    if ((now - lastHeartbeatMs_) >= (uint32_t)HEARTBEAT_MS) {
-        lastHeartbeatMs_ = now;
-        sendFrame_unlocked(PING_CMD);
-        heartbeatPingsMissed_++;
-        if (heartbeatPingsMissed_ >= HEARTBEAT_MISS_LIMIT) {
-            Log::log().warning(TAG, "HB: %d missed -> drop",
-                               heartbeatPingsMissed_);
-            reset_unlocked(true);
-            hw.unlock();
-            hw.sendBreak();
-            return;
-        }
-    }
-    if (decideKeepalive(now - lastTxMs, cfg.idleTimeoutMs, false) ==
-        KeepaliveAction::Emit) {
-        sendCobsFrame_unlocked(nullptr, 0);
-        lastTxMs = now;
     }
     // ASYNC only: the ARQ retransmit
     // machinery lives in the link task's
@@ -179,6 +177,28 @@ void Link::onTimerOk_unlocked() {
     // pool buffer was never inserted, i.e.
     // spurious retransmits.
     if (cfg.mode != AutoLinkConfig::Mode::SYNC) {
+        // Pool exhaustion backstop. If the cache
+        // is full and there are pending frames,
+        // the receiver is not draining (either
+        // app-buf-full or dead). With the
+        // receiver-side NAK on app-buf-full (see
+        // LinkRx.cpp's HoldAck branch), the
+        // receiver would have NAKed; if the
+        // pending count is non-zero AND the pool
+        // is full, the retransmit loop has
+        // exhausted its room without the
+        // receiver catching up. Drop and let a
+        // re-sweep find a clean link.
+        if (!arqCache_.hasRoom() &&
+            arq_.pendingCount() >= POOL_EXHAUST_DROP_PENDING) {
+            Log::log().warning(TAG,
+                               "ARQ pool exhausted (pending=%d) -> drop",
+                               arq_.pendingCount());
+            reset_unlocked(true);
+            hw.unlock();
+            hw.sendBreak();
+            return;
+        }
         for (int s = 0; s < 256; s++) {
             if (!arq_.isPending(s))
                 continue;
@@ -228,17 +248,17 @@ void Link::onTimerSwp_unlocked() {
         if (sweep_.phase() == SweepPhase::PHASE2) {
             spdI++;
             SwpPhaseAction a =
-                decideMasterPhase2Timeout(spdI, cfg.allowedBaudsCount);
+                decideMasterPhase2Timeout(spdI, cfg.clampToMaxBauds());
             if (a == SwpPhaseAction::FallbackLockSlowest) {
-                int lb = cfg.allowedBaudsCount - 1;
+                int lb = cfg.clampToMaxBauds() - 1;
                 sweep_.reset();
-                hw.setSpd(cfg.allowedBauds[lb]);
+                hw.setSpd(cfg.allowedBaudSafe(lb));
                 spdI = lb;
                 sendFrame_unlocked(LOCK_CMD + (uint8_t)lb);
                 lockOk_unlocked(lb, "p2-fallback");
                 return;
             }
-            hw.setSpd(cfg.allowedBauds[spdI]);
+            hw.setSpd(cfg.allowedBaudSafe(spdI));
             sendFrame_unlocked(PING_CMD);
             hw.startTimer(sweep_.dwells().phase2[spdI]);
             return;
@@ -246,18 +266,18 @@ void Link::onTimerSwp_unlocked() {
         if (sweep_.phase() == SweepPhase::PHASE3) {
             int next = sweep_.phase3Baud() + 1;
             SwpPhaseAction a =
-                decideMasterPhase3Timeout(next, cfg.allowedBaudsCount);
+                decideMasterPhase3Timeout(next, cfg.clampToMaxBauds());
             if (a == SwpPhaseAction::FallbackLockSlowest) {
-                int lb = cfg.allowedBaudsCount - 1;
+                int lb = cfg.clampToMaxBauds() - 1;
                 sweep_.reset();
                 spdI = lb;
-                hw.setSpd(cfg.allowedBauds[lb]);
+                hw.setSpd(cfg.allowedBaudSafe(lb));
                 lockOk_unlocked(lb, "p3-fallback");
                 return;
             }
             sweep_.reset();
             spdI = next;
-            hw.setSpd(cfg.allowedBauds[spdI]);
+            hw.setSpd(cfg.allowedBaudSafe(spdI));
             sendFrame_unlocked(PING_CMD);
             hw.startTimer(sweep_.dwells().phase2[spdI]);
             return;
@@ -269,7 +289,7 @@ void Link::onTimerSwp_unlocked() {
         Log::log().info(TAG,
                         "pong SWP baud[%d]=%lu "
                         "phase=%d",
-                        spdI, (unsigned long)cfg.allowedBauds[spdI],
+                        spdI, (unsigned long)cfg.allowedBaudSafe(spdI),
                         (int)sweep_.phase());
     }
     emptySweeps++;
@@ -297,7 +317,7 @@ void Link::onTimerSwp_unlocked() {
             sweep_.enterPhase1(*this);
             return;
         }
-        hw.setSpd(cfg.allowedBauds[spdI]);
+        hw.setSpd(cfg.allowedBaudSafe(spdI));
         hw.startTimer(dwell);
         return;
     }
@@ -305,7 +325,7 @@ void Link::onTimerSwp_unlocked() {
 }
 
 void Link::onTimerLck_unlocked() {
-    int max = (int)cfg.allowedBaudsCount * 2;
+    int max = (int)cfg.clampToMaxBauds() * 2;
     lckRetries++;
     if (decideLckTick(lckRetries, max) == LckAction::SendReq) {
         sendFrame_unlocked(REQ_CMD);
