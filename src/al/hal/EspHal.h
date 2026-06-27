@@ -160,20 +160,20 @@ public:
         uart_config.rx_flow_ctrl_thresh = 122;
     }
 
-    // Floor the stream buffer to one SYNC
-    // frame's worth (a few KB) or one ASYNC
-    // pipeline's worth (16-slot ARQ cache,
-    // ~30 KB). The facade used to compute
-    // this and mutate cfg.streamBufferSize
-    // before the HAL saw it; the HAL now
-    // owns the sizing decision. SYNC by
-    // default — one frame in flight, no
-    // pipeline. ASYNC gets the 16-slot
-    // floor. Anything larger the caller set
-    // on cfg.streamBufferSize wins.
+    // Floor the stream buffer to one pipeline's
+    // worth (16-slot ARQ cache, ~30 KB). A
+    // FreeRTOS stream buffer can't be resized in
+    // flight, so the floor has to cover both modes
+    // — sizing for SYNC only would leave ASYNC
+    // without pipeline headroom after a live
+    // SYNC->ASYNC switch. The facade used to
+    // compute this and mutate cfg.streamBufferSize
+    // before the HAL saw it; the HAL now owns the
+    // sizing decision. Anything larger the caller
+    // set on cfg.streamBufferSize wins.
     static size_t streamBufferFloor(const AutoLinkConfig &cfg) {
         constexpr int kHdr = 6;
-        int slots = (cfg.mode == AutoLinkConfig::Mode::ASYNC) ? 16 : 2;
+        constexpr int slots = 16;
         size_t floor = (size_t)slots * 2 * (cfg.maxMsg + kHdr);
         return cfg.streamBufferSize > floor ? cfg.streamBufferSize : floor;
     }
