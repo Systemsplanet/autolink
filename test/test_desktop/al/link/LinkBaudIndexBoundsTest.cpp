@@ -69,8 +69,7 @@ void assert_bounded_reads(Link &link) {
     for (int i = -2; i <= AUTOLINK_MAX_BAUDS + 2; ++i) {
         uint32_t b = ctx.allowedBaud(i);
         if (i < 0 || i >= AUTOLINK_MAX_BAUDS) {
-            assert(b == 0 &&
-                   "OOB index must surface 0 through safe accessor");
+            assert(b == 0 && "OOB index must surface 0 through safe accessor");
         } else {
             // In-range: must equal what we wrote into the array
             // (the default config populates the first 5 entries
