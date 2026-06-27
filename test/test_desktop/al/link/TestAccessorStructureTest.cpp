@@ -364,9 +364,17 @@ void test_link_dedup_helpers_present() {
 
     std::string ackBody = bodyOf("sendAckFrame_unlocked");
     assert(!ackBody.empty());
-    assert(ackBody.find("UtilCobs::encode") == std::string::npos);
-    std::cout << "  sendAckFrame_unlocked delegates (no inline encode) ✓"
-              << std::endl;
+    // this release: sendAckFrame_unlocked produces a 5-byte
+    // ACK payload (extended with bytes-recvd) so it
+    // inlines UtilCobs::encode rather than routing
+    // through sendCtrlCobsFrame_unlocked (which still
+    // emits the 3-byte NAK frame). Pin the 5-byte
+    // shape instead of the delegation contract.
+    assert(ackBody.find("ACK_TYPE") != std::string::npos);
+    assert(ackBody.find("bytesRecvd") != std::string::npos);
+    std::cout
+        << "  sendAckFrame_unlocked emits 5-byte ACK (type+seq+bytes+CRC) \u2713"
+        << std::endl;
 
     std::string nakBody = bodyOf("sendNakFrame_unlocked");
     assert(!nakBody.empty());
@@ -397,6 +405,143 @@ void test_link_dedup_helpers_present() {
     std::cout << "PASS" << std::endl;
 }
 
+void test_choke_points_route_through_clamped_accessors() {
+    // Regression pin for the OOB-closed shape:
+    // the raw cfg.allowedBauds[i] read pattern used
+    // to be reachable even when a sketch wrote
+    // cfg.allowedBaudsCount = 20 post-construction
+    // (the field is public for back-compat, so the
+    // read paths were the only safe place to
+    // enforce the bound). Now the link layer reads
+    // through cfg.allowedBaudSafe(i) /
+    // cfg.clampedCount() at every choke point —
+    // any future regression that drops back to the
+    // raw cfg.allowedBauds[] or cfg.allowedBaudsCount
+    // read trips here.
+    std::cout << "\n=== Test: link choke-points route through clamped "
+                 "accessors ==="
+              << std::endl;
+    std::string linkH = slurp("../../src/al/link/Link.h");
+    std::string cfgH = slurp("../../src/al/AutoLinkConfig.h");
+
+    // The choke points in Link.h override the
+    // ILinkContext interface (private override
+    // section). Pin the body shapes directly
+    // instead of public-section scoping.
+    size_t bStart = linkH.find("allowedBaudsCount() const override");
+    assert(bStart != std::string::npos);
+    // Find the matching body close — Link's
+    // overrides are inline single-return.
+    size_t bBrace = linkH.find('{', bStart);
+    size_t bClose = linkH.find('}', bBrace);
+    std::string countBody = linkH.substr(bStart, bClose - bStart + 1);
+    assert(countBody.find("AUTOLINK_MAX_BAUDS") != std::string::npos);
+    std::cout << "  Link::allowedBaudsCount() clamps to AUTOLINK_MAX_BAUDS \u2713"
+              << std::endl;
+
+    size_t eStart = linkH.find("allowedBaud(int i) const override");
+    assert(eStart != std::string::npos);
+    size_t eBrace = linkH.find('{', eStart);
+    size_t eClose = linkH.find('}', eBrace);
+    std::string baudBody = linkH.substr(eStart, eClose - eStart + 1);
+    assert(baudBody.find("cfg.allowedBaudSafe(i)") != std::string::npos);
+    std::cout
+        << "  Link::allowedBaud(i) routes through cfg.allowedBaudSafe(i) \u2713"
+        << std::endl;
+
+    // Every Link* TU that indexed cfg.allowedBauds[i]
+    // raw must now go through cfg.allowedBaudSafe(i).
+    // (We grep the body TUs because that's where the
+    // index sites live.)
+    std::string linkCpp;
+    for (const char *tu : {"LinkCore.cpp", "LinkTx.cpp", "LinkRx.cpp",
+                           "LinkSweep.cpp", "LinkTimers.cpp", "LinkApi.cpp"}) {
+        linkCpp += slurp(std::string("../../src/al/link/") + tu);
+    }
+    assert(linkCpp.find("cfg.allowedBauds[") == std::string::npos);
+    std::cout << "  no raw cfg.allowedBauds[i] reads in Link body TUs \u2713"
+              << std::endl;
+    assert(linkCpp.find("cfg.allowedBaudsCount") == std::string::npos);
+    std::cout
+        << "  no raw cfg.allowedBaudsCount reads in Link body TUs \u2713"
+        << std::endl;
+
+    // AutoLinkConfig must expose the two safe
+    // accessors that the choke points route through.
+    assert(cfgH.find("clampedCount()") != std::string::npos);
+    std::cout << "  AutoLinkConfig::clampedCount() exists \u2713" << std::endl;
+    assert(cfgH.find("allowedBaudSafe(int i)") != std::string::npos);
+    std::cout << "  AutoLinkConfig::allowedBaudSafe(i) exists \u2713"
+              << std::endl;
+
+    std::cout << "PASS" << std::endl;
+}
+
+void test_msg_hdr_consistency_in_linktx() {
+    // Regression pin for the literal-6 / MSG_HDR drift:
+    // LinkTx::buildAndTxCobsFrame_unlocked used to
+    // size its stack frame as uint8_t frame[MAX_CHUNK
+    // + 6]; — a parallel literal that wouldn't track
+    // a future MSG_HDR bump. After the fix it reads
+    // MAX_CHUNK + MSG_HDR so the buffer tracks the
+    // same constant every other TU asserts on.
+    std::cout
+        << "\n=== Test: LinkTx uses MSG_HDR (not literal 6) for frame buf ==="
+        << std::endl;
+    std::string linkTx = slurp("../../src/al/link/LinkTx.cpp");
+    // Find the body of buildAndTxCobsFrame_unlocked.
+    size_t start = linkTx.find("void Link::buildAndTxCobsFrame_unlocked(");
+    assert(start != std::string::npos);
+    size_t ob = linkTx.find('{', start);
+    assert(ob != std::string::npos);
+    int depth = 0;
+    size_t i = ob;
+    for (; i < linkTx.size(); ++i) {
+        if (linkTx[i] == '{')
+            depth++;
+        else if (linkTx[i] == '}') {
+            depth--;
+            if (depth == 0)
+                break;
+        }
+    }
+    std::string body = linkTx.substr(ob, i - ob + 1);
+    assert(body.find("MAX_CHUNK + MSG_HDR") != std::string::npos);
+    std::cout << "  buildAndTxCobsFrame_unlocked uses MAX_CHUNK + MSG_HDR \u2713"
+              << std::endl;
+    assert(body.find("MAX_CHUNK + 6") == std::string::npos);
+    std::cout << "  no literal 6 in the stack frame size \u2713" << std::endl;
+    std::cout << "PASS" << std::endl;
+}
+
+void test_ihal_setevents_guard_in_place() {
+    // Regression pin: IHal::setEvents used to be a
+    // plain pointer assignment with a comment that
+    // claimed "a second setEvents is an assertion
+    // fail" — but there was no assert. The guard was
+    // added in this release (host assert + on-device
+    // log). Pin both shapes so the contract doesn't
+    // silently degrade to plain assignment again.
+    std::cout << "\n=== Test: IHal::setEvents asserts on double-bind ==="
+              << std::endl;
+    std::string halH = slurp("../../src/al/hal/IHal.h");
+    // The host assertion. AUTOLINK_HOST_TEST is the
+    // build flag the test gate uses; the real device
+    // build doesn't see this branch.
+    assert(halH.find("#ifdef AUTOLINK_HOST_TEST") != std::string::npos);
+    assert(halH.find("assert(events_ == nullptr") != std::string::npos);
+    std::cout << "  host-build assert on double setEvents \u2713" << std::endl;
+    // The on-device log path.
+    assert(halH.find("Log::log().error(\"IHal\"") != std::string::npos);
+    std::cout << "  on-device log on double setEvents \u2713" << std::endl;
+    // The comment must match the contract — no
+    // claim of an assertion without one present.
+    assert(halH.find("an assertion fail") == std::string::npos);
+    std::cout << "  setEvents comment no longer claims a phantom assert \u2713"
+              << std::endl;
+    std::cout << "PASS" << std::endl;
+}
+
 int main() {
     std::cout << "=== TestAccessor Structure ===" << std::endl;
     test_link_public_no_test_markAckedPending();
@@ -405,6 +550,9 @@ int main() {
     test_shims_compile_and_exist();
     test_friend_decls_in_place();
     test_link_dedup_helpers_present();
+    test_choke_points_route_through_clamped_accessors();
+    test_msg_hdr_consistency_in_linktx();
+    test_ihal_setevents_guard_in_place();
     std::cout << "\n=== TestAccessor Structure Completed ===" << std::endl;
     return 0;
 }
