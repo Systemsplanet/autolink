@@ -104,13 +104,8 @@ void Link::sendAckFrame_unlocked(uint8_t ackedCobsSeq, uint16_t bytesRecvd) {
     // helper would need a payload-length + per-byte
     // CRC table, which costs more on the hot path
     // than the 6 extra bytes of frame-buffer code.
-    uint8_t u[5] = {
-        ACK_TYPE,
-        ackedCobsSeq,
-        (uint8_t)(bytesRecvd & 0xFF),
-        (uint8_t)((bytesRecvd >> 8) & 0xFF),
-        0
-    };
+    uint8_t u[5] = { ACK_TYPE, ackedCobsSeq, (uint8_t)(bytesRecvd & 0xFF),
+                     (uint8_t)((bytesRecvd >> 8) & 0xFF), 0 };
     u[4] = UtilCrc::crc8(u, 4);
     uint8_t frame[16];
     frame[0] = 0x00;
