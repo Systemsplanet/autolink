@@ -190,10 +190,15 @@ void test_maxRetx_overridable() {
 void test_txDelayMs_default_and_setter() {
     std::cout << "\n=== Test: txDelayMs default + setter ===" << std::endl;
     AutoLinkConfig cfg;
-    assert(cfg.txDelayMs == 0);
+    // this release: default txDelayMs raised 0 -> 100. The
+    // pre-fix default of 0 caused Ping to flood the wire
+    // at full link speed and starve the dashboard
+    // /logs poll. 100 ms gives the dashboard poll
+    // headroom.
+    assert(cfg.txDelayMs == 100);
     AutoLink link(0, 16, 17, true, cfg);
     AutoLinkTestAccessor t(link);
-    assert(link.txDelayMs() == 0);
+    assert(link.txDelayMs() == 100);
     link.setTxDelayMs(500);
     assert(link.txDelayMs() == 500);
     assert(t.link()->getConfig().txDelayMs == 500);
