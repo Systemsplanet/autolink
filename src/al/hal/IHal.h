@@ -9,6 +9,10 @@
 // a Link*.
 #pragma once
 #include <stdint.h>
+#ifdef AUTOLINK_HOST_TEST
+#    include <cassert>
+#endif
+#include "al/util/Log.h"
 
 namespace autolink {
 
@@ -37,10 +41,28 @@ public:
     // HAL — Link owns itself and is constructed
     // first in AutoLink, so the dtor order is
     // safe. No rebind after the first call —
-    // a second setEvents is an assertion fail
+    // host tests assert on a second setEvents
     // so a future refactor that constructs two
-    // Links against the same HAL trips here.
-    void setEvents(ILinkEvents &e) { events_ = &e; }
+    // Links against the same HAL trips here
+    // before it ships; on-device we log and
+    // ignore, since double-bind is recoverable
+    // (the new owner still wins) and a panic
+    // would brick a live link for a logical
+    // misuse. The guard makes the contract
+    // loud at compile/test time and forgiving
+    // in production.
+    void setEvents(ILinkEvents &e) {
+#ifdef AUTOLINK_HOST_TEST
+        assert(events_ == nullptr &&
+               "setEvents called twice on the same HAL");
+#endif
+        if (events_ != nullptr) {
+            Log::log().error("IHal",
+                             "setEvents called twice — "
+                             "rebinding listener");
+        }
+        events_ = &e;
+    }
     ILinkEvents *events() const { return events_; }
 
     virtual bool isHealthy() const { return true; }
