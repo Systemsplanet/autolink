@@ -1,6 +1,72 @@
 # 📅 AutoLink Version History
 
 All releases, most recent first.
+## v5.4.2
+
+**Test: make all auto-regens dashboard assets; CI uses assets_check to catch stale commits**
+
+### Test build flow — replace stale-header fail-fast with silent regen
+
+`make all` previously ran `dashboard_assets_check` as a hard pre-step: if `src/al/web/AutoLinkWebHtml.h` had drifted from the dashboard sources, the suite failed before any binary built, with a hint pointing the developer at the regen command. In practice this turned a "forgot to commit the regen" mistake into a 30-second detour and a noisy CI red on every PR that touched a dashboard source.
+
+This release splits the gate in two: `dashboard_assets_regen` runs the generator (no `--check`) and is now wired into `make all` so a stale header is auto-regenerated before the suite builds; `assets_check` runs the `--check` variant and is the CI-only gate, run before `make all` so a forgot-to-commit regen still trips CI red with a single-line error message.
+
+### Fix 1 — `make all` no longer fails on a stale `AutoLinkWebHtml.h`
+
+Replaced the `dashboard_assets_check` pre-step (which errored out with a hint if the committed header was out of sync with the dashboard sources) with `dashboard_assets_regen`, which silently regenerates the header from sources. The suite then builds against the regenerated copy. No semantic change to any test; the regen is byte-deterministic so CI caches hash the same binary.
+
+### Fix 2 — CI gate `make assets_check` catches forgot-to-commit regens
+
+Added an explicit `assets_check` step to `.github/workflows/ci.yml`'s `host-tests` job, run before `make all`. The CI red path is a single line (`AutoLinkWebHtml.h is stale — run: python3 build/dashboard_assets.py`) instead of the prior 5-line multi-step error block; developer ergonomics are unchanged for the local flow but a PR that regenerates without committing the result now fails CI immediately.
+
+### Regression test
+
+`run_test_dashboard_assets` (already in the suite as `make test_dashboard_js` neighbor) covers the generator's byte contract. This release doesn't change the generator or its self-test; the new shape is purely build-system. The `assets_check` CI step is the new gate — there is no additional unit test for the gate itself because the gate is a Makefile target, exercised by CI on every push.
+
+### Limitations
+
+- The regen step runs unconditionally on every `make all`, even when nothing has changed. On a warm filesystem this is sub-second (the generator re-reads + re-encodes the same sources and writes an identical header); on a cold cache it's ~200 ms. No caching was added because the speedup would only matter on repeated invocations and the file-watcher overhead exceeds the saving.
+- `make assets_check` reads the committed header but does not run a generator pass to verify the generator itself works; that contract is owned by `make test_dashboard_assets` (`build/test_dashboard_assets.py`). The split is intentional: CI's job is "did the human commit the regen", not "is the generator healthy" — those are two different failure modes.
+
+---
+
+## v5.4.1
+
+**Ping echo log reads msg size from slot; maxSeqSize wired to cfg.maxMsg; random floor 1; HAL stream buffer always 16-slot**
+
+Four diagnostics + sizing bugs from the v5.4.0 wire-ACK extension and dashboard radio buttons. The wire format is unchanged from v5.4.0; the bugs were in the Ping app layer's slot-completion log line, Ping's fill-mode sizing math, and EspHal's boot-time stream-buffer sizing. The dashboard's live SYNC/ASYNC switch now actually changes behavior (the stream buffer was sized for SYNC at boot and couldn't be grown in flight, so ASYNC pressed from SYNC boot had no pipeline headroom).
+
+### Fix 1 — Ping's "echo <seq> <bytes> <pending>" log line reports message size, not merged-chunk length
+
+The v5.4.0 wire ACK reports `bytes_recvd` as the merged-chunk length the receiver pushed into its app buffer: for a multi-chunk message that's the 6-byte MSG_HDR + the first chunk's payload (the receiver's view of the message prefix), NOT the full user-visible message size. Ping's slot-completion log line read `bytesRecvdFor(seq)` and logged that value as the "bytes" field. For multi-chunk sends the line said `echo <seq> 6 <pending>` (or `0` if the slot hadn't been ACKed yet), confusing operators who expected the actual message size.
+
+This release changes both echo log sites (the gap-stop branch and the main loop's tail queue drain) to read `queue_[head_].len` instead of `bytesRecvdFor(seq)`. The link layer still exposes `bytesRecvdFor(seq)` for consumers that want the receiver-side chunk-length view, but the slot-completion log line uses the local slot's message size.
+
+Pinned by `run_test_ping_send_failure` Pin 2. The pin now asserts both echo sites read `queue_[head_].len` and that `bytesRecvdFor(` does NOT appear inside the `echo %u %u %d` call's argument list. Toggle off (revert to `bytesRecvdFor(seq)`) → red.
+
+### Fix 2 — Ping's random mode picks 1..maxSeqSize_; sequential mode grows up to cfg.maxMsg
+
+The v5.4.0 random mode used `RANDOM_MIN_BYTES = 1024` with `maxSeqSize_ = 1024` (a hard-coded literal). With `min == max` the range collapsed to one value: `random((uint32_t)span)` with `span == 1` always returned `1024`. Sequential mode had the same `maxSeqSize_ = 1024` literal, capping the per-send size at 1024 regardless of `cfg.maxMsg`.
+
+This release:
+- `RANDOM_MIN_BYTES = 1` (1-byte floor). Random mode now spans the full `1..maxSeqSize_` range and exercises every chunk-build path.
+- `setup()` calls `maxSeqSize_ = (int)base_.comm_.maxMsg();` after `bringUpLink`. Sequential mode grows 1..cfg.maxMsg, wraps back to 1. Two new accessors: `Link::maxMsg()` returns `cfg.maxMsg`; `AutoLink::maxMsg()` forwards to `Link` (fallback 1024 if the link isn't constructed yet).
+
+Pinned by `run_test_ping_send_failure` Pin 4. The pin now asserts `RANDOM_MIN_BYTES = 1`, that `setup()` reads `base_.comm_.maxMsg()` into `maxSeqSize_`, and that the wrap condition uses `maxSeqSize_`. Toggle off (revert to the 1024 literals) → red.
+
+### Fix 3 — EspHal stream-buffer floor is always the 16-slot ASYNC pipeline
+
+The v5.4.0 `EspHal::streamBufferFloor` branched on `cfg.mode`: SYNC sized for 2 slots (~4 KB), ASYNC sized for 16 slots (~30 KB). The stream buffer is sized once in `begin()` from the boot-mode value, and a FreeRTOS stream buffer can't be resized in flight. The dashboard's live SYNC/ASYNC switch fired `link_.setMode(newMode)` correctly, but the stream buffer was already allocated at the boot-mode size — SYNC boots had 4 KB and pressing ASYNC gave the link no pipeline headroom, so ASYNC pressed on a SYNC boot behaved like SYNC.
+
+This release drops the mode branch: `streamBufferFloor` always reserves the 16-slot ASYNC floor. Cost on a SYNC boot: ~29 KB extra heap. The user-set `cfg.streamBufferSize` still raises the floor if they want a larger buffer.
+
+Pinned by `run_test_esphal_begin_and_health` (the floor helper's slot count + cfg.maxMsg check). The pin now asserts the slots constant is 16 unconditionally and that `(cfg.mode == ...) ? 16 : 2` does NOT appear. Toggle off (revert to the mode ternary) → red.
+
+### Limitations
+
+The send-failure / resweep loop visible in v5.4.0 logs (ARQ cache full under SYNC stop-and-wait) is a separate symptom not addressed here. Ping's `consecSendFail_` counter triggers `dropLink()` at MAX_SEND_FAIL consecutive send failures and bounces back to SWP, but the ARQ cache being full under sustained SYNC back-pressure is a flow-control symptom that needs a separate fix.
+---
+
 ## v5.4.0
 
 **Wire-ACK carries bytes-recvd; Pong is ack-only; gap-stop on peer-detected NAK; send-failure counter escalates to dropLink; SYNC/ASYNC radio buttons**
@@ -313,7 +379,6 @@ Pinned by:
 - `run_test_ping_gap_transition::test_unconditional_read_pin` (updated): the old pin asserted "no `if (gapSeq_ != NO_GAP)` block in Ping.h", which is no longer true — the gate IS `if (gapSeq_ != NO_GAP)`, which is the correct shape. The pin now asserts (a) the gate branches on `gapSeq_ != NO_GAP`, (b) it does NOT match `a == GapAction::Stay`, and (c) the bug-shape 3-clause gate is absent from the body.
 
 Also: `test/test_desktop/al/link/sweep/OnBreakGuardTest.cpp` Pin 6's `char buf[16384]` read-buffer for `Ping.h` was bumped to 65536 — the file grew past 16 KB after the PingGap.h extraction and the Pin 14 caller-side comments. Pre-existing buffer too small; not a regression in any source file, just a stale buffer size.
-
 ---
 
 ## v5.3.102
@@ -4834,108 +4899,4 @@ API shrinks by zero symbols.
   is one wire frame per P2
   fallback — a previously-missed
   packet, not a new one).
----
-
-## v5.3.85
-
-**Helpers drive Link through LinkContext, not friendship**
-
-`LinkArq`, `LinkReorder`, and
-`LinkSweep` previously reached into
-`Link`'s private section via
-`friend class` declarations and
-called `l.sendFrame_unlocked()`,
-`l.hwSetSpd()`, `l.hwLock()`,
-`l.masterRole()`, etc. — a façade
-over what was functionally a
-God-class split. Promoted the
-narrow shim accessors into a small
-`al/link/LinkContext.h` interface
-that `Link` implements; helpers
-now take `LinkContext&` instead of
-`Link&`. Removed `friend class
-LinkSweep/LinkArq/LinkReorder`.
-Helpers no longer `#include
-"al/link/Link.h"` — header cycle
-broken. Wire-protocol constants
-(`PING_CMD`/`PONG_CMD`/`LOCK_CMD`/
-`MAX_CHUNK`) moved to
-`LinkContext.h` so the helpers see
-them through the cross-helper I/O
-contract. One vtable per `Link`
-(~32B on ESP32), on par with the
-existing `IHal` cost. No
-`std::function` or virtual bases on
-the helper side.
-
-Regression: `run_test_linkcontext`
-new — source-level pin (no friend
-declarations in `Link.h`, no
-`#include "al/link/Link.h"` in any
-helper) plus a runtime mock-context
-that the helpers compile and run
-against. Toggle off (re-add
-`friend class LinkSweep;`) → red.
-Toggle off (revert helper
-signatures to `Link&`) → compile
-error. `make test` (32/32),
-`make itest` (3/3),
-`./build/verify_build.sh`
-(`esp32:esp32:firebeetle32`),
-`make loopback_quick` (5 s two-Link
-end-to-end). Wire format unchanged.
-
-Limitations: one vtable per `Link`
-(~32B on ESP32) is a real cost —
-acceptable since `IHal` already
-costs the same. The
-`LinkTestAccessor` friend and
-`AutoLink` friend remain — out of
-scope for this refactor (those
-gates production-side test hooks,
-not the helper↔link boundary).
----
-
-## v5.3.84
-
-**AutoLinkConfig: own header — break HAL→link header-level dep**
-
-`AutoLinkConfig` is a user-facing config
-struct (baud list, timeouts, buffer
-sizes, mode) but lived inside the
-link-layer header `src/al/link/Link.h`.
-`EspHal` only needed `AutoLinkConfig`
-but had to `#include "al/link/Link.h"`
-just to see the type — pulling in the
-full link layer (LinkArq, LinkReorder,
-LinkSweep, IArqCache, LinkFrameRx)
-from the HAL translation unit. Moved
-the struct to its own header
-`src/al/AutoLinkConfig.h`; both
-`Link.h` and `EspHal.h` now include
-that header. `EspHal.h` no longer
-includes `Link.h` — the HAL layer
-sees the config struct without
-depending on the link layer at the
-header level.
-
-`test/test_desktop/al/CompileCheckTest`
-extended `ARDUINO_GUARDED_FILES` to
-carry an optional per-file
-`-include` flag and injects
-`al/link/Link.h` for `EspHal.h`
-only — `EspHal.h`'s body still calls
-`Link::onRx / onBreak / onTimer /
-begin` (those are real dependencies,
-held via `IHal::link`), and the
-standalone header-syntax parse needs
-the full `Link` definition that
-production TUs get through
-`include/AutoLink.h`.
-
-Regression: `make test` (31/31),
-`make itest` (3/3),
-`./build/verify_build.sh`
-(`esp32:esp32:firebeetle32`).
-Wire format unchanged.
 ---
