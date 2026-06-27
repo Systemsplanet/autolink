@@ -105,8 +105,8 @@ void test_apply_pong_promote_to_phase2_does_work() {
         << std::endl;
     // applyPongSwpAction_unlocked moved to LinkSweep.cpp
     // after the god-class split.
-    std::string linkCpp = readFile(
-        projectRoot() + "/src/al/link/LinkSweep.cpp");
+    std::string linkCpp =
+        readFile(projectRoot() + "/src/al/link/LinkSweep.cpp");
     std::string body = extractApplyPongBody(linkCpp);
 
     // Locate the PromoteToPhase2 case label.
