@@ -16,6 +16,7 @@ public:
     std::vector<std::vector<uint8_t>> payloads;
     std::vector<uint8_t> seqs;
     std::vector<uint8_t> acks;
+    std::vector<uint16_t> ackBytes;
     std::vector<uint8_t> naks;
     int errors = 0;
     int dropAfterErrors = -1;
@@ -24,8 +25,13 @@ public:
         payloads.emplace_back(b, b + n);
         return false;
     }
-    bool onAck(uint8_t ackedCobsSeq) override {
+    // this release: wire ACK frame extended with bytes-recvd.
+    // The MockListener records both the seq and the
+    // reported bytes-recvd so tests can pin the new
+    // contract end-to-end (e.g. ack-byte round-trip).
+    bool onAck(uint8_t ackedCobsSeq, uint16_t bytesRecvd) override {
         acks.push_back(ackedCobsSeq);
+        ackBytes.push_back(bytesRecvd);
         return false;
     }
     bool onNak(uint8_t missingCobsSeq) override {
@@ -273,14 +279,26 @@ void test_max_cobsSeq() {
     assert(lisNak.payloads.empty());
     assert(lisNak.naks.size() == 1 && lisNak.naks[0] == 0xAB);
 
-    std::cout << "\n=== Test: cobsSeq=0xFF (ACK_TYPE) Reserved ==="
+    std::cout << "\n=== Test: ACK_TYPE 0xFF + extended 5-byte ACK frame ==="
               << std::endl;
+    // this release: wire ACK frame is 5 bytes raw:
+    //   [0xFF, seq, bytes_lo, bytes_hi, frame_crc8]
+    // The decoded payload reports the receiver's
+    // bytes-recvd so Ping can log the actual payload
+    // length. Build the wire frame by hand here (not
+    // via wireFrame which is data-shaped) and feed it.
     MockListener lisAck;
     UtilFrameRx rxAck(lisAck);
-    auto wAck = wireFrame({ 0xAB }, 0xFF);
-    rxAck.feed(wAck.data(), (int)wAck.size());
+    uint8_t ackRaw[5] = { 0xFF, 0xAB, 0x10, 0x00, 0x00 };
+    ackRaw[4] = UtilCrc::crc8(ackRaw, 4);
+    uint8_t ackEnc[16];
+    ackEnc[0] = 0x00;
+    size_t ackN = UtilCobs::encode(ackRaw, 5, ackEnc + 1);
+    ackEnc[1 + ackN] = 0x00;
+    rxAck.feed(ackEnc, (int)(ackN + 2));
     assert(lisAck.payloads.empty());
     assert(lisAck.acks.size() == 1 && lisAck.acks[0] == 0xAB);
+    assert(lisAck.ackBytes.size() == 1 && lisAck.ackBytes[0] == 0x0010);
     std::cout << "PASS" << std::endl;
 }
 
