@@ -18,7 +18,7 @@ Read this, then `README.md`, then `docs/Version.md`. History is the source of tr
 - `build/build_env.sh` — installs `arduino-cli` + esp32 toolchain.
 - `build/verify_build.sh` — cross-compile sketch. Run before declaring done. Host tests skip `AutoLinkWeb.cpp`.
 - `build/arduino-cli-cmd.sh` — wrapper. Use it; never bare `arduino-cli`.
-- `build/pretty_print.py` — `clang-format -i` + legacy string-merge. Run on every `.cpp`/`.h` you change. Self-tests: `build/test_pretty_print.py`.
+- `build/pretty_print.py` — `clang-format -i` + legacy string-merge. Run on every `.cpp`/`.h` you change. Self-tests: `build/pretty_print-test.py`.
 - `build/version.py` — owns `docs/Version.md` structural invariant. Subcommands: `add`, `trim --keep 20`, `check` (CI gate).
 - `build/clean.py` — owns filesystem cleanup of build artifacts. Nothing else deletes test binaries.
 
@@ -32,7 +32,7 @@ Read this, then `README.md`, then `docs/Version.md`. History is the source of tr
 4. Verify before done: `cd test && make test`, `make itest`, `./build/verify_build.sh`. For protocol changes (`Link.cpp`), also `make loopback`. Allow at least a 60 s timeout for `make itest` — the host integration suite takes seconds of wall time and the sandbox / CI 30 s ceiling truncates the run before completion. The ESP32 cross-compile (`build/verify_build.sh`) is not optional: it must run on every change, not just protocol changes, because host tests skip `AutoLinkWeb.cpp` and any library API surface that only manifests in the Arduino build path. The wrapper `build/arduino-cli-cmd.sh` installs `esp32:esp32` on first use; that install is a one-time multi-minute cost (large toolchain download + board index), so give `verify_build.sh` at least a 10 minute timeout (600 s) on a clean cache and 5 minutes (300 s) once the core is installed. If the sandbox truncates below that, treat the build as unverified, surface it in the delivery summary, and re-run in a longer-lived environment.
 5. Update `docs/Version.md` (newest on top, one-line summary + fix + regression test + limitations). `build/version.py add --version <X.Y.Z> --title "..."` scaffolds; `trim --keep 20` enforces the cap. `check` is the pre-zip gate.
 6. README example code must match `examples/` and `src/`. Diff line-by-line before zipping. A non-compiling snippet is a 100% reproducible install failure.
-7. Never delete `build/`. It hosts `verify_build.sh`, `arduino-cli-cmd.sh`, `pretty_print.py`, `test_pretty_print.py`, and the verify sketch. If missing, restore from git or the last good zip before anything else.
+7. Never delete `build/`. It hosts `verify_build.sh`, `arduino-cli-cmd.sh`, `pretty_print.py`, `pretty_print-test.py`, and the verify sketch. If missing, restore from git or the last good zip before anything else.
 
 **Delivery**
 
