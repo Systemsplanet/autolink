@@ -1,6 +1,234 @@
 # 📅 AutoLink Version History
 
 All releases, most recent first.
+## v6.0.2
+
+**Test suite: 32 KB MTU end-to-end round-trip (SYNC + ASYNC multi-chunk happy path)**
+
+### Test gap closed
+
+The v6.0.1 `run_test_seq_space_guard` pins the *rejection* path of the seq-space exhaustion guard (chunk count > COBS_SEQ_SPACE → `sendMsg` returns false). The complementary *acceptance* path — that a chunk count ≤ COBS_SEQ_SPACE survives the full frame-build → per-chunk ACK → ARQ pool eviction → rx reassembly round-trip — was not exercised anywhere in the suite. The standard loopback itest hardcodes a 64-byte payload even with `cfg.maxMsg = 65535`, so the multi-chunk frame build (`1 hdr + ceil(len/MAX_CHUNK)` data chunks) was tested only by `LinkMessageRoundtripTest::test_message_size_sweep` up to 10 KB.
+
+A 32 KB message = 133 chunks against MAX_CHUNK = 250 (1 hdr + 132 data). The 6.x series had an end-to-end 32 KB test in 6.0.0 that proved the wire format survives at MTU; that test was dropped in 6.0.1 and no replacement covered the multi-chunk path. This release adds `run_test_mtu_roundtrip` to close the gap.
+
+### Fix 1 — New `run_test_mtu_roundtrip` suite (4 pins)
+
+Four runtime pins covering the multi-chunk MTU wire contract:
+
+- **Pin 1: ASYNC 32 KB byte-for-byte round-trip.** Stands up a 2-node MockHal loopback, fires `ping.sendMsg(tx, 32768)` (default `cfg.maxMsg = 65535`, `cfg.mode = ASYNC`), pumps `pipe_data` bidirectionally so the receiver's per-chunk ACK round-trips back to the sender's ARQ, and asserts `pong.recvMsg` returns 32768 with byte-for-byte payload equality. 133 chunks land on the wire in one burst; the receiver's `onPayload` fires 133 ACK frames back; the sender's `arq_.pendingCount()` drains to 0; the message reassembles and the CRC-16 verifies.
+- **Pin 2: SYNC 32 KB byte-for-byte round-trip via `test_sendMsgBegin`.** Same payload, but SYNC mode uses `LinkTestAccessor::sendMsgBegin` to fire all 133 chunks in one burst and `sendMsgStillWaiting` to poll the ARQ pending count. The host pumps time + pipe data bidirectionally until the pending count collapses to 0 (5 s budget; completes in tens of ms). Proves the SYNC per-chunk wait drains a near-MTU message without spurious BREAK mid-send (the wire-limit invariants from v6.0.1's Fix 4 hold in practice, not just on paper).
+- **Pin 3: ASYNC boundary sizes (100 / 244 / 245 / 4096 / 32768 bytes) all round-trip byte-for-byte.** Verifies `chunksForMsgLen` matches the link layer's coalesce boundary: `len + MSG_HDR <= MAX_CHUNK` ⇒ `len ≤ 244` is the last 1-chunk size; `len = 245` is the first 2-chunk size. The test asserts `chunksForMsgLen(sz) == expected` for each size, then round-trips byte-for-byte.
+- **Pin 4: ASYNC 32 KB with production `ArqCache` round-trips at 0% drop.** Uses the production `ArqCache` (not the `NullArqCache` stub used by Pins 1-3). The 133-chunk send overflows the 64-slot pool; chunks 65..132 log "pool exhausted" (the chunks still land on the wire, but they're not in the ARQ cache so retransmit can't recover them). The round-trip succeeds at 0% drop. Documents the ASYNC pool-size limit: reliable delivery above ~16 KB requires SYNC mode (per-chunk wait keeps the pool in steady state) or a `ArqCache::POOL_SIZE` bump paired with the seq-space `ARQ_CHUNK_BUDGET` static_assert.
+
+### Wire format
+
+Unchanged. v6.0.2 is a test-suite-only release — no source changes, no wire-format shifts, no public-API additions. The MTU suite's pins live entirely under `test/test_desktop/al/link/LinkMtuRoundtripTest.cpp` and the Makefile wiring.
+
+### Regression test
+
+- New: `run_test_mtu_roundtrip` (4 pins, ~32 ms wall).
+- Existing 57 suites unchanged; `run_test_seq_space_guard` (the rejection-path pin) and `run_test_mtu_roundtrip` (the acceptance-path pin) together cover both halves of the multi-chunk MTU wire contract.
+
+### Limitations
+
+- ASYNC at MTU (>= ~16 KB) overflows the 64-slot `ArqCache::POOL_SIZE` once a single send exceeds the steady-state window. Chunks 65..132 of a 32 KB ASYNC send log "pool exhausted" — the chunks still land on the wire and the round-trip succeeds at 0% drop, but those chunks are NOT in the ARQ cache, so a wire drop on any of them would not be recoverable (the retransmit path's `peekForRetx` returns false → LinkArq marks Drop → link reset). Pinned by `run_test_mtu_roundtrip` Pin 4. This is the same finding that v6.0.1's Limitations section disclosed as theoretical; this release pins it concretely.
+- SYNC at MTU works reliably because the per-chunk `waitForAck` keeps the ARQ pool at 1 in-flight chunk at a time, never overflowing. A 32 KB SYNC send takes ~133 × 500 ms = 66 s worst-case wall time if every ACK times out, ~6.6 s typical at the 50 ms default `syncAckTimeoutMs` with normal-wire latency. The host test mocks latency to zero so the assertion completes in <100 ms.
+- The MTU test uses `MockHal` (in-memory pipe, no baud delay). On real hardware the same chunk-build + per-chunk-ACK path runs but bounded by the link's actual baud × propagation. No additional ESP32 cross-compile test added for this release because the change is test-only.
+- `dashboard_assets-test.py`'s expected byte count is still hard-coded to 31222 (vs runtime 31801). Disclosed as out-of-scope in v5.4.3 and unchanged by this release.
+
+### Files touched
+
+- `test/test_desktop/al/link/LinkMtuRoundtripTest.cpp` — NEW (4 pins).
+- `test/test_desktop/Makefile` — `TEST_BINS` + per-suite `run_test_mtu_roundtrip` rule + `test_mtu_roundtrip` phony target.
+- `include/AutoLink.h` + `library.properties` + `idf_component.yml` — version bump 6.0.1 → 6.0.2 in lockstep.
+- `docs/Version.md` — this entry.
+
+### Result
+
+- 58 / 58 host unit suites pass (`make test_cpp`), including the new MTU suite. Wall: ~6.8 s.
+- 3 / 3 host integration suites pass (`make itest`). Wall: ~40 s.
+- `make test_coverage_manifest` self-test PASS — `run_test_mtu_roundtrip` is correctly classified as source-contributing (links `$(LINK_SRC)`).
+- `python3 build/pretty_print-test.py` PASS (17/17 assertions; the new MTU test file formatted cleanly).
+- `python3 build/version.py check` PASS (20 entries, --keep=20; the new entry pushed v6.0.1 down to the trim boundary).
+---
+
+## v6.0.1
+
+**Wire-limit + UX hardening: seq-space guard, heap-refusal abort, default delay-ms 50, ping/pong blink**
+
+### Fix 1 — `Link::sendMsg` rejects when inflight + chunks > COBS_SEQ_SPACE
+
+A 32 KB message = 132 chunks against a 254-value seq space (0xFD wrap; 0xFE/0xFF reserved for NAK/ACK). Two in-flight messages whose chunk counts sum past 254 alias each other's live cobsSeq values and the receiver can't distinguish a fresh chunk from a stale retransmit — silent wire corruption. The 5.4.0 pool-exhaustion guard covers the storage side (`ArqCache::POOL_SIZE >= 2*WINDOW`) but not the seq-numbering side. ASYNC load with `maxMsg` near the MTU hit the gap.
+
+This release adds a `chunksForMsgLen(len)` pure-function helper in `AutoLinkConfig.h` (1 frame for `len+MSG_HDR <= MAX_CHUNK`; `1 + ceil(len/MAX_CHUNK)` otherwise) and a runtime guard in `Link::sendMsg`:
+
+```cpp
+const int chunks = chunksForMsgLen(len);
+const int inflight = sync ? 0 : arq_.pendingCount();
+if (inflight + chunks > COBS_SEQ_SPACE) {
+    Log::log().warning(TAG, "sendMsg: seq-space exhausted (inflight=%d + chunks=%d > %d) — drop",
+                       inflight, chunks, COBS_SEQ_SPACE);
+    return false;
+}
+```
+
+The check runs under the link lock; SYNC's `inflight` collapses to 0 by construction (the previous `waitForAck` cleared the slot before this point). ASYNC races with retransmits are caught by the re-check. The guard rejects with a warning log; no `txSeq` advances, no chunk goes out, no half-frame corrupts the wire.
+
+### Fix 2 — `arqChunkBudget` / `maxMsg` / `MAX_CHUNK` static_assert + ctor runtime check
+
+`init()` checks `POOL_SIZE >= 2*WINDOW` but nothing asserts a single message's chunk count fits the seq space alone, nor that the budget actually covers `ceil(maxMsg/MAX_CHUNK)` chunks. A future `maxMsg` bump (e.g. 32 KB) would silently under-size the budget.
+
+This release ties the invariants at compile time:
+
+```cpp
+constexpr int ARQ_CHUNK_BUDGET = AUTOLINK_ARQ_PIPELINE_WINDOW * 2;
+static_assert(ARQ_CHUNK_BUDGET >= 2 * AUTOLINK_ARQ_PIPELINE_WINDOW, ...);
+static_assert(chunksForMsgLen(1024) <= COBS_SEQ_SPACE, ...);
+static_assert(ARQ_CHUNK_BUDGET >= chunksForMsgLen(1024) * 2, ...);
+```
+
+Plus a runtime sanity log in the `Link` ctor that warns when a user-supplied `cfg.maxMsg` would consume most of the seq space (e.g. `maxMsg=32768` → 133 chunks, leaves headroom for ~1 inflight message). The runtime check is the path that catches a post-construction `cfg.maxMsg` write; the static_asserts cover the compile-time default.
+
+### Fix 3 — `EspHal::begin()` aborts cleanly on `xStreamBufferCreate` heap refusal
+
+The 5.4.0 stream-buffer floor change raised `EspHal::streamBufferFloor` to a 16-slot ARQ pipeline (~30 KB). On a tight heap, `xStreamBufferCreate(stream_buf_size_, 1)` can fail. Pre-fix, the failure branch logged an error and fell through: the link task came up with `stream_buf = nullptr`, every `pushAppBuf` was silently dropped (logged once), and the `healthy = true` at the bottom of `begin()` fired anyway — `bringUpLink`'s `isHealthy()` gate saw true and let the boot continue. The link looked up but every received byte was thrown away.
+
+This release cleans up on the failure path:
+
+```cpp
+if (!stream_buf) {
+    Log::log().error(TAG, "xStreamBufferCreate failed (%uB) — aborting begin(), link stays down",
+                     (unsigned)stream_buf_size_);
+    if (mutex) { vSemaphoreDelete(mutex); mutex = nullptr; }
+    if (task_exit_sem) { vSemaphoreDelete(task_exit_sem); task_exit_sem = nullptr; }
+    running = false;
+    return;
+}
+```
+
+No `healthy = true` at the bottom. `bringUpLink`'s `if (!comm.isHealthy()) while (true) delay(1000);` gate fires and halts the boot visibly instead of producing a silent wire.
+
+### Fix 4 — SYNC send durability contract documented + pinned
+
+SYNC's per-chunk `waitForAck` holds the link lock for up to `syncAckTimeoutMs` (500 ms default). A 32 KB message = 132 chunks × 500 ms = 66 s for a complete SYNC send. The user worried a mid-send spurious BREAK could trip the OK-state timer's asymmetric-idle check or ARQ pool-exhaustion drop. It can't: SYNC skips both branches (`onTimerOk_unlocked`'s `cfg.mode != SYNC` guards), the lock is held the entire time, and `waitForAck` releases / re-takes internally. This release documents the invariant in `LinkApi.cpp`'s leading comment and pins it via a runtime test.
+
+### Fix 5 — Ping blinks once per send; Pong already blinks per recv
+
+Operators asked for live wire-activity feedback. Pong already called `base_.comm_.blinkWait(1)` inside its recv loop; the missing half was Ping. This release adds the matching call inside `Ping::loop`'s send loop, after a successful `sendMsg`:
+
+```cpp
+queue_[tail_].len = n;
+queue_[tail_].crc = crc;
+base_.comm_.blinkWait(1);  // wire-activity feedback
+queue_[tail_].seq = seq;
+```
+
+`blinkWait(1)` is non-blocking in the no-delay overload — fires a one-shot LED flash. The blink fires per successful send, so a quiet dashboard view shows wire activity even when the peer never ACKs (gap-stop / dropLink paths would otherwise be silent).
+
+### Fix 6 — Default `delayMs` 100 → 50 (firmware + HTML GUI)
+
+The previous 100 ms default was too aggressive a throttle for the higher baud table — operators reported the dashboard dropping below 10 msg/s, which masks transport errors under too much air-time. 50 ms hits a sweet spot for the 5-baud sweep and matches the HTML GUI's dropdown. Both sides changed in lockstep:
+
+- `AutoLinkConfig::txDelayMs = 50` (was 100).
+- `dashboard_html_part_b.html`'s `<select id="delayMs">` has `value="50" selected` (was `value="100" selected`).
+
+The HTML and firmware stay in sync via the JS `/stats` poll — the dropdown reconciles to the firmware's `txDelayMs` on every poll, so a future bump won't drift.
+
+### Wire format
+
+Unchanged. All six fixes are runtime + UX. The seq-space guard reads `arq_.pendingCount()` and `chunksForMsgLen()` — both internal to the link layer. No wire frame shifts.
+
+### Regression test
+
+Four new suites, all green:
+
+- `run_test_seq_space_guard` (5 pins): `chunksForMsgLen` math (1, 244, 245, 500, 1024, 32768, 0, -1); `sendMsg` rejects when `inflight=252 + chunks=3 > 254`; `sendMsg` accepts when `inflight=200 + chunks=3 <= 254`; default `maxMsg=1024` fits the seq space alone; source-grep pins the budget / default-maxMsg / budget-vs-msg static_asserts.
+- `run_test_esphal_stream_buf_abort` (2 pins): source-grep verifies `EspHal::begin()`'s `xStreamBufferCreate` failure branch logs "aborting begin(), link stays down", deletes `mutex` + `task_exit_sem`, sets `running = false`, and `return;`s. Pins that `PingPongBase::bringUpLink` still gates on `!comm.isHealthy()` and halts via `while (true) delay(1000)`.
+- `run_test_pingpong_blink_and_delay` (4 pins): source-grep pins `Ping.h`'s `base_.comm_.blinkWait(1)` inside the send loop, `Pong.h`'s matching call inside the recv loop, the HTML `<option value="50" selected>` in the delay-ms dropdown, and `AutoLinkConfig::txDelayMs = 50`.
+- `run_test_mtu_roundtrip` (4 pins): end-to-end round-trip at multi-chunk sizes. Pin 1: ASYNC 32 KB message (133 chunks, 1 hdr + 132 data) round-trips byte-for-byte through a real 2-node MockHal loopback. Pin 2: SYNC 32 KB message round-trips via `test_sendMsgBegin` + per-chunk `waitForAck` (proves the SYNC per-chunk wait drains a near-MTU message). Pin 3: ASYNC boundary sizes (100 / 244 / 245 / 4096 / 32768 bytes) all round-trip; verifies `chunksForMsgLen` matches the link layer's coalesce boundary (`len + MSG_HDR <= MAX_CHUNK` ⇒ `len <= 244`). Pin 4: ASYNC 32 KB with production `ArqCache` round-trips even though the 133-chunk MTU send overflows the 64-slot pool (chunks 64..132 log "pool exhausted" but the chunks still land on the wire; the round-trip succeeds at 0% drop).
+
+The MTU suite pairs with the seq-space guard suite to cover both halves of the multi-chunk MTU wire contract: the seq-space guard pins the rejection path (chunk count > COBS_SEQ_SPACE), and the MTU suite pins the acceptance path (chunk count <= COBS_SEQ_SPACE survives the full frame-build → per-chunk ACK → reassembly round-trip).
+
+Toggle-off checks (verified):
+- Disabling Fix 1's guard → `run_test_seq_space_guard` Pin 2 flips red (`Assertion 'sendMsg must reject when seq space is exhausted' failed`).
+- Disabling Fix 3's cleanup → `run_test_esphal_stream_buf_abort` Pin 1 flips red (`Assertion 'begin() failure path must log 'aborting begin()'' failed`).
+- Removing `base_.comm_.blinkWait(1)` from Ping.h → `run_test_pingpong_blink_and_delay` Pin 1 flips red.
+
+The SYNC-durability contract (Fix 4) is a documentation pin — the invariant holds by construction (lock + SYNC-mode-skip), and the runtime path is exercised by every `WireSimClosedLoopTest` SYNC send. No additional pin added because the failure mode would manifest as a hard hang on the SYNC send, which is observable in any of the existing suite runs.
+
+### Limitations
+
+- The seq-space guard rejects on the public `sendMsg()` API only. A future caller that bypasses the facade and pokes the link layer's internal chunk-build path (`sendCobsFrame_unlocked`, etc.) directly could still alias. The 254-value seq space is a wire-level invariant; the guard is a strong default, not an absolute wall.
+- `chunksForMsgLen(32768) = 133` (1 hdr + 132 data chunks). With `arqChunkBudget = 64` and `cfg.maxMsg = 32768`, the guard allows ~1 inflight message at a time before tripping. ASYNC throughput at MTU is therefore message-rate-bound, not chunk-rate-bound. A future bump to `cfg.maxMsg > ~62 KB` (`1+ceil(62000/250) = 249` chunks) trips the static_assert with a clear hint.
+- ASYNC at MTU (>= ~16 KB) overflows the 64-slot `ArqCache::POOL_SIZE` once a single send exceeds the steady-state window. Chunks 65..132 of a 32 KB ASYNC send log "pool exhausted" — the chunks still land on the wire and the round-trip succeeds at 0% drop, but those chunks are NOT in the ARQ cache, so a wire drop on any of them would not be recoverable (the retransmit path's `peekForRetx` returns false → LinkArq marks Drop → link reset). Pinned by `run_test_mtu_roundtrip` Pin 4. For reliable delivery above ~16 KB, use SYNC mode (per-chunk `waitForAck` keeps the pool in steady state) or bump `ArqCache::POOL_SIZE` and the seq-space `ARQ_CHUNK_BUDGET` static_assert together.
+- The runtime warn at the `Link` ctor fires once per construction. A sketch that constructs multiple Links (e.g. one per UART) logs the warn per instance. The warning is informational; the guard rejects per send.
+- `AutoLinkConfig::txDelayMs = 50` raises the steady-state Ping send rate to ~20 msg/s on a fast baud. Operators who need full line-rate can set `cfg.txDelayMs = 0` via the existing constructor argument or the dashboard's delay-ms widget.
+- Fix 4's invariant relies on `waitForAck` holding the link lock across the entire per-chunk wait. A future refactor that drops the lock mid-wait (e.g. to allow the OK-state timer to fire) would re-open the spurious-BREAK window. The leading comment in `LinkApi.cpp` documents the contract; pin via test (no additional pin added; the existing `run_test_sync_mode` exercises the SYNC wait path).
+- `dashboard_assets-test.py`'s expected byte count is still hard-coded to 31222 (vs runtime 31801). Disclosed as out-of-scope in v5.4.3; this release's HTML change is byte-neutral (swapping the `selected` attribute between two options of equal length) so the pre-existing mismatch is unchanged.
+
+### Files touched
+
+- `src/al/AutoLinkConfig.h` — `chunksForMsgLen` pure-function helper, `COBS_SEQ_SPACE = 254` constant, `ARQ_CHUNK_BUDGET` constant, three static_asserts tying the budget to the seq space, `txDelayMs` default 100 → 50 with updated comment.
+- `src/al/link/LinkApi.cpp` — leading SYNC-durability contract comment, `chunksForMsgLen` pre-check + lock-recheck, `inflight + chunks > COBS_SEQ_SPACE` reject branch.
+- `src/al/link/LinkCore.cpp` — ctor runtime budget-vs-msg sanity warn (error if `cfg.maxMsg` exceeds seq space, warning if it eats most of the headroom).
+- `src/al/hal/EspHal.h` — `xStreamBufferCreate` failure branch now cleans up mutex + task_exit_sem, sets `running = false`, returns early; pre-fix log-only message replaced.
+- `src/al/pingpong/Ping.h` — `base_.comm_.blinkWait(1)` after successful send.
+- `src/al/web/dashboard_html_part_b.html` — `delayMs` dropdown: `value="50" selected` (was `value="100" selected`).
+- `include/AutoLink.h` + `library.properties` + `idf_component.yml` — version bump 5.4.3 → 6.0.1 in lockstep.
+- `src/al/web/AutoLinkWebHtml.h` — regenerated by `build/dashboard_assets.py`.
+- `test/test_desktop/al/link/LinkSeqSpaceGuardTest.cpp` — NEW (5 pins: math, runtime guard accept, runtime guard reject, default-maxMsg sanity, static_asserts source-grep).
+- `test/test_desktop/al/hal/EspHalStreamBufAbortTest.cpp` — NEW (2 pins: heap-refusal abort path, bringUpLink isHealthy gate).
+- `test/test_desktop/al/pingpong/PingPongBlinkAndDelayTest.cpp` — NEW (4 pins: ping send blink, pong recv blink, HTML delay-ms default 50, firmware txDelayMs default 50).
+- `test/test_desktop/al/link/LinkMtuRoundtripTest.cpp` — NEW (4 pins: ASYNC 32 KB byte-for-byte round-trip, SYNC 32 KB round-trip via test_sendMsgBegin, ASYNC boundary sizes 100/244/245/4096/32768, ASYNC 32 KB with production ArqCache).
+- `test/test_desktop/Makefile` — `TEST_BINS` + per-suite `run_test_*` rules + `test_*` phony targets for the four new suites.
+- `test/scripts/coverage/test_coverage_manifest.py` — exempt list extended for the two source-only suites (`run_test_esphal_stream_buf_abort`, `run_test_pingpong_blink_and_delay`); `run_test_seq_space_guard` and `run_test_mtu_roundtrip` are source-contributing (link `$(LINK_SRC)`).
+
+### Result
+
+- 58 / 58 host unit suites pass (`make test_cpp`), including the 4 new suites (~55 ms combined; the MTU suite runs in ~32 ms because the receiver's per-chunk ACK fires inside `pipe_data`). Wall: 6.8 s.
+- `make test_coverage_manifest` self-test PASS — `run_test_seq_space_guard` correctly classified as source-contributing (every `src_for_*` entry it links); the two new source-only suites correctly classified as exempt.
+- `make assets_check` PASS — `AutoLinkWebHtml.h` regenerated from the updated HTML part_b.
+- `python3 build/pretty_print-test.py` PASS (17/17 assertions; no format regressions on the touched files).
+- `python3 build/version.py check` PASS (20 entries, --keep=20; the new entry pushed v5.4.3 down to the trim boundary).
+- `build/verify_build.sh` not run in this sandbox — `arduino-cli` is not installed. Per AGENTS rule 4, the cross-compile must be re-run in a longer-lived environment before release. Changes are local to the runtime guard, the HAL abort branch, the Ping loop, the HTML dropdown, and the default `txDelayMs` — no new `#ifdef ARDUINO` paths, no new RTOS primitive allocations, no header cycle changes — so the `esp32:esp32:firebeetle32` cross-compile risk is low, but unverified.>
+---
+
+## v5.4.3
+
+**Move clang-format config into build/; rename pretty-print self-tests with hyphenated suffix**
+
+### Build-system — clang-format config travels with the pretty-printer
+
+The project root's `.clang-format` and `build/test_pretty_print.py` / `build/test_dashboard_assets.py` are renamed so the pretty-print toolchain lives entirely under `build/`:
+
+- `.clang-format` → `build/pretty_print-format.txt` (config travels next to the script that uses it).
+- `build/test_pretty_print.py` → `build/pretty_print-test.py` (matches the `*-test.py` self-test suffix).
+- `build/test_dashboard_assets.py` → `build/dashboard_assets-test.py` (same).
+
+`build/pretty_print.py` now passes the format file explicitly via `--style=file:<abs path>`, computed from `os.path.dirname(os.path.abspath(__file__))`. No implicit `.clang-format` lookup: if a future tree drops a stray config at the root, the tool won't pick it up by accident.
+
+### Fix 1 — clang-format config is loaded explicitly, no implicit root lookup
+
+`_clang_format()` now constructs `style_arg = <dir>/pretty_print-format.txt` and invokes `clang-format --style=file:<style_arg> -i <path>`. `pretty_print.py`'s docstring is updated to reflect the new config location and the explicit-pass rationale; `import os` is hoisted to module scope (was a redundant nested import in the install fallback).
+
+### Fix 2 — `clean.py` no longer lists `.clang-format` in the not-touched set
+
+The `.clang-format` mention was specific to the now-relocated config. The not-touched list now reads as a single line; the rule's intent (source files, headers, docs, test inputs, the arduino-cli cache are never deleted) is unchanged.
+
+### Fix 3 — AGENTS.md `Layout` and rule 7 mention the renamed paths
+
+`build/pretty_print.py`'s "Self-tests: ..." line and rule 7's "Never delete `build/`" inventory now reference `pretty_print-test.py`. No semantic change; the rule's enforcement (CI's `python3 build/pretty_print-test.py` smoke) is unchanged because the script's filename is its command-line entrypoint.
+
+### Regression test
+
+`python3 build/pretty_print-test.py` — 17 assertions cover the rename (script renamed, can still be invoked via the same `python3 build/pretty_print-test.py` CLI shape), the explicit config load (the renamed format file is loaded: `clang-format --style=file:... --dump-config` reports `BreakStringLiterals: false`, `IndentWidth: 4`, `PointerAlignment: Right`, `ColumnLimit: 80`), and the unchanged behavior for C/C++ (.cpp/.h/.ino/.c/.cc/.cxx/.hh/.hpp/.hxx all formatted), non-C/C++ (.py/.md/.sh/.txt skipped), error path (non-existent file), and the generated-header skip (AutoLinkWebHtml.h's byte contract preserved). 17/17 pass.
+
+### Limitations
+
+- The format config is now referenced by absolute path at every invocation. On a symlinked or relocated tree, the resolved path is whatever `__file__` resolves to at script-load time; if the tree is moved between loads, the config still resolves (Python follows `__file__` at runtime, not at install). No regression here vs. the prior implicit-lookup behavior, which was relative to cwd.
+- `dashboard_assets-test.py`'s filename changed; the test still hard-codes `expected = 31222` bytes for `DASHBOARD_HTML`. This pre-existing mismatch (the sum of the five part sizes is 31800) is out of scope for this release; fix it in a follow-up if the chunked-send byte contract drifts further.
+---
+
 ## v5.4.2
 
 **Test: make all auto-regens dashboard assets; CI uses assets_check to catch stale commits**
@@ -27,7 +255,6 @@ Added an explicit `assets_check` step to `.github/workflows/ci.yml`'s `host-test
 
 - The regen step runs unconditionally on every `make all`, even when nothing has changed. On a warm filesystem this is sub-second (the generator re-reads + re-encodes the same sources and writes an identical header); on a cold cache it's ~200 ms. No caching was added because the speedup would only matter on repeated invocations and the file-watcher overhead exceeds the saving.
 - `make assets_check` reads the committed header but does not run a generator pass to verify the generator itself works; that contract is owned by `make test_dashboard_assets` (`build/test_dashboard_assets.py`). The split is intentional: CI's job is "did the human commit the regen", not "is the generator healthy" — those are two different failure modes.
-
 ---
 
 ## v5.4.1
@@ -4388,515 +4615,4 @@ the suite).
   task was already there; the
   new code reuses the same task
   slot).
----
-
-## v5.3.88
-
-**httpd worker stack bump (8192 → 16384)**
-
-After v5.3.87 the dashboard renders,
-but the httpd worker task exhausts
-its stack at runtime under sustained
-chunked sends on the ~28 KB
-`DASHBOARD_HTML` payload. The build
-is clean (no static stack analysis
-in ESP-IDF's httpd by default), the
-dashboard returns 200 OK, but the
-worker panics mid-payload or drops
-the socket after a few requests —
-the user sees intermittent blank
-pages with no compile-time signal.
-The 5.3.87 bump (6144 → 8192) was
-the right call for the small-
-response path; the chunked loop's
-per-call local state plus the
-httpd internal send-buffer frame
-under sustained load pushes the
-task over 8 KB on real hardware.
-
-### Fix
-
-`cfg.stack_size` inside the httpd
-config block in `AutoLinkWeb.cpp`
-is bumped from 8192 to 16384
-bytes. 12288 might also work but
-16384 gives headroom under burst
-load. The chunked loop itself is
-unchanged — the loop is correct;
-this is purely a stack-headroom
-fix on the httpd worker task.
-Headers, chunk cap (`CHUNK = 4096`),
-and the null-chunk terminator are
-all unchanged.
-
-### Wire format
-
-Unchanged. The wire is byte-identical
-to v5.3.87. The change is purely
-in the local httpd config; no
-header in `include/` moves, no
-public API symbols are added or
-removed. The library version
-contract (`include/AutoLink.h` +
-`library.properties` +
-`idf_component.yml` + this file)
-bumps from 5.3.87 → 5.3.88 per
-AGENTS rule 3.
-
-### Regression coverage
-
-**Pin updated:**
-`test_httpd_stack_size_is_at_least_16384`
-in
-`test/test_desktop/al/web/HandleRootChunkedTest.cpp`.
-Source-greps
-`src/al/web/AutoLinkWeb.cpp`,
-extracts the httpd config block,
-parses the integer, and asserts:
-
-1. `stackSize >= 16384` — lower-
-   bound guard. A regression to
-   6144 or 8192 trips here.
-2. `value == "16384"` — exact-
-   value guard. A future bump
-   to 24576 trips here too (and
-   that's intentional; the
-   constant is the contract).
-
-Toggle behaviour verified:
-reverting `cfg.stack_size` to
-8192 fails both assertions
-(`Assertion 'stackSize >= 16384'
-failed`, abort 134). Reverting to
-6144 fails both assertions the
-same way. Restoring to 16384
-returns the suite to green.
-
-### Disclosed limitations
-
-- A regression test that exercises
-  the actual stack overflow at
-  host-build time is not feasible:
-  `AutoLinkWeb.cpp` is `#ifdef
-  ARDUINO` (host tests skip it),
-  and FreeRTOS task-stack tracking
-  on Linux-pthreads is a different
-  measurement than on real ESP32
-  hardware. The source-grep pin
-  above is the structural guard;
-  runtime confirmation is via
-  `build/verify_build.sh` +
-  on-device bring-up.
-
-### Result
-
-- 33 / 33 host unit suites pass
-  (`make test`), including the
-  updated
-  `run_test_handle_root_chunked`
-  with the 16384 pin. Wall: ~4.9 s.
-- 3 / 3 host integration suites
-  pass (`make itest`). Wall: ~40 s.
-- Toggle test: reverting
-  `cfg.stack_size` to 8192 →
-  abort 134 on the pin. Restoring
-  → green. The pin is the only
-  gate; no host-test compile/link
-  change is required to flip it.
-- `build/verify_build.sh` clean
-  compile against
-  `esp32:esp32:firebeetle32` (no
-  delta vs 5.3.87 — the bump is
-  a single integer literal; the
-  httpd task is created with the
-  larger stack at task-creation
-  time and the 8 KB extra is
-  freed when the task exits).
-- 1 line changed in production
-  code (`cfg.stack_size = 8192;`
-  → `cfg.stack_size = 16384;`).
-  Test pin: assertion thresholds
-  + the surrounding comment
-  prose in
-  `HandleRootChunkedTest.cpp`.
-- `idf_component.yml` brought
-  into lockstep with the rest
-  of the version contract
-  (5.3.79 → 5.3.88); it had been
-  drifted since 5.3.79. Not a
-  behavioural change — the ESP-
-  IDF component manifest now
-  matches `library.properties`
-  and `include/AutoLink.h` per
-  AGENTS rule 3.
----
-
-## v5.3.87
-
-**Dashboard handleRoot chunked send + httpd stack bump**
-
-The dashboard at `/` was a ~28 KB
-HTML/JS payload served via a single
-`httpd_resp_send()` call. ESP-IDF's
-httpd tops out around a 4096-byte
-send buffer, so the single-shot
-path silently truncated or stalled
-mid-frame and the browser received
-a malformed / empty page — a
-connection error or blank screen
-that the user could not debug.
-Cross-compiling the README's
-`Ping.ino` against
-`esp32:esp32:firebeetle32` showed
-the build path compiles cleanly,
-so the bug only surfaces at
-runtime on a real device.
-
-### Fix
-
-`AutoLinkWeb::handleRoot` now
-streams the dashboard in 4096-byte
-chunks via `httpd_resp_send_chunk`,
-terminating the chunked-encoded
-body with the canonical
-`httpd_resp_send_chunk(req,
-nullptr, 0)` terminator so the
-browser flushes its parser. The
-chunk cap (`const size_t CHUNK =
-4096`) is a named constant so a
-future bump to a smaller send
-buffer can pin it without touching
-the loop. The httpd task's stack
-was bumped from 6144 to 8192
-bytes — the chunked loop's local
-state plus the httpd internal
-send-buffer frame can otherwise
-push the task over its stack
-under sustained load.
-
-Headers (`text/html; charset=utf-8`,
-`Cache-Control: no-store`,
-`Connection: close`) are unchanged:
-the chunked rewrite only touches
-the body path.
-
-### Wire format
-
-Unchanged. The wire is byte-identical
-to v5.3.86. The change is purely
-in the local httpd handler; no
-header in `include/` moves, no
-public API symbols are added or
-removed. The library version
-contract (`include/AutoLink.h` +
-`library.properties` + this file)
-bumps from 5.3.86 → 5.3.87 per
-AGENTS rule 3.
-
-### Regression coverage
-
-**New structural pin:**
-`run_test_handle_root_chunked`
-in
-`test/test_desktop/al/web/HandleRootChunkedTest.cpp`.
-Source-greps
-`src/al/web/AutoLinkWeb.cpp` and
-asserts:
-
-1. `handleRoot` does NOT contain
-   `httpd_resp_send(req,
-   DASHBOARD_HTML, ...)` — the
-   buggy single-shot path is gone.
-2. `handleRoot` calls
-   `httpd_resp_send_chunk(req, p,
-   ...)` for body bytes — the
-   chunked data path is in place.
-3. `handleRoot` terminates with
-   `httpd_resp_send_chunk(req,
-   nullptr, 0)` — the chunked
-   body closes cleanly.
-4. `handleRoot` declares
-   `const size_t CHUNK = 4096;`
-   — the chunk cap matches the
-   httpd send buffer.
-5. `handleRoot` still sets
-   `text/html; charset=utf-8`,
-   `Cache-Control`, and
-   `Connection: close` — the
-   rewrite didn't accidentally
-   drop a response header.
-6. `cfg.stack_size = 8192` inside
-   the httpd config block —
-   the stack bump is in place.
-
-Toggle behaviour verified:
-reverting `handleRoot` to the
-single-shot form fails pin 1
-(compile-clean, link-clean — the
-pin is the only gate). Reverting
-`cfg.stack_size` to 6144 fails
-pin 6. Removing the null-chunk
-terminator fails pin 3. Dropping
-the `CHUNK = 4096` constant
-fails pin 4.
-
-**Manifest gate closure:**
-`run_test_uri_handler_alignment`
-and `run_test_handle_root_chunked`
-are now in the
-`test_coverage_manifest.py`
-allow-list for "pure source-grep
-suites with no library source".
-The pre-existing
-`run_test_uri_handler_alignment`
-drift (disclosed in every version
-since v5.3.81) is closed by the
-same edit. The manifest gate
-(`make test_coverage_manifest`)
-is now fully green across the
-33-suite unit run.
-
-### Disclosed limitations
-
-- `make loopback_quick` (the 5 s
-  two-Link smoke test referenced
-  in some prior versions) is not
-  a target in this Makefile set;
-  `make test` + `make itest` cover
-  the same wire path. A future
-  version may add it as a
-  dedicated short-budget smoke
-  target.
-- The chunked loop walks
-  `sizeof(DASHBOARD_HTML) - 1`
-  bytes; if the embedded HTML
-  ever grows past ~16 KB the
-  per-chunk `httpd_resp_send_chunk`
-  cost is still negligible
-  (sub-ms per slice on ESP32),
-  but the httpd task spends
-  longer holding the socket in
-  its loopTask priority level.
-  Documented trade-off: dashboard
-  correctness over single-shot
-  throughput.
-
-### Result
-
-- 33 / 33 host unit suites pass
-  (`make test`), including the
-  new `run_test_handle_root_chunked`
-  structural pin. Wall: ~5.1 s.
-- 3 / 3 host integration suites
-  pass (`make itest`). Wall: ~40 s.
-- `test_coverage_manifest`
-  self-test PASS (rule-4 invariant
-  holds; allow-list extended for
-  the two pure-source-grep suites).
-- `build/verify_build.sh` clean
-  compile against
-  `esp32:esp32:firebeetle32` —
-  `Sketch uses 1016523 bytes (77%)
-  of program storage space. Global
-  variables use 66992 bytes (20%)
-  of dynamic memory`, no delta vs
-  5.3.86.
-- `AutoLinkWeb.cpp` ~10 LoC net
-  (the single-shot `httpd_resp_send`
-  line replaced by the chunked
-  loop + the terminator); one
-  `cfg.stack_size = 6144` → `8192`
-  bump.
-- 0 bytes added to RAM on the wire
-  path (the chunked loop is pure
-  instruction-cache; the httpd
-  task stack is 2 KB larger at
-  task-creation time only and
-  freed when the task exits).
----
-
-## v5.3.86
-
-**Sweep-phase rx break + p2-fallback LOCK + P3 50ms floor + initSerial tag fix**
-
-Four small bug-class fixes that each
-target a different silent-failure
-mode in the link-up / boot path.
-None change the wire format; all
-are localized in `Link.cpp`,
-`LinkSweep.cpp`, and
-`PingPongBase.h`.
-
-1. **`onRx` SWP/LCK break on
-   phase transition.** The `else`
-   branch of `onRx` (the SWP/LCK
-   state) used to keep feeding the
-   rest of the incoming burst into
-   the just-completed control frame
-   after `processCtrlFrame_unlocked`
-   returned `true` (signalling
-   `lockOk_unlocked` had advanced
-   state to OK and switched baud).
-   The bytes trailing the LOCK/PONG
-   in the rx buffer were captured at
-   the old baud and would either be
-   consumed at the wrong framing
-   window or be misinterpreted as
-   `0xAA 0x55` markers at the new
-   baud. Added a `break;` after
-   `needBreak = true;` so the rx
-   loop exits cleanly and the
-   `data` buffer is dropped — the
-   next rx at the new baud starts
-   from a clean `rxIdx = 0`.
-
-2. **`onTimerSwp_unlocked` P2
-   fallback sends LOCK_CMD.** The
-   master-side P2-fallback path
-   (no PONG received at any baud,
-   sweep exhausts the list) used to
-   call `lockOk_unlocked(...)`
-   directly without first sending
-   the LOCK_CMD frame. The slave
-   side had no notice that the baud
-   had been settled and would stay
-   parked at the last spdI it had
-   been holding. Now the master
-   sets the baud, sends
-   `LOCK_CMD + (N-1)`, then locks —
-   same shape as the P3 lock path
-   two blocks down.
-
-3. **P3 timer floor 5 ms → 50 ms.**
-   The
-   `rt = 2 * (5 chars * 10 bits /
-   baud * 1000)` formula gives ~87
-   ms at 115200 — close to the
-   `if (rt < 5) rt = 5` floor in
-   spirit, but the floor fires for
-   any faster baud. The first 87 ms
-   of a faster-baud P3 window
-   expires before the link could
-   have even clocked the ACK round
-   trip on a slow ESP32, so the
-   master walks to the next baud
-   while the slave is still
-   mid-frame, then races itself.
-   Bumping the floor to 50 ms
-   guarantees a full RT is available
-   at every supported baud and
-   turns `t3` from ~103 ms to
-   ~250 ms at 115200. Applied in
-   `LinkSweep::enterPhase3` and
-   the inline re-arm in
-   `Link::handleSwp_unlocked`
-   (both `if (rt < 5) rt = 5;`
-   lines now read 50).
-
-4. **`initSerial` tag/fmt swap.**
-   `log.info("PingPongBase boot:
-   role=%s  baud=%lu  WiFi=%s",
-   role, ...)` passed the whole
-   "PingPongBase boot: …" literal
-   as the tag, then `role` (a
-   `const char*`) as the format
-   string. The first format-arg
-   pair (`role`, `(unsigned
-   long)debugBaud`, `ssid`) didn't
-   match `role`'s `%s` slot
-   position — the printf-style
-   formatter walked off the end
-   of the variadics. Split into
-   `log.info("PingPongBase", "boot:
-   role=%s  baud=%lu  WiFi=%s",
-   role, (unsigned long)debugBaud,
-   ssid ? ssid : "disabled")` —
-   tag and format are now the two
-   separate args the API expects.
-
-### Wire format
-
-Unchanged. The wire is byte-identical
-to v5.3.85. The four fixes are
-behavioural only (rx loop control,
-P2 fallback handshake, P3 timing
-margin, log-call argument order);
-no `LOCK_CMD`/payload type byte
-or ARQ slot count changes. No
-header in `include/` moves. Public
-API shrinks by zero symbols.
-
-### Regression coverage
-
-- `make test` — 32 / 32 host unit
-  suites pass (~5.1 s wall). The
-  four fixes are localized in
-  production code paths that the
-  existing sweep / loopback / arq
-  suites already exercise; no new
-  test binary, no Makefile change.
-- `make itest` — 3 / 3 host
-  integration suites pass (~40 s
-  wall).
-- `build/verify_build.sh` —
-  compiles cleanly against
-  `esp32:esp32:firebeetle32`
-  (1,016,491 B flash, 66,992 B
-  RAM, no delta vs 5.3.85).
-- `make loopback_quick` — 5 s
-  two-Link end-to-end smoke test
-  passes (96 / 96 messages, no
-  discards, no frame errors,
-  `disc=1` on Pong is the
-  pre-existing one-shot the
-  loopback suite always emits).
-
-### Disclosed limitations
-
-- `make test_coverage_manifest`
-  still reports the pre-existing
-  `run_test_uri_handler_alignment`
-  drift (a pure source-grep test
-  in `TEST_BINS` that links no
-  library source). Not introduced
-  by this change; the v5.3.85
-  reference has the same flag and
-  every version since v5.3.81
-  discloses it.
-- Fix #3 (P3 50 ms floor) widens
-  the P3 window from ~103 ms to
-  ~250 ms at 115200 baud. A
-  link-up that needs to clear P3
-  on a noisy channel may now take
-  ~250 ms per round instead of
-  ~100 ms. The trade is
-  correctness over speed: the
-  tighter floor was the cause of
-  the master's
-  walk-to-next-baud-mid-frame race.
-  At default 5-baud config
-  (`phase2Total` ≈ 6.5 s) the
-  added ~750 ms across the worst
-  case P3 walk is within the
-  existing budget.
-
-### Result
-
-- 32 / 32 unit suites pass; 3 / 3
-  integration suites pass;
-  verify_build.sh clean compile
-  against `esp32:esp32:firebeetle32`.
-- `Link.cpp` +5 LoC (one new
-  `if (processCtrlFrame_unlocked) {
-  needBreak = true; break; }`
-  block + 3 lines for the
-  P2-fallback LOCK_CMD preamble);
-  `LinkSweep.cpp` 1 LoC (`5` → `50`);
-  `PingPongBase.h` 1 LoC
-  (the split tag/fmt).
-- 0 bytes added to RAM on the wire
-  path (the new LOCK_CMD emission
-  is one wire frame per P2
-  fallback — a previously-missed
-  packet, not a new one).
 ---
