@@ -32,7 +32,7 @@ struct EspHal;
 #endif
 
 namespace autolink {
-#define AUTOLINK_VERSION "5.4.2"
+#define AUTOLINK_VERSION "6.0.2"
 
 class AutoLinkTestAccessor;
 
