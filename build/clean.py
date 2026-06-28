@@ -33,7 +33,7 @@ What gets removed:
   build/verify_build/build                ESP32 build cache
   build/verify_build/libraries            ESP32 library cache
 
-What is NOT touched: source files, headers, docs, .clang-format,
+What is NOT touched: source files, headers, docs,
 the test/ tree's .cpp inputs, the arduino-cli install under
 ~/.arduino15/, anything outside the project root.
 
