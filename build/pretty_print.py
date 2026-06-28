@@ -2,17 +2,25 @@
 """pretty_print.py -- single canonical pretty-printer for the project.
 
 A thin wrapper around `clang-format -i` (using the project's
-.clang-format, which has BreakStringLiterals: false set).
+`build/pretty_print-format.txt`, which has
+BreakStringLiterals: false set).
+
+The format config lives next to this script rather than at
+the repo root so it travels with the pretty-printer. We pass
+it to clang-format via `--style=file:<abs path>` so the tool
+loads it explicitly -- no implicit `.clang-format` lookup,
+no surprises if a future tree happens to drop a stray
+`.clang-format` at the root.
 
 That is the whole tool. There is no string-merge pass, no
 backup step, no verification -- `clang-format` is
 deterministic and reversible via `git revert` if it ever
-breaks. The project root's `.clang-format` already has
+breaks. The format file already has
 `BreakStringLiterals: false` set, so no new string-literal
 splits are introduced going forward; any legacy splits have
 already been cleaned up in earlier versions.
 
-The `.clang-format` also sets
+The format file also sets
 `AllowShortFunctionsOnASingleLine: All`, so single-statement
 bodies (and bodies short enough to fit on one line) collapse
 to a single line. The default `Linux` brace style is
@@ -26,6 +34,7 @@ clang-format would parse them as C++.
 Usage:
   pretty_print.py file1.cpp [file2.h ...]
 """
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -155,7 +164,6 @@ def _install_clang_format() -> bool:
                 return True
             user_path = _user_clang_format_path()
             if user_path:
-                import os
                 os.environ['PATH'] = (
                     f'{os.path.dirname(user_path)}:{os.environ.get("PATH", "")}')
                 if _have_clang_format():
@@ -167,16 +175,21 @@ def _install_clang_format() -> bool:
 
 
 def _clang_format(path: Path) -> str:
-    """Run clang-format -i on `path` using the project's
-    .clang-format. Returns an error message ('' on success,
-    'skipped: ...' if the tool isn't available after a
-    best-effort install attempt)."""
+    """Run clang-format -i on `path` using the project format
+    file (`build/pretty_print-format.txt`). Returns an error
+    message ('' on success, 'skipped: ...' if the tool isn't
+    available after a best-effort install attempt, 'failed: ...'
+    if clang-format exits non-zero)."""
     if not _have_clang_format():
         if not _install_clang_format():
             return 'skipped: clang-format not installed'
+    style_arg = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        'pretty_print-format.txt')
     try:
         result = subprocess.run(
-            ['clang-format', '-i', str(path)],
+            ['clang-format', f'--style=file:{style_arg}',
+             '-i', str(path)],
             capture_output=True, text=True, timeout=10)
         if result.returncode == 0:
             return ''
