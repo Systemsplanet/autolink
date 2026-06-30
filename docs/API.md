@@ -4,7 +4,7 @@
 
 | Call | Returns | Notes |
 |------|---------|-------|
-| `int send(const uint8_t* b, int len)` | `len` if queued, `0` if the link is down/busy | `len` must be `1..maxMsg` (default 1024). Safe to call every loop. |
+| `int send(const uint8_t* b, int len)` | `len` if queued, `0` if the link is down/busy | `len` must be `1..maxMsg` (default 5120). Safe to call every loop. |
 | `int recv(uint8_t* b, int max)` | `>0` message length, `0` nothing ready, `-1` rejected/dropped | `max` should be `>= maxMsg`. On `-1` the bad message is drained and an error is counted. |
 | `bool ready()` | `true` once negotiated | Optional — `send`/`recv` already gate themselves. |
 | `void getStats(Stats& s)` | — | `tx`, `rx` (since `resetStats()`), `discCount` (OK→SWP transitions since `resetErrors()`), `frameErrs` (cumulative frame errors since `resetErrors()`). |
