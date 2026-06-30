@@ -32,7 +32,7 @@ struct EspHal;
 #endif
 
 namespace autolink {
-#define AUTOLINK_VERSION "6.0.2"
+#define AUTOLINK_VERSION "6.0.23"
 
 class AutoLinkTestAccessor;
 
@@ -216,6 +216,21 @@ public:
     void kickoff() { link->kickoff(); }
 
     void setMode(AutoLinkConfig::Mode m) {
+        // Both the link and the HAL hold a
+        // copy of cfg.mode. Forward to the
+        // HAL first so a NVS+reboot restore
+        // path that calls setMode before
+        // begin() (PingPongBase::bringUpLink)
+        // gets the HAL sized for the
+        // restored mode; the link follows
+        // immediately after. Pre-this-release
+        // only the link's cfg was mutated,
+        // so the HAL's stream-buffer / UART
+        // sizing ran against a stale SYNC
+        // cfg.mode and the boot log
+        // announced the wrong mode.
+        if (hal)
+            hal->setMode(m);
         if (link)
             link->setMode(m);
     }
@@ -227,7 +242,9 @@ public:
     // Link; falls back to the AutoLinkConfig default
     // before the facade is constructed so callers
     // like Ping can read it from any state.
-    size_t maxMsg() const { return link ? link->maxMsg() : (size_t)1024; }
+    size_t maxMsg() const {
+        return link ? link->maxMsg() : AUTOLINK_DEFAULT_MAX_MSG;
+    }
 
     void setTxDelayMs(int ms) {
         if (link)
@@ -250,6 +267,15 @@ public:
     }
     uint16_t bytesRecvdFor(uint8_t seq) const {
         return link ? link->bytesRecvdFor(seq) : (uint16_t)0;
+    }
+    // Sum of wire-ACK-reported bytes the peer
+    // pushed to its app buffer across every
+    // chunk sharing baseSeq. Equals MSG_HDR +
+    // payload for multi-chunk ASYNC; equals
+    // bytesRecvdFor for single-chunk. Lock-free
+    // (matches bytesRecvdFor's contract).
+    uint16_t bytesRecvdForMessage(uint8_t baseSeq) const {
+        return link ? link->bytesRecvdForMessage(baseSeq) : (uint16_t)0;
     }
     bool isAcked(uint8_t seq) const {
         return link ? link->isAcked(seq) : false;
