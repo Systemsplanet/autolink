@@ -2,6 +2,12 @@
 
 Read this, then `README.md`, then `docs/Version.md`. History is the source of truth.
 
+This file is project-specific operational rules. For the general engineering
+philosophy behind the code-style and testing rules below (deep modules,
+composition over inheritance, one concern per unit, test-through-interfaces,
+red-loop-first debugging), see `docs/developer.md`. The rules here are how those
+principles land on *this* codebase; `docs/developer.md` is the *why*.
+
 ## Layout
 
 - `src/`, `include/`, `examples/`, `library.properties`, `idf_component.yml`, `docs/`, `build/` — the library.
@@ -48,11 +54,11 @@ Read this, then `README.md`, then `docs/Version.md`. History is the source of tr
 
 **Code style**
 
-11. Strict comment policy. Rarely add comments. Only if a very senior dev would need them. *Why*, *which side of the wire*, *which test pins this* — nothing else. No historical anchors ("this used to do X"). A senior dev reads the type and the function name.
+11. Strict comment policy (principle: `docs/developer.md`). Rarely add comments. Only if a very senior dev would need them. *Why*, *which side of the wire*, *which test pins this* — nothing else. No historical anchors ("this used to do X"). A senior dev reads the type and the function name.
 12. No version references in code or scripts. No hard-coded `X.Y.Z` in `.cpp`/`.h`/`.ino`/`.py`/`.sh`/`.mk`/`.yml`/`.json`/`.txt`/non-Version `.md`. The only legitimate reference in code is `AUTOLINK_VERSION` (or equivalent) being read and displayed. Test fixtures, docstrings, help text, CLI examples, regression banners — all out. The version lives in `library.properties` / `idf_component.yml` / `docs/Version.md`.
-13. Short names. `b`, `n`, `i`, `j`, `e`, `ok`, `lv`, `seq`, `cb`. Not `m_messageBufferLength`.
-14. Composition over inheritance. Function-pointer callbacks or `unique_ptr<Interface>` over virtual bases. Saves a vtable per Link (~32B on ESP32). Inheritance only at the user-extension boundary (`IHal`).
-15. One concern per tool. A script that mixes "delete artifacts", "compute manifest", and "diff against reference" is brittle. When adding a tool, give it one concern. If it grows to two, split before three.
+13. Short names (principle: `docs/developer.md`). This codebase's vocabulary: `b`, `n`, `i`, `j`, `e`, `ok`, `lv`, `seq`, `cb`. Not `m_messageBufferLength`.
+14. Composition over inheritance (principle: `docs/developer.md`). Here that means: function-pointer callbacks or `unique_ptr<Interface>` over virtual bases — saves a vtable per Link (~32B on ESP32) — and inheritance only at the user-extension boundary (`IHal`).
+15. One concern per tool (principle: `docs/developer.md`). Concretely: a script that mixes "delete artifacts", "compute manifest", and "diff against reference" is brittle. New tools get one concern; split before a second grows into a third.
 16. Logging: version at startup, wire-op results (`ack received`, `retransmit N`), state-change causes (`link dropped: 30 s idle`), error resolutions. Never hot-path chatter.
 
 **RTOS / embedded**
@@ -60,6 +66,8 @@ Read this, then `README.md`, then `docs/Version.md`. History is the source of tr
 17. Never do RTOS work in a ctor that may run before the scheduler. Namespace-scope `PingPong upp(...);` is hoisted into `.init_array` and runs before `app_main`/`setup()`. `xSemaphoreCreateMutex`, `xStreamBufferCreate`, `xTaskCreate`, `xTimerCreate`, even `malloc` can crash the kernel. Safe shapes: Meyers singleton via `getInstance()`, or store config in the ctor and allocate RTOS primitives in `begin()`.
 
 **Testing**
+
+(Test philosophy — through-interfaces, regression-pins, pure-logic-vs-I/O, injectable time, subsecond units — is in `docs/developer.md`. The rules below are how it maps onto this suite.)
 
 18. Every fix gets a regression test that fails when the fix is reverted. Toggle off → red. Toggle on → green. Green/green means the test is useless. Don't write tests that discard the return value.
 19. Unit tests are small, subsecond, and live under `test/test_desktop/`. No `sleep()`, no wall-clock busy-waits. Time-dependent behaviour via `MockHal::pumpClock` / `runFor`. Anything that can't stay subsecond goes under `test/itest/`.
