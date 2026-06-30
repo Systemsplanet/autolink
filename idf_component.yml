@@ -1,4 +1,4 @@
-version: "6.0.2"
+version: "6.0.23"
 description: "A self-negotiating UART protocol layer for ESP32 with ARQ-based loss recovery and a best-effort delivery model."
 url: "https://github.com/Systemsplanet/autolink"
 dependencies:
