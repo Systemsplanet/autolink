@@ -14,7 +14,7 @@ See `docs/Version.md` for the version history and per-release notes.
 
 The classic use case: two boards bouncing messages back and forth, **logging throughput**, and **self-recovering** from any disruption — with almost no application code. The link's sweep/recovery is automatic; the app just gates on `State::OK`. The `Ping` example pipelines sends and reads the receiver's per-chunk ACK (carrying bytes-recvd) back, logging a `MISMATCH` the moment a byte goes wrong — the easiest possible end-to-end smoke test.
 
-Sequential mode grows each message from 1 byte up to `cfg.maxMsg` and wraps back to 1 (operators see the message size grow monotonically through the link's MTU). Random mode picks a random size in `[1024, maxMsg]` with random data, forcing multi-chunk sends in steady state so the ARQ chunk path is exercised end-to-end. The default per-transmit delay is 100 ms (configurable via the dashboard's delay-ms widget or `cfg.txDelayMs`).
+Sequential mode grows each message from 1 byte up to `cfg.maxMsg` and wraps back to 1 (operators see the message size grow monotonically through the link's MTU). Random mode picks a random size in `[1, maxMsg]` with random data, forcing multi-chunk sends in steady state so the ARQ chunk path is exercised end-to-end. The default per-transmit delay is 0 ms — full line-rate out of the box (configurable via the dashboard's delay-ms widget or `cfg.txDelayMs`).
 
 The two sketches live in `examples/PingPong/` as `Ping.ino` (ping) and `Pong.ino` (pong). Cross-wire the two boards (`Ping TX(GPIO17) → Pong RX(GPIO16)` and `Ping RX(GPIO16) ← Pong TX(GPIO17)`, shared GND).
 
@@ -123,7 +123,8 @@ Unzip at the project root and point your build at it:
 | `docs/API.md` | Message API reference, advanced usage |
 | `docs/Protocol.md` | Wire-level protocol spec (phases, ARQ, framing) |
 | `docs/Tests.md` | How to build and run the host test suite; ASan + coverage modes |
-| `docs/Version.md` | Version history (last 8 releases; older in git) |
+| `docs/Version.md` | Version history (last 20 releases; older in git) |
+| `docs/developer.md` | General engineering principles (the *why* behind `AGENTS.md`) |
 | `AGENTS.md` | Working-with-this-project rules for AI agents / contributors |
 
 Source layout: public headers in `include/`; implementation in `src/` and the internal subdirs `src/al/{link,util,hal,web,pingpong}/`. Flat shims `AutoLink.h` and `PingPong.h` at `src/` keep Arduino-1.x happy (which only adds `src/` to the include path). Runnable sketches live in `examples/arduino_basic/`, `examples/PingPong/`, `examples/espidf_basic/`; tests live in `test/test_desktop/` (unit), `test/itest/test_desktop/` (host integration), `test/itest/test_embedded/` (on-hardware); build scripts (`build_env.sh`, `verify_build.sh`, `arduino-cli-cmd.sh`) live in `build/`.
