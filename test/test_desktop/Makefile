@@ -114,7 +114,8 @@ TEST_BINS = run_test_crc run_test_cobs run_test_blink run_test_framerx \
             run_test_fast_retx \
             run_test_sync_stall_watchdog \
             run_test_health \
-            run_test_timer_rearm
+            run_test_timer_rearm \
+            run_test_timers
 
 # 'all' runs every unit suite, captures per-suite runtime, then
 # prints a summary: tests passed, total bytes used by the suite
@@ -832,6 +833,9 @@ run_test_health: $(TPROTO)/LinkHealthTest.cpp
 
 run_test_timer_rearm: $(LINK_SRC) $(TPROTO)/LinkTimerRearmTest.cpp
 	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/LinkTimerRearmTest.cpp -o $@
+
+run_test_timers: $(LINK_SRC) $(TPROTO)/LinkTimersTest.cpp
+	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/LinkTimersTest.cpp -o $@
 
 test_esphal_begin_and_health: run_test_esphal_begin_and_health
 	./run_test_esphal_begin_and_health
