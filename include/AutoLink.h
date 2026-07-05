@@ -32,7 +32,7 @@ struct EspHal;
 #endif
 
 namespace autolink {
-#define AUTOLINK_VERSION "6.0.23"
+#define AUTOLINK_VERSION "6.0.40"
 
 class AutoLinkTestAccessor;
 
@@ -126,10 +126,7 @@ private:
     }
 
 public:
-    // Back-compat re-export of the
-    // production cache size for tests
-    // and dashboard that used to read
-    // AutoLink::ARQ_CACHE_SLOTS_PUBLIC.
+    // Back-compat re-export for tests/dashboard.
     static constexpr int ARQ_CACHE_SLOTS_PUBLIC = ArqCache::SLOTS;
 
 
@@ -217,18 +214,8 @@ public:
 
     void setMode(AutoLinkConfig::Mode m) {
         // Both the link and the HAL hold a
-        // copy of cfg.mode. Forward to the
-        // HAL first so a NVS+reboot restore
-        // path that calls setMode before
-        // begin() (PingPongBase::bringUpLink)
-        // gets the HAL sized for the
-        // restored mode; the link follows
-        // immediately after. Pre-this-release
-        // only the link's cfg was mutated,
-        // so the HAL's stream-buffer / UART
-        // sizing ran against a stale SYNC
-        // cfg.mode and the boot log
-        // announced the wrong mode.
+        // HAL first: a pre-begin NVS-restored mode must
+        // size the HAL buffers before the link follows.
         if (hal)
             hal->setMode(m);
         if (link)
@@ -252,10 +239,8 @@ public:
     }
     int txDelayMs() const { return link ? link->txDelayMs() : 0; }
 
-    // this release: Ping's gap-stop / gap-resume detector
-    // and bytes-recvd log line read these directly.
-    // The facade forwards to the link layer; the
-    // link layer takes its lock internally.
+    // Ping's gap-stop detector reads these; the link
+    // takes its lock internally.
     uint8_t lastAckSeq() const {
         return link ? link->lastAckSeq() : (uint8_t)0xFF;
     }
@@ -268,6 +253,14 @@ public:
     uint16_t bytesRecvdFor(uint8_t seq) const {
         return link ? link->bytesRecvdFor(seq) : (uint16_t)0;
     }
+    // Sender-side ARQ cache depth. Ping reads this
+    // on a send() failure to log the actual reason
+    // (cache full vs seq-space exhausted) instead of
+    // the local echo queue, which is always <= WINDOW
+    // and reads 0 when the cache is what saturated.
+    // No lock: lock-free contract matches
+    // bytesRecvdFor's. Returns 0 when link is null.
+    int arqPendingCount() const { return link ? link->arqPendingCount() : 0; }
     // Sum of wire-ACK-reported bytes the peer
     // pushed to its app buffer across every
     // chunk sharing baseSeq. Equals MSG_HDR +
@@ -309,11 +302,9 @@ public:
             return link->sendMsg(b, len);
         return link->sendMsg(b, len, nullptr);
     }
-    // this release: Ping needs the FIRST chunk's cobsSeq after
-    // send() so it can match the peer's wire ACK to the
-    // pending slot. The facade forwards to Link's
-    // sendMsg(b, len, outBaseSeq). nullptr outBaseSeq is
-    // fine when the caller doesn't care.
+    // outBaseSeq returns the FIRST chunk's cobsSeq so
+    // Ping can match the peer's wire ACK to its slot;
+    // nullptr when the caller doesn't care.
     bool sendMsg(const uint8_t *b, int len, uint8_t *outBaseSeq) {
         if (len <= 0) {
             if (outBaseSeq)
