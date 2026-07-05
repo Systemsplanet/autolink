@@ -135,6 +135,8 @@ Run via `cd test && make itest`. Each runs for seconds and exits
 |--------|----------------|
 | `run_loopback` | Two-Link end-to-end on a host pipe. Default 30 s; configurable via `make loopback` / `make loopback_quick` / raw binary args. |
 | `run_loopback_noise` | Same with stochastic frame drops + intermittent BREAKs. ~5 s. |
+| `run_loopback_sync` | SYNC-mode end-to-end (blocking per-message ACK path). ~5 s. |
+| `run_loopback_multichunk` | Random 300-3000 B multi-chunk ASYNC under 1% frame loss with byte-keyed content verification. Pins NAK fast-retransmit + the RTO sweep end-to-end (delivery floor, zero silent corruption). ~5 s. |
 
 # 🔌 Embedded Integration Suite
 
