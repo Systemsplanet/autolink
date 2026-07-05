@@ -1,6 +1,39 @@
 # 📅 AutoLink Version History
 
 All releases, most recent first.
+## v6.0.41
+
+**Add LinkTimers OK-tick coverage tests (maxRetx drop + reorder-expiry backstop)**
+
+Additive coverage pass, no behavior change. A gcov run over the host suite (union across every unit binary) put `LinkTimers.cpp` at the bottom of the reachable modules — its `onTimerOk_unlocked` sweep had two live drop paths that no suite exercised. The first is ASYNC maxRetx exhaustion: a pending cobsSeq the peer never ACKs is retransmitted once per ACK-RTO until `retxCount` reaches `maxRetx`, then the sweep drops the link and resweeps (`reset_unlocked(true)` → BREAK). The second is the reorder backstop on the OK tick: an out-of-order slot held past `reorderHoldMs` is reaped by the timer's `dropExpired` (the sibling of the `onPayload` reap), bumping `lostMsgs` and freeing the slot. `LinkTimersTest` pins both by driving a negotiated two-Link pair to OK and stepping the injected clock — no wall-clock waits — asserting the OK→SWP flip with `discCount+1` for the maxRetx case and the `lostMsgs+1`/slot-free for the expiry case. Both are genuine regression pins: reverting the Drop arm leaves the link wedged in OK (red), and neutralizing the timer's `dropExpired` leaves `lostMsgs` flat and the slot leaked (red) — verified by toggling each off. The `State::LCK` arm of `onTimer` was found to be unreachable on the current state machine (nothing sets `state = State::LCK`) and is left untouched, not pinned, to avoid a green/green test over dead code.
+
+### What moved
+
+- `test/test_desktop/al/link/LinkTimersTest.cpp` (new) — pins the OK-tick maxRetx drop-and-resweep and the reorder-expiry backstop; toggle-off → red (verified for both).
+- `test/test_desktop/Makefile` — `run_test_timers` build rule + `TEST_BINS` registration.
+- `include/AutoLink.h` / `library.properties` / `idf_component.yml` — `6.0.40 → 6.0.41` lockstep.
+
+### Wire format
+
+Unchanged. No `src/` change; framer, COBS encap, `MAX_CHUNK`, `MSG_HDR`, `POOL_SIZE`, window, and seq-space budget are all as 6.0.40.
+
+### Regression tests
+
+- `LinkTimersTest` — Pin 1: an unacked ASYNC seq retransmits up to `maxRetx`, then the OK sweep drops the link (OK→SWP, `discCount+1`, pending cleared). Pin 2: a reorder slot older than `reorderHoldMs` is dropped by the OK tick (`lostMsgs+1`, slot freed) with the link staying OK. Toggle-off (remove the Drop arm / neutralize the timer's `dropExpired`) → red (verified).
+- All prior pins green: unit suite + `run_test_timers`, `test_coverage_manifest` PASS.
+
+### Disclosed limitations
+
+- `build/verify_build.sh` cross-compile carry-over stands from the last end-to-end clear; this change is test-only (no `src/`, no `AutoLinkWeb.cpp` surface), so the Arduino build path is unaffected.
+- `run_test_alink_arq` hangs on this host at the `waitForAck` timeout test (a pre-existing spin on the injected clock under a background pump thread), so its `.gcda` was excluded from the coverage union; the least-covered ranking used the remaining suites.
+- `State::LCK` timer/handshake code is currently unreachable (no transition sets it) and is deliberately not pinned.
+
+### Result
+
+- New suite `run_test_timers` green; both pins verified red on toggle-off.
+- `test_coverage_manifest` PASS; version-free gate and `version.py check` green.
+---
+
 ## v6.0.40
 
 **Fix three OK-timer wedges (double unlock, pause kills the tick, idleTimeoutMs<=0 kills ARQ), make MockHal one-shot-faithful, strip historical comments**
@@ -790,38 +823,4 @@ Unchanged. The OTA routes are HTTP, not AutoLink-wire. No `Link.cpp` / framer / 
 - Peak RSS: 88968 KiB (largest single-suite resident set; unchanged from 6.0.20).
 - Cross-compile wall: ~3 min on a fresh `arduino-cli` + `esp32:esp32@3.3.5` toolchain install; ~30 s on a cached install.
 - Program-space delta vs. 6.0.19 baseline: +548 bytes (two stub bodies + the +2 handler-table entries).
----
-
-## v6.0.20
-
-**todo.md reorg + Version.md cleanup; track stale dashboard-asset byte count (docs only)**
-
-Documentation-only housekeeping. No source, wire-format, build-surface, or test-behavior change — the protocol, ARQ, framing, and seq budget are byte-for-byte identical to 6.0.19. `todo.md` had accumulated ten full multi-paragraph Verified-done blocks (6.0.10–6.0.19) that duplicated this file's canonical entries verbatim; that duplication is the drift hazard `version.py` exists to prevent (the two copies can disagree). This release collapses `todo.md`'s Verified-done section to one-line-per-release pointers and makes `docs/Version.md` the single source of truth for release detail. It also removes the closed Open 5 stub from `todo.md`'s `## Open` list (the `bytesRecvdForMessage` consumer landed in 6.0.19), renumbers the survivors with no gaps, and adds one genuinely untracked item: the stale `dashboard_assets-test.py` byte-count expectation. Two cosmetic `>` typos at the tails of the v6.0.3 and v6.0.1 entries in this file are removed.
-
-### What moved
-
-- `todo.md` — Verified-done collapsed from full blocks to one-liners (canonical detail now lives here); title bumped to 6.0.20; closed Open 5 removed from `## Open`; remaining Open items renumbered gap-free (old Open 6 → Open 5); new Open 6 tracks the stale dashboard-asset byte count; Verify + Hardware-re-test sections updated for 6.0.20.
-- `docs/Version.md` — this entry (and `trim --keep 20` dropped v5.4.3); stray trailing `>` removed from the v6.0.3 and v6.0.1 entry tails.
-- `include/AutoLink.h` / `library.properties` / `idf_component.yml` — `6.0.19 → 6.0.20` bump in lockstep (AGENTS rule 3).
-
-### New tracked item — stale dashboard-asset byte count (todo Open 6)
-
-`build/dashboard_assets-test.py` hard-codes `expected = 31222` for the runtime size of `DASHBOARD_HTML`, but the regenerated header is now `32094` bytes (parts: A 186 + CSS 4980 + B 5967 + JS 20935 + C 25 = 32093, plus the 1-byte concatenation terminator). The expectation has been stale since at least 5.4.3 (then 31222 vs 31801) and has drifted further as the JS grew. The generated header itself is correct and current (`make assets_check` regenerates byte-identically); only the test's literal is wrong. Promoted from a recurring out-of-scope footnote to a tracked Open item so a future release fixes the literal (or replaces it with a sum-of-parts assertion) rather than re-disclosing it every cycle.
-
-### Wire format
-
-Unchanged. No `.cpp`/`.h`/`.ino` touched. Same framer shape, COBS encap, `MAX_CHUNK = 250`, `MSG_HDR = 6`, and seq-space budget as 6.0.19.
-
-### Regression test
-
-None added — docs-only, no behavior to pin. The host suite is the gate and is identical to 6.0.19: `make test` 62/62 unit, `make itest` 3/3.
-
-### Limitations
-
-- Standing cross-compile carry-over: `build/verify_build.sh` was not re-run for 6.0.20 (no source delta; the 6.0.19 cross-compile already cleared the build path). No source on top of 6.0.19, so the risk stays bounded to the unchanged build path.
-- The dashboard-asset byte-count fix is tracked, not applied here — this release only records it as Open 6.
-
-### Result
-
-`make test` 62/62 (~5.8 s wall), `make itest` 3/3 (~40 s wall), `python3 build/version.py check` green (20 entries), `python3 build/dashboard_assets-test.py` regenerates `AutoLinkWebHtml.h` byte-identically to the shipped copy (its `expected` literal still mismatches — now Open 6). No hardware delta vs. 6.0.19.
 ---
