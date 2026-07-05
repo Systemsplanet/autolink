@@ -1,38 +1,41 @@
-# todo.md — v6.0.23
+# todo.md — v6.0.40
 
-Release history: `docs/Version.md`.
+Release history: `docs/Version.md`. Order = priority. Nothing here is done.
 
 ## Open
 
-1. **OTA firmware + GUI upload.** Slots `/ota/fw` and `/ota/gui` are reserved
-   (r10/r11, `max_uri_handlers = 12`) and return 503 stubs as of 6.0.22.
-   Buffer sizing depends on bench items 2 and 3.
-   - `POST /ota/fw`: drain the request body via `httpd_req_recv` (the stub 503s
-     without consuming it → half-read socket the httpd layer must time out),
-     stream to the inactive slot via `esp_ota_*`, `esp_ota_set_boot_partition`,
-     reboot; rollback via `esp_ota_mark_app_valid_cancel_rollback`.
-   - `POST /ota/gui`: receive dashboard zip → LittleFS; serve from LittleFS when
-     present, else `AutoLinkWebHtml.h`.
-   - Partition table: dual app slots (`ota_0`/`ota_1`) + LittleFS data partition.
-   - Host-pin zip parse + slot selection; `esp_ota_*` / LittleFS are
-     cross-compile-only.
+1. **Restore the device-path verification loop, then bench-validate the
+   6.0.33–6.0.40 backlog.** `verify_build.sh` last cleared the build at
+   6.0.32; source-touching releases since shipped cross-compile-unverified
+   and 6.0.37 exists only because the host gate misses Arduino-only
+   breakage by construction. Run `./build/verify_build.sh`
+   (esp32:esp32@3.3.5), then on the FireBeetle pair: re-lock cadence
+   symmetry (slave free-runs P1→P2 ~300 ms for ~6 s post-disc while master
+   idles — reproduce first, dwells are pinned by
+   `PongP1GuardOutlastsMasterP2Test` et al.), sweep walk-down
+   (512000 → 115200 → … lock on first PONG_ACK), ASYNC-flood CRC/desync
+   wedge + the unified health-monitor drop/resweep end-to-end
+   (`LinkHealth.h` via `LinkTimers.cpp`), heap-cap boot log, and both OTA
+   uploads (`curl --data-binary @fw.bin /ota/fw`; `zip -0` GUI →
+   `/ota/gui`, `GET /` serves from LittleFS).
 
-## Hardware bench (FireBeetle pair)
+2. **SYNC: resync on the failure, not the watchdog.** A lost mid-message
+   ACK wedges the length-prefixed framer; recovery waits up to
+   `idleTimeoutMs` (10 s default). Issue BREAK immediately on a
+   mid-message `waitForAck` timeout so both framers realign in one
+   round-trip. Regression: extend `LinkSyncStallWatchdogTest` — wedge
+   drops within one RTO, not one idle window; toggle-off → red.
 
-2. **ASYNC heap headroom.** Capture free-heap at ASYNC boot; confirm
-   `uart_driver_install` + `xStreamBufferCreate` succeed with margin (rx floor
-   10160 + streamBuf 10252 + WiFi/httpd). If tight, cap the ASYNC rx floor by
-   available heap. Blocks OTA buffer sizing.
-
-3. **ASYNC flood, frameErrs/disc = 0.** Flood (txDelay=0) at 115200 and at
-   512000 over a short cable; `frameErrs` and `disc` must hold at 0, single loss
-   recovers within reorderHoldMs. If 512000 spikes, make the rx floor / loopTask
-   cadence baud-aware (couples to item 2). WireSim can't catch this.
-
-4. **Sweep walk-down.** Degrade the link; sweep must fall 512000 → 115200 → …
-   and lock on the first baud returning PONG_ACK, with no stall at the top entry.
+3. **ASYNC: raise the delivery floor under loss.** ~74 % delivery at 1 %
+   frame loss (post-6.0.34) is not bulletproof — losses trace to
+   `reorderHoldMs` (1500, `AutoLinkConfig.h:258`) expiring before retx
+   closes the gap, and pool exhaustion under sustained flood. Derive
+   reorder hold from measured RTO × `maxRetx` instead of a fixed 1500 ms;
+   add a loss-sweep itest (0.1 / 1 / 5 %) with pinned per-rate floors
+   (target ≥ 99 % at 1 %); pin pool headroom under flood.
 
 ## Verify
 `cd test && make test && make itest && ./build/verify_build.sh`
-(62/62 unit, 3/3 itest; cross-compile gates `AutoLinkWeb.cpp` /
-`AutoLinkWebHandlers.cpp`.)
+(70/70 unit, 4/4 itest. Cross-compile MANDATORY before flashing — OTA
+`esp_ota_*`/LittleFS paths compile only in the Arduino build. Item 1
+needs the FireBeetle pair.)
