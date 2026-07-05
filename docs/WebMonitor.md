@@ -61,6 +61,19 @@ Open, no authentication:
 | `GET /logs?since=N` | JSON log entries with seq ≥ N (used for incremental polling) |
 | `POST /reset` | Calls `resetStats()` + `resetErrors()`; returns `"ok"` |
 | `POST /reboot` | Restarts the device via `esp_restart()` after sending its reply |
+| `POST /ota/fw` | Firmware upload: streams the raw `.bin` body to the inactive OTA app slot, sets it as the boot partition, replies, then reboots. Errors (no OTA slot, oversized, invalid image) drain the body and return 4xx/5xx. |
+| `POST /ota/gui` | Dashboard upload: a **STORED** zip (`zip -0 gui.zip index.html ...`) unpacked into LittleFS under `/web/`. Once `/web/index.html` exists, `GET /` serves it instead of the baked-in dashboard. Compressed or data-descriptor zip entries are rejected. |
+
+### OTA partition requirements
+
+Firmware OTA needs a partition table with **two app slots** (`ota_0`/`ota_1`); GUI OTA needs a **LittleFS data partition**. On Arduino-ESP32 pick a scheme like *"Minimal SPIFFS (Large APPS with OTA)"*, or supply a custom CSV with `ota_0`, `ota_1`, and a `spiffs`/`littlefs` data partition. Without a second app slot `POST /ota/fw` returns 500; without a mountable data partition `POST /ota/gui` returns 507 and `GET /` keeps serving the baked-in dashboard. After a firmware OTA, the next boot marks the new image valid (rollback-cancel) once the web monitor comes up.
+
+Upload examples:
+
+```
+curl --data-binary @firmware.bin http://<ip>:8765/ota/fw
+zip -0 gui.zip index.html && curl --data-binary @gui.zip http://<ip>:8765/ota/gui
+```
 
 > **Note on `resetStats()`:** `AutoLinkWeb` samples the cumulative counters on its own 1 Hz timer and never calls `resetStats()` on its own. If your sketch calls `resetStats()`, the B/s display will read 0 for one interval and then recover automatically.
 
