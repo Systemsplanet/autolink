@@ -1,0 +1,130 @@
+// Narrow I/O surface the link helpers (LinkArq,
+// LinkReorder, LinkSweep) see; Link implements it.
+// Helpers drive the link through this instead of
+// friendships into Link's privates.
+//
+// One vtable per Link, on par with the
+// existing IHal cost. No std::function
+// or virtual bases on the helper side —
+// helpers hold LinkContext& by
+// reference and call through it.
+//
+// The CTRL command codes and MAX_CHUNK
+// are wire-protocol values that the
+// link and its helpers must agree on,
+// so they live here alongside the
+// surface the helpers see.
+#pragma once
+#include <stdint.h>
+
+namespace autolink {
+
+// CTRL-frame command codes. Data
+// payloads use the cobsSeq space and
+// are not driven through LinkContext.
+constexpr uint8_t PING_CMD = 0x22;
+constexpr uint8_t PONG_CMD = 0x33;
+constexpr uint8_t REQ_CMD = 0x11;
+constexpr uint8_t LOCK_CMD = 0x44;
+
+// Per-frame payload cap. Reorder pool
+// and link frame builder must agree.
+constexpr int MAX_CHUNK = 250;
+
+// Per-message header length. The first
+// chunk of a multi-chunk message
+// carries a hdr-only frame; subsequent
+// chunks carry payload-only frames.
+// Wire-protocol constant — same
+// category as MAX_CHUNK, declared here
+// so the floor/sizing helpers in
+// al/AutoLinkConfig.h can reference it
+// without pulling in the full Link.h.
+constexpr int MSG_HDR = 6;
+
+// Phase-3 ACK threshold: master locks
+// once it has received this many PONG
+// ACKs at the candidate baud, and the
+// pong locks on the same count. Both
+// sides MUST agree — single source so
+// the count can't drift between the
+// sweep helper and the link's
+// handleSwp_unlocked branches.
+constexpr int PHASE3_ACKS_NEEDED = 2;
+
+// Inbound wire-ACK frame size. The 5-byte
+// raw ACK (0xFF + seq + bytes_lo +
+// bytes_hi + crc8) contains no zero
+// bytes, so COBS encodes it to 6 bytes;
+// the wire adds a leading 0x00 frame
+// delimiter and a trailing 0x00 = 8
+// bytes total. Used by the rx-byte
+// counter so a Ping that only receives
+// wire-level ACKs (no app payload) sees
+// rxBytes advance as the UART receives
+// ACK frames — mirror of the outbound
+// CTRL/ACK/NAK txByte count.
+constexpr int RX_ACK_WIRE_BYTES = 8;
+
+// Inbound wire-NAK frame size. The 3-byte
+// raw NAK (0xFE + seq + crc8) COBS-
+// encodes to 4 bytes; wire adds 2
+// framing bytes = 6 bytes total. Mirror
+// of RX_ACK_WIRE_BYTES for the NAK path.
+constexpr int RX_NAK_WIRE_BYTES = 6;
+
+class LinkContext {
+public:
+    virtual ~LinkContext() = default;
+
+    // Caller holds the link lock — these
+    // are the unlocked halves of the I/O
+    // path. They run under hw.lock() in
+    // production; the contract here is
+    // "caller owns the lock", not "these
+    // take it themselves".
+    virtual void hwLock() = 0;
+    virtual void hwUnlock() = 0;
+    virtual uint32_t hwNowMs() const = 0;
+    virtual void hwSetSpd(uint32_t b) = 0;
+    virtual void hwStartTimer(int ms) = 0;
+
+    // CTRL-frame wire emit used by the
+    // sweep phase machine. LinkSweep
+    // drives PING/PONG/LOCK/REQ through
+    // this one entry point; the body's
+    // specifics (CRC, COBS) stay in
+    // Link.cpp.
+    virtual void sendFrame(uint8_t payload) = 0;
+
+    // Master/slave role read by the sweep
+    // phase machine to pick master vs
+    // slave dwell shapes.
+    virtual bool masterRole() const = 0;
+
+    // Sweep phase machine tracks the
+    // current baud index on Link — the
+    // allowed-bauds table and the active
+    // index move together as phases
+    // transition.
+    virtual int currentSpdI() const = 0;
+    virtual void setCurrentSpdI(int i) = 0;
+    virtual int allowedBaudsCount() const = 0;
+    virtual uint32_t allowedBaud(int i) const = 0;
+    virtual int delayMs() const = 0;
+
+    // Reorder buffer callbacks. LinkReorder
+    // hands the held payload to the link's
+    // app-buffer queue, asks the link to
+    // emit the matching ACK, advances the
+    // rx-seq cursor, and tallies bytes for
+    // stats — all under the same lock the
+    // link holds across a flush.
+    virtual int reorderPushAppBuf(const uint8_t *b, int n) = 0;
+    virtual void reorderSendAck(uint8_t seq) = 0;
+    virtual uint8_t reorderExpectedSeq() const = 0;
+    virtual void reorderAdvanceRxSeq(uint8_t seq) = 0;
+    virtual void reorderCountBytes(int n) = 0;
+};
+
+} // namespace autolink
