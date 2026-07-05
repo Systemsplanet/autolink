@@ -1,6 +1,708 @@
 # 📅 AutoLink Version History
 
 All releases, most recent first.
+## v6.0.40
+
+**Fix three OK-timer wedges (double unlock, pause kills the tick, idleTimeoutMs<=0 kills ARQ), make MockHal one-shot-faithful, strip historical comments**
+
+Cleanup pass that turned into a bug hunt. The FreeRTOS link timer is one-shot (`xTimerCreate(..., pdFALSE, ...)`), so every OK-tick exit must re-arm — and two early returns in `onTimerOk_unlocked` didn't. (1) `linkPaused_` returned without re-arming: a dashboard Pause during OK killed the tick permanently, and Resume only flipped the flag — after any pause/resume cycle the link ran with no ARQ retransmit sweep, no reorder expiry, and no health watchdogs. (2) `cfg.idleTimeoutMs <= 0` returned before everything: disabling the idle watchdog also disabled retransmission entirely. Both now re-arm; idleTimeoutMs<=0 skips only the `decideHealth` verdict while the reorder/ARQ machinery keeps running. (3) Every watchdog drop path did `hw.unlock(); hw.sendBreak(); return;` inside a callee that `onTimer` unlocks again after — a double unlock (UB on the host `std::mutex`, a failed give on the device mutex). `onTimerOk_unlocked`/`onTimerLck_unlocked` now return a break-needed bool and `onTimer` owns the single unlock + post-unlock `sendBreak`. The host suite never caught any of this because `MockHal::pumpClock` re-fired a stale one-shot arm up to 16× per pump — effectively a broken auto-reload timer — so a callee that failed to re-arm still ticked on the host while dying on the device; the mock now consumes the arm on fire exactly like the hardware timer, and the whole suite stays green under the faithful semantics. Separately, the widened version-free source gate (majors 5–9) flushed out twelve hard-coded release references in test comments/banners; all scrubbed. The comment strip removed historical anchors ("pre-fix shape", "this release", step narration) across the link core, HAL, pingpong roles, facade, and web handlers per the developer-doc comment policy, keeping only why/wire-side/pin rationale — e.g. `Ping.h` 297 → 83 comment lines, `EspHal.h` 135 → 94 — verified comment-only by a strip-and-compare diff on every touched file except the three with intended code changes.
+
+### What moved
+
+- `src/al/link/LinkTimers.cpp` — `onTimerOk_unlocked`/`onTimerLck_unlocked` return `bool` (break-needed); paused tick re-arms; `idleTimeoutMs<=0` no longer skips the ARQ sweep; drop paths no longer unlock/break inline; `onTimer` single-unlock + post-unlock BREAK; dead `cur` locals removed; comments condensed.
+- `src/al/link/Link.h` — the two signature changes; comment trims.
+- `test/common/MockHal.h` — `pumpClock` consumes the one-shot arm on fire (was: stale re-fire masking rearm bugs).
+- `test/test_desktop/al/link/LinkTimerRearmTest.cpp` (new) + Makefile registration (`run_test_timer_rearm`) — pins pause-rearm and idle-disabled-tick-alive; toggle-off → red (verified).
+- `test/test_desktop/al/link/LinkAckBytesTest.cpp` — Pin 3 source-grep updated to the health-monitor shape (`bool onTimerOk_unlocked`, `decideHealth`, `reset_unlocked` → `return true`).
+- Twelve version-string scrubs across six test files (version-free gate green).
+- Comment strips: `LinkRx.cpp`, `LinkSweep.cpp`, `LinkTx.cpp`, `LinkContext.h`, `Ping.h`, `Pong.h`, `PingGap.h`, `EspHal.h`, `include/AutoLink.h`, `AutoLinkWebHandlers.cpp` (comment-only, machine-verified).
+- `include/AutoLink.h` / `library.properties` / `idf_component.yml` — `6.0.39 → 6.0.40` lockstep.
+
+### Wire format
+
+Unchanged. Same framer, COBS encap, `MAX_CHUNK = 250`, `MSG_HDR = 6`, `POOL_SIZE = 64`, window 32, seq-space budget as 6.0.39. Behavior changes are timer-lifecycle only: the OK tick now survives pause/resume and idleTimeoutMs<=0, and BREAK is sent after the lock is released rather than between a double unlock.
+
+### Regression tests
+
+- `LinkTimerRearmTest` — Pin 1: paused OK tick re-arms and resume keeps ticking; Pin 2: idleTimeoutMs=0 keeps the tick alive and holds a healthy link. Toggle-off (restore either early return) → red (verified).
+- MockHal one-shot fidelity is itself a suite-wide hardening: any future exit path that forgets to re-arm now fails on the host instead of only on the bench.
+- All prior pins green through the new dispatch: 70/70 unit, 4/4 itest.
+
+### Disclosed limitations
+
+- `build/verify_build.sh` not run in-sandbox (no `arduino-cli`/network); source touched — cross-compile carry-over stands, last cleared end-to-end at 6.0.32 (todo Open 1).
+- `clang-format` unavailable; `pretty_print.py` merge pass ran, formatting skipped.
+- The double unlock was almost certainly benign on-device (FreeRTOS rejects a give by a non-holder) but UB on the host; fixed for both.
+
+### Result
+
+- `make test` 70/70 unit (+`run_test_timer_rearm`), `make itest` 4/4 (~45 s), `test_coverage_manifest` PASS, version-free gate green, `version.py check` green (20 entries).
+- Comment-only verification: `gcc -fpreprocessed` strip-and-diff clean on every comment-strip file; code deltas confined to `LinkTimers.cpp`, `Link.h`, `MockHal.h`, and the two test files.
+---
+
+## v6.0.39
+
+**Extract the unified link-health monitor: one pure decideHealth replaces the scattered OK-timer watchdog branches**
+
+Closes todo Open 2 (and subsumes Open 5). The 6.0.32/33/35 bug family shared one shape: keep/drop decisions lived as separate, mode-gated branches inside `onTimerOk_unlocked` (`LinkTimers.cpp`), so every fix added a branch and every branch another place to be silently gated out of a mode — the SYNC stall wedge existed precisely because the tx-backpressure watchdog sat inside an `if (mode != SYNC)` block. This release moves all four OK-state watchdog decisions — tx-backpressure stall (both modes), asymmetric idle, symmetric idle, and ARQ pool exhaustion (ASYNC only) — into one pure free function `decideHealth(HealthState, nowMs, idleTimeoutMs)` in the new header-only `src/al/link/LinkHealth.h` (the `LinkDecision.h` pattern: no state, no I/O, enum out, exhaustively table-tested per AGENTS rule 21). `onTimerOk_unlocked` now snapshots one `HealthState` (reject streak, rx/tx ages, ARQ pending, frameErrs, pool room, mode) and dispatches on the returned action; the four log lines and the single drop path (`reset_unlocked(true)` → BREAK) are unchanged, so wire behaviour is byte-identical — the decision logic just can't fragment again. `FAST_IDLE_RX_MS`/`FAST_IDLE_TX_MS`/`POOL_EXHAUST_DROP_PENDING` moved into the health module; `LinkTimers.cpp` shrank 477 → 338 lines and now holds only timer plumbing, which is what Open 5's split was for. Behavior-preserving: check priority (stall → asym → sym-idle → pool → retx sweep), all thresholds, and the SYNC gating are exactly the pre-refactor semantics, and every existing watchdog pin stays green. Wire format unchanged.
+
+### What moved
+
+- `src/al/link/LinkHealth.h` (new) — `HealthState`, `HealthAction`, pure `decideHealth()`, threshold accessors; rationale comments consolidated here.
+- `src/al/link/LinkTimers.cpp` — the tx-stall / asym-idle / sym-idle / pool-exhaust branch blocks replaced by one snapshot + `decideHealth` dispatch with per-reason logging; module-local watchdog constants removed (owned by LinkHealth.h); 477 → 338 lines.
+- `test/test_desktop/al/link/LinkHealthTest.cpp` (new) — 19-row truth table.
+- `test/test_desktop/Makefile` — `run_test_health` in `TEST_BINS` + build rule (header-only, links no library source).
+- `test/scripts/coverage/test_coverage_manifest.py` — `run_test_health` added to the source-grep-only exempt list.
+- `todo.md` — Open 2 closed, Open 5 subsumed; remaining items renumbered (bench/verify loop; SYNC instant resync; ASYNC delivery floor).
+- `include/AutoLink.h` / `library.properties` / `idf_component.yml` — `6.0.38 → 6.0.39` lockstep bump (AGENTS rule 3).
+
+### Wire format
+
+Unchanged. Decision relocation only; no new frames, same framer, COBS encap, `MAX_CHUNK = 250`, `MSG_HDR = 6`, `POOL_SIZE = 64`, window 32, seq-space budget as 6.0.38.
+
+### Regression tests
+
+- `LinkHealthTest` — 19 rows spanning all four drop reasons, both modes, the clean-quiet-link false-positive guard, stale-streak hold, and check priority; toggle-off (re-gate the stall check behind `!sync`) → SYNC-streak row red (verified).
+- `LinkSyncStallWatchdogTest` / `LinkTxStallWatchdogTest` and the idle/asym pins — unchanged, still green through the new dispatch; the same toggle-off also turns `LinkSyncStallWatchdogTest` red end-to-end (verified), proving the integration path runs through `decideHealth`.
+
+### Disclosed limitations
+
+- `build/verify_build.sh` could not run in-sandbox (no `arduino-cli`, no network). Source WAS touched (`LinkTimers.cpp`, host-tested link core + one new header) — the cross-compile carry-over stands; still last cleared end-to-end at 6.0.32. Head of todo Open 1.
+- `clang-format` unavailable in-sandbox; `build/pretty_print.py` ran its merge pass but skipped formatting on the touched files. Re-run with clang-format available.
+- The monitor centralizes decisions made on the OK-timer tick; event-time signals still feed it via the existing members (`noteTxReject_unlocked`, `lastRxMs`/`lastTxMs`, ARQ counters). Migrating ownership of those counters into `HealthState` is deliberately out of scope — no behavior would change.
+
+### Result
+
+- `make test` 69/69 unit (~6.7 s wall; +`run_test_health`, toggle-off → red verified), `make itest` 4/4 (~45.1 s wall).
+- `make test_coverage_manifest` PASS; `python3 build/version.py check` green (20 entries; this entry pushed the oldest off the tail).
+- `build/verify_build.sh` not run — see Disclosed limitations.
+---
+
+## v6.0.38
+
+**todo.md architecture-hardening reorg + Version.md tail trim (docs only)**
+
+Documentation-only housekeeping in the 6.0.23/6.0.28/6.0.31 shape — no `.cpp`/`.h`/`.ino` touched, protocol and build surface byte-identical to 6.0.37. The trigger: weeks of instability whose fixes (6.0.32–6.0.37) each patched one wedge but left the underlying architecture exposed, so `todo.md` is rebuilt as the minimum plan that makes the link bulletproof rather than a single bench note. The failure history reads as three structural causes and one process failure, and the new Open list maps onto them one-to-one. (1) Keep/drop/resweep decisions are scattered mode-gated branches across `LinkTimers.cpp`/`LinkApi.cpp` — the 6.0.32/33/35 bug family was, every time, "a watchdog branch that didn't run in some mode / didn't stamp the streak"; Open 2 extracts one pure, table-tested `decideHealth` fed by one `HealthState` so a missed branch becomes structurally impossible. (2) SYNC's length-prefixed framer wedges on a lost mid-message ACK and recovery waits out `idleTimeoutMs` (the 6.0.35 disclosed limitation); Open 3 makes the resync fire on the failure itself (immediate BREAK on a mid-message `waitForAck` timeout). (3) ASYNC delivery tops out at ~74 % under 1 % frame loss (the 6.0.34 result) because the fixed `reorderHoldMs` expires before retransmission closes the gap; Open 4 derives the hold from measured RTO × `maxRetx` and pins per-loss-rate delivery floors with a loss-sweep itest. The process failure is the cross-compile gate: `verify_build.sh` last cleared at 6.0.32, five source-touching releases shipped device-path-unverified, and 6.0.37 exists only because the host stubs cannot catch Arduino-only breakage — so Open 1 is now "restore the verification loop first", bundling the standing FireBeetle bench items (re-lock cadence, walk-down, ASYNC-flood wedge, stall watchdog end-to-end, heap-cap log, both OTA uploads). Open 5 is the follow-through readability split of `LinkTimers.cpp` once Open 2 lands. No completed items were moved out of `todo.md` — the prior file held only the bench item and it remains open inside Open 1; this pass adds what was missing, orders by priority, and keeps nothing done.
+
+### What moved
+
+- `todo.md` — rebuilt: five Open items, priority-ordered (verify loop + bench backlog; unified health monitor; SYNC instant resync; ASYNC delivery floor; `LinkTimers.cpp` split), each with symptom, file anchors, fix direction, and pin recipe. Verify footer retained.
+- `docs/Version.md` — this entry; `add` + `trim --keep 20` dropped the oldest entry (v6.0.17) off the tail.
+- `include/AutoLink.h` / `library.properties` / `idf_component.yml` — `6.0.37 → 6.0.38` bump in lockstep (AGENTS rule 3).
+
+### Wire format
+
+Unchanged. No source touched. Same framer shape, COBS encap, `MAX_CHUNK = 250`, `MSG_HDR = 6`, `POOL_SIZE = 64`, window 32, and seq-space budget as 6.0.37.
+
+### Regression test
+
+None added — docs-only, no behavior to pin. The host suite is the gate, unchanged from 6.0.37, re-run this session (below).
+
+### Disclosed limitations
+
+- Standing cross-compile carry-over: `build/verify_build.sh` not run in-sandbox (no `arduino-cli`, no network). No source delta on top of 6.0.37, so risk stays bounded to the already-disclosed surface; last cleared end-to-end at 6.0.32. Now the head of todo Open 1.
+- All five Open items are open — this release plans the work, it does not perform any of it.
+
+### Result
+
+- No source touched; host suite re-run this session: `make test` 68/68 unit (~7.0 s wall), `make itest` 4/4 (~45.2 s wall), combined ~52.2 s.
+- `python3 build/version.py check` green (20 entries, --keep=20; this entry pushed v6.0.17 off the tail).
+- `build/verify_build.sh` not run in-sandbox — see Disclosed limitations.
+---
+
+## v6.0.37
+
+**Fix `OtaCore::NAME_MAX` ↔ `<limits.h>` macro collision + coverage-manifest exempt-list drift**
+
+Build-only release — the 6.0.36 OTA path failed to cross-compile on Arduino-ESP32 because `OtaZipStream::NAME_MAX = 96` clashed with `NAME_MAX` from `<limits.h>` (pulled in transitively by `<freertos/FreeRTOS.h>` → `portmacro.h` → `limits.h`); the preprocessor substituted the macro numeric constant ahead of the `constexpr` declarator and produced `error: expected unqualified-id before numeric constant`. `NAME_MAX` is a `<limits.h>` macro on every POSIX-y libc the Arduino toolchain ships, so the collision is guaranteed on the device path. `OtaCoreTest` (host compile, no `freertos/`) never triggered it. Fix: rename to `kNameMax` in `OtaCore.h` and the two call sites in `OtaCore.cpp` (`OtaZipStream::kNameMax` for the size guard, bare `kNameMax` inside the class); a comment records why. Companion: `run_test_heap_cap_floor` and `run_test_ota_core` were missing from the `test_coverage_manifest.py` exempt list (they link only their own test .cpp / the host-side `OtaCore.cpp`), tripping AGENTS rule 4 (`make test_coverage_manifest` red); both added. No protocol, framer, or surface-area change.
+
+### What moved
+
+- `src/al/web/OtaCore.h` — `static constexpr size_t NAME_MAX = 96;` → `kNameMax` (with comment recording the limits.h collision).
+- `src/al/web/OtaCore.cpp` — two references updated to the new name; one is qualified (`OtaZipStream::kNameMax`) for the public guard, one bare (`kNameMax`) for the in-class length check.
+- `test/scripts/coverage/test_coverage_manifest.py` — exempt list extended with `run_test_heap_cap_floor` and `run_test_ota_core` (per the existing source-grep-only exemption pattern; no new `TEST_BINS` rules).
+- `include/AutoLink.h` / `library.properties` / `idf_component.yml` — `6.0.36 → 6.0.37` lockstep bump (AGENTS rule 3).
+
+### Wire format
+
+Unchanged. Rename + manifest exemption only; no new frames, same framer, COBS encap, `MAX_CHUNK = 250`, `MSG_HDR = 6`, `POOL_SIZE = 64`, window 32, seq-space budget as 6.0.36.
+
+### Regression tests
+
+- `OtaCoreTest` — unchanged in body; the rename is exercised by every name-sanitizing case (the `OtaZipStream::NAME_MAX` reference inside the guard) and by the zip-stream "name too long" reject (`nameLen_ > kNameMax`). Re-linking passes (the host tree never pulled `<limits.h>` via the test path, so this is a coverage-floor pin — the assertion that the new name is the only one referenced).
+- `test_coverage_manifest.py` — `test_real_makefile_covers_every_test_bin` now exempts the two new source-grep-only bins; toggle-off (drop the exemptions) → red.
+
+### Disclosed limitations
+
+- `build/verify_build.sh` still could not run in-sandbox (no `arduino-cli`, no network — the 6.0.36 disclosed limitation carried forward). The whole reason this release exists is the cross-compile failure `verify_build.sh` would have caught — confirmed the host gate misses it by construction (the host stub set substitutes `FreeRTOS.h` but does not transitively pull `<limits.h>`), so the **fix is verified by the host rename + a manual review of the preprocessor name** but the Arduino-side compile is still unverified. Re-run `verify_build.sh` against `esp32:esp32@3.3.5` before flashing.
+- The 6.0.36 todo `Open 1` (re-lock cadence + walk-down + stall-watchdog bench confirm) remains the sole open item — FireBeetle-pair-only. No item moved.
+
+### Result
+
+- `make test` 68/68 unit (re-run, ~8.8 s wall); `make itest` 4/4 (re-run, ~45.2 s wall); `make test_coverage_manifest` PASS (re-run).
+- `python3 build/version.py check` green (20 entries; `add` + `trim --keep 20` dropped v6.0.16 off the tail).
+- `build/verify_build.sh` not run — see Disclosed limitations.
+---
+
+## v6.0.36
+
+**Close Open 1 + Open 3 (heap-aware buffer floors; real OTA firmware + GUI upload) and add the multi-chunk ASYNC-under-loss itest**
+
+Three deliverables. (1) **Open 1, ASYNC heap headroom**: `EspHal::begin()` now caps its two big asks — the RX stream buffer and the ASYNC UART rx buffer — against `esp_get_free_heap_size()` via the new pure helper `capFloorByHeap(want, minFloor, freeHeap, reserve)`, leaving `cfg.heapReserveBytes` (default 16 KB) untouched for WiFi/httpd/OTA. The stream buffer never shrinks below one full coalesced message (`maxMsg + 6`) and the rx buffer never below its SYNC baseline (`cfg.rxBufferSize`) — better to eat the reserve than come up broken; a shrink is logged. Heap 0 (host stub) and reserve 0 disable the cap. (2) **Open 3, OTA**: the 6.0.22-era 503 stubs at `/ota/fw` and `/ota/gui` are now real. `/ota/fw` streams the raw body via `httpd_req_recv` (chunk buffer sized by `otaRecvChunkBytes`, unblocked by (1)) into the inactive app slot with `esp_ota_begin/write/end`, sets the boot partition, replies, and reboots; the first web-monitor boot afterwards marks the image valid (rollback-cancel). `/ota/gui` unpacks a **STORED** zip (`zip -0`) through the new streaming parser `OtaZipStream` into LittleFS under `/web/`, and `handleRoot` serves `/web/index.html` from FS when present, else the baked-in `AutoLinkWebHtml.h`. Every error path drains the unread body first (`drainBody_`), closing the half-read-socket limitation the stub carried since 6.0.22. All OTA decision logic (slot policy, chunk sizing, entry-name traversal guard, zip state machine including feeds split at every byte boundary) lives in the host-linkable `src/al/web/OtaCore.{h,cpp}`; the esp_ota_*/LittleFS I/O is cross-compile-only, and the host stub set now parses both web TUs (CompileCheckTest gate extended). Requires a dual-app-slot + LittleFS partition table — documented in `docs/WebMonitor.md`. (3) **6.0.34 follow-up itest**: `run_loopback_multichunk` sends random 300-3000 B (2-13 chunk) ASYNC payloads under 1 % frame loss with byte-keyed content verification — the exact coverage gap that let the retransmit throttle ship. Open 2 (re-lock cadence symmetry + walk-down + stall-watchdog bench confirm) remains the sole open item: it is FireBeetle-pair-only and its dwell relationships are pinned by existing guard tests, so no blind cadence change was made. Wire format unchanged.
+
+### What moved
+
+- `src/al/AutoLinkConfig.h` — `heapReserveBytes` field; pure `capFloorByHeap()`.
+- `src/al/hal/EspHal.h` — heap-aware cap applied in `begin()` (stream buf first, then rx buf, subtracting each grant), warning log on shrink.
+- `src/al/web/OtaCore.h` / `OtaCore.cpp` (new) — `otaInactiveSlot`, `otaRecvChunkBytes`, `otaSafeEntryName`, `OtaZipStream` (streaming STORED-only zip; rejects compressed / data-descriptor entries).
+- `src/al/web/AutoLinkWebHandlers.cpp` — real `handleOtaFw` / `handleOtaGui` replace the 503 stubs; `drainBody_`; `handleRoot` LittleFS-first serving.
+- `src/al/web/AutoLinkWeb.h` / `AutoLinkWeb.cpp` — `fsOk_` + `mountFs_()`; LittleFS mount + OTA rollback-valid mark in `setupHttpAndLogging_`.
+- `test/scripts/env/install_system_stubs.py` — `esp_ota_ops.h` + `LittleFS.h` stubs; httpd stub gains `content_len`, `httpd_req_recv`, `HTTPD_SOCK_ERR_TIMEOUT`; `CompileCheckTest` expected-symbol list extended to pin them.
+- `test/test_desktop/al/hal/HeapCapFloorTest.cpp` (new), `test/test_desktop/al/web/OtaCoreTest.cpp` (new), `test/itest/test_desktop/al/link/loopback_multichunk_test.cpp` (new) + the two Makefile registrations.
+- `docs/WebMonitor.md` (OTA endpoints, partition requirements, curl examples), `docs/Tests.md` (itest table).
+- `include/AutoLink.h` / `library.properties` / `idf_component.yml` — `6.0.35 → 6.0.36` lockstep bump (AGENTS rule 3).
+
+### Wire format
+
+Unchanged. Buffer sizing and HTTP surface only; no new frames, same framer, COBS encap, `MAX_CHUNK = 250`, `MSG_HDR = 6`, `POOL_SIZE = 64`, window 32, seq-space budget as 6.0.35.
+
+### Regression tests
+
+- `HeapCapFloorTest` — 9-row truth table for `capFloorByHeap`; toggle-off (return `want` unconditionally) → tight-heap rows red (verified).
+- `OtaCoreTest` — slot policy, chunk sizing, name traversal guard, zip stream incl. split feeds at every byte boundary and deflate / data-descriptor / bad-signature rejects; toggle-off (drop the method reject) → red (verified).
+- `run_loopback_multichunk` — delivery floor 30 % + zero-corruption + at-least-one-multi-chunk pins; toggle-off (retx no-op) collapses delivery to ~2 % (the documented pre-6.0.34 shape) → red (verified).
+
+### Disclosed limitations
+
+- `build/verify_build.sh` could not run in-sandbox (no network). Source WAS touched (`EspHal.h`, web TUs, new `OtaCore.cpp`) and the OTA I/O paths (`esp_ota_*`, LittleFS) only compile in the Arduino build — the cross-compile carry-over re-opens and is **mandatory** before flashing. Both web TUs parse cleanly under the extended host stub set (CompileCheckTest), which checks syntax/types but not the real IDF signatures. Last cleared end-to-end at 6.0.32.
+- The OTA paths are host-pinned at the decision layer only; the stream-to-flash and LittleFS writes need on-device verification (upload a real image, power-cycle, confirm rollback-cancel; upload a `zip -0` GUI, confirm `/web/index.html` serves).
+- GUI zips must be STORED (`zip -0`); deflate is rejected by design (no streaming inflate budget on a ~39 KB-heap target).
+- Open 2 (re-lock cadence + walk-down + stall-watchdog bench confirm) remains open — FireBeetle-pair-only.
+
+### Result
+
+- `make test` 68/68 unit (+`run_test_heap_cap_floor`, +`run_test_ota_core`; both toggle-off → red verified), `make itest` 4/4 (~45.2 s, +`run_loopback_multichunk` ~5 s).
+- `python3 build/version.py check` green (20 entries; this entry pushed the oldest off the tail).
+- `build/verify_build.sh` not run — see Disclosed limitations.
+---
+
+## v6.0.35
+
+**Fix SYNC self-healing: a peer-desync wedge (lost mid-message ACK) now drops + resweeps instead of hanging forever**
+
+SYNC mode had no self-healing at all. The entire idle / asymmetric / tx-backpressure watchdog block in `onTimerOk_unlocked` was gated behind `if (mode != SYNC)`, on the assumption that SYNC's inline `waitForAck` timeout was "its own recovery path" — but that only fails one send; it never drops or resweeps the link. Failure shape on the FireBeetle pair (random size, 500 ms delay, SYNC): a CRC/desync burst costs one mid-message ACK, so the sender abandons that message partway. The receiver's length-prefixed framer is left waiting for a message tail that never comes, stops delivering/ACKing, and the sender's every subsequent `sendMsg` times out — `tx` falls to 0, `arqPending=0`, `frameErrs=0`, `disc=0`, and the link hangs forever (`send failed (backpressure) … arqPending=0` every ~1.5 s with no resweep). This is the same blind spot 6.0.33 closed for ASYNC, but SYNC was excluded because the reject-streak was only stamped on ASYNC reject branches. Fix: (1) a failed SYNC `sendMsg` now stamps the tx-reject streak (`noteTxReject_unlocked`), and (2) the tx-backpressure stall watchdog is hoisted out of the `mode != SYNC` gate so it runs in both modes. A SYNC sender whose sends stay un-ACKed past `idleTimeoutMs` (streak still live) now drops → BREAK → resweeps, which realigns both framers and resumes traffic. ASYNC behaviour is unchanged (same streak, same watchdog, just relocated ahead of the ASYNC-only idle checks). Recovery latency is `idleTimeoutMs` (default 10 s); lower `cfg.idleTimeoutMs` for a shorter SYNC stall-to-resweep window. Wire format unchanged.
+
+### What moved
+
+- `src/al/link/LinkApi.cpp` — `sendMsg` stamps `noteTxReject_unlocked()` on a SYNC failure (`else if (sync)` alongside the existing success-clears-streak line); ASYNC reject branches already stamped.
+- `src/al/link/LinkTimers.cpp` — the tx-backpressure stall watchdog moved out of the `if (mode != SYNC)` block to run mode-independently, right after the reorder-expiry step in `onTimerOk_unlocked`; the ASYNC-only idle/asymmetric checks stay gated.
+- `test/common/LinkTestAccessor.h` — `noteTxReject()` shim so the regression can drive the streak without spinning a real `waitForAck` timeout on the injected clock.
+- `test/test_desktop/al/link/LinkSyncStallWatchdogTest.cpp` (new) + `test/test_desktop/Makefile` (`run_test_sync_stall_watchdog` in `TEST_BINS` + build rule).
+- `include/AutoLink.h` / `library.properties` / `idf_component.yml` — `6.0.34 → 6.0.35` lockstep bump (AGENTS rule 3).
+
+### Wire format
+
+Unchanged. Watchdog scheduling only; no new frames, same framer, COBS encap, `MAX_CHUNK = 250`, `MSG_HDR = 6`, `POOL_SIZE = 64`, window 32, seq-space budget as 6.0.34. The recovery path (drop → BREAK → resweep) is the existing one.
+
+### Regression test
+
+`LinkSyncStallWatchdogTest` — two pins. Pin 1: a live tx-reject streak older than `idleTimeoutMs` drops a SYNC link (state → SWP, `discCount==1`) on the OK-timer tick; toggle-off (re-gate the watchdog to `mode != SYNC`) → the link stays OK → assertion fails (verified red). Pin 2: a single stale reject (no follow-up) does not drop a quiet SYNC link — the still-live gate holds.
+
+### Disclosed limitations
+
+- `build/verify_build.sh` could not run in-sandbox (no network). Source WAS touched (`LinkApi.cpp` / `LinkTimers.cpp`, host-tested link core only) — cross-compile carry-over re-opens; re-run before the next source-touching tag. Last cleared end-to-end at 6.0.32.
+- The fix recovers the SYNC desync; it does not prevent it. SYNC's length-prefixed framing is inherently fragile to a lost mid-message ACK (the sender abandons the message partway and the stream desyncs). Recovery now takes up to `idleTimeoutMs`; a follow-up worth considering is an immediate BREAK on a mid-message `waitForAck` timeout so the resync is near-instant rather than watchdog-driven. For hard, low-latency delivery under lossy wires, ASYNC (with 6.0.34's retransmit fix) remains the more robust mode.
+
+### Result
+
+- `make test` 66/66 unit (new `run_test_sync_stall_watchdog`; toggle-off → red verified), `make itest` 3/3 (~40 s).
+- `python3 build/version.py check` green (20 entries; this entry pushed the oldest off the tail).
+- `build/verify_build.sh` not run — see Disclosed limitations.
+---
+
+## v6.0.34
+
+**Fix ASYNC retransmit throttle: NAK-driven fast retransmit now fires inline, and the OK-timer sweep resends every RTO-expired frame per tick**
+
+ASYNC multi-chunk delivery collapsed under any real wire loss: a dropped chunk was effectively never recovered, so random/multi-chunk traffic degraded to ~0 delivery while the link churned resweeps. SYNC was unaffected (it self-throttles inline via `waitForAck`, so no retransmit backlog ever forms) — which is exactly why sequential ran better than random. Root cause was retransmit throttling, not framing or CRC. Both loss signals fed a single deferred slot: `onNak` only stamped `pendingRetxBase_`/`hasPendingRetx_` for the next OK-timer tick (and each fresh NAK overwrote the prior base), and the ACK-timeout sweep resent one frame then `break`ed. At line rate the sender emits hundreds of frames per `okTickMs`; recovering one chunk per tick could never keep pace, the receiver's reorder window expired (`reorderHoldMs`) before the gap closed, multi-chunk messages never reassembled, and the ARQ eventually hit `maxRetx`/pool-exhaust → forced resweep, dropping everything in flight. The README already advertised "NAK-driven fast retransmit"; it was not fast. Fix: retransmit inline, not deferred. A NAK for a live pending seq now resends that cached frame immediately inside `onNak` (under the RX lock, the same lock `onPayload`'s ACK/NAK sends already take), and the OK-timer sweep now resends *every* RTO-expired pending frame in the pass instead of one-then-break. The single-slot `hasPendingRetx_`/`pendingRetxBase_` mechanism is removed; both call sites funnel through one `retxSeq_unlocked(seq)` helper. Host stress (random 1–1200 B ASYNC, byte-keyed integrity check) at 1 % per-frame loss: delivery ~2 % → ~74 % with **zero** silent corruption (every non-delivery is a CRC-safe `recvMsg` -1, as documented). Wire format unchanged.
+
+### What moved
+
+- `src/al/link/LinkTimers.cpp` — new `retxSeq_unlocked(seq)` (the cache-lookup + verbatim resend logic, lifted out of the old deferred tail in `onTimer`); the OK-timer ACK-timeout sweep loops all pending slots and resends each RTO-expired one inline (no `break`); `onTimer`'s post-unlock single-slot resend block deleted.
+- `src/al/link/LinkRx.cpp` — `onNak` retransmits immediately via `retxSeq_unlocked(missingCobsSeq)` after `arq_.onNaked` restamps the RTO; the `pendingRetxBase_`/`hasPendingRetx_` stamping is gone.
+- `src/al/link/Link.h` — `retxSeq_unlocked` declared; `hasPendingRetx_` / `pendingRetxBase_` fields removed.
+- `src/al/link/LinkCore.cpp` — the two field clears dropped from `reset_unlocked`.
+- `test/test_desktop/al/link/LinkFastRetxTest.cpp` (new) + `test/test_desktop/Makefile` (`run_test_fast_retx` in `TEST_BINS` + build rule).
+- `include/AutoLink.h` / `library.properties` / `idf_component.yml` — `6.0.33 → 6.0.34` lockstep bump (AGENTS rule 3).
+
+### Wire format
+
+Unchanged. Sender-local retransmit scheduling only; no new frames, same framer, COBS encap, `MAX_CHUNK = 250`, `MSG_HDR = 6`, `POOL_SIZE = 64`, window 32, seq-space budget as 6.0.33. Retransmits are the existing verbatim cached frames; the receiver's Stale/dup handling already deduped them.
+
+### Regression test
+
+`LinkFastRetxTest` — three pins. Pin 1: after a multi-chunk ASYNC send, injecting a NAK for the pending base seq puts a retransmit on the wire *within the `onNak` call, before any timer tick*; toggle-off (defer to timer) → wire stays empty → assertion fails (verified red). Pin 2: a NAK for a non-pending seq emits nothing (pending guard intact). Pin 3: the retransmitted frame carries the NAKed seq.
+
+### Disclosed limitations
+
+- `build/verify_build.sh` could not run in-sandbox (no network; the arduino-cli toolchain download fails). Source WAS touched this release (`LinkTimers.cpp` / `LinkRx.cpp` / `Link.h` / `LinkCore.cpp`, all host-tested link core — no `AutoLinkWeb.cpp` or Arduino-only surface), so the cross-compile carry-over re-opens; re-run before the next source-touching tag. Last cleared end-to-end at 6.0.32.
+- Integration coverage gap that let this ship: `loopback_noise_test.cpp` only sends fixed 64-byte (single-frame) payloads, so the multi-chunk ASYNC-under-loss path had no itest. The new unit pin plus host stress cover the fix; adding a random multi-chunk loss itest is recommended follow-up (kept out of this release to avoid growing itest wall time under the sandbox ceiling).
+- Delivery under sustained heavy loss (≳5 % per frame on multi-chunk messages) is still low by nature — most messages lose at least one chunk faster than any retransmit budget; that is best-effort behaviour, not a regression. SYNC remains the choice for hard-delivery needs.
+
+### Result
+
+- `make test` 65/65 unit (new `run_test_fast_retx`, ~2 ms; toggle-off → red verified), `make itest` 3/3 (~40.1 s). Combined ~47 s.
+- `python3 build/version.py check` green (20 entries; this entry pushed the oldest off the tail).
+- `build/verify_build.sh` not run — see Disclosed limitations.
+---
+
+## v6.0.33
+
+**Fix Open 1: TX-backpressure stall watchdog (silent ASYNC hang now drops + resweeps)**
+
+Closes todo Open 1, the successor to the 6.0.27 disc-cascade fix: an ASYNC master wedged upstream of the ARQ pool rejected every `sendMsg` (`send failed (backpressure) n=… arqPending=0` every ~1.5 s) while `pendingCount()==0` and `frameErrs==0` — both existing watchdog branches were blind. The asymmetric stuck-send check (`LinkTimers.cpp`) gates on `pendingCount() > 0`; the symmetric idle check no-ops on `pendingCount()==0 && frameErrs==0`. A sender trying to send but unable looked identical to a clean idle link, so `tx` fell to 0, echos froze on both peers, `disc` held at 0, and the link never resweeped. Fix: the watchdog gets a third input — a consecutive `sendMsg` backpressure-rejection streak. `sendMsg` stamps first/latest reject times (`txRejFirstMs_`/`txRejLastMs_`) on every ASYNC reject branch (seq-space exhausted, cache full at entry, mid-message pool exhaustion) and clears the streak on any successful send; `reset_unlocked` clears it too. The OK-state timer drops + BREAKs + resweeps when the streak has outlived `idleTimeoutMs` **and** is still live (latest reject within `idleTimeoutMs`) — the still-live gate keeps a single stale transient reject from bouncing a healthy quiet link.
+
+### What moved
+
+- `src/al/link/Link.h` — `txRejFirstMs_` / `txRejLastMs_` streak stamps + `noteTxReject_unlocked()` inline helper, documented against the wedge shape.
+- `src/al/link/LinkApi.cpp` — `noteTxReject_unlocked()` on the three ASYNC reject branches in `sendMsg`; streak cleared on successful return.
+- `src/al/link/LinkTimers.cpp` — third watchdog branch in `onTimerOk_unlocked` (non-SYNC block, after the symmetric idle check): live streak > `idleTimeoutMs` → warn `tx backpressure stall -> drop`, `reset_unlocked(true)`, BREAK.
+- `src/al/link/LinkCore.cpp` — streak cleared in `reset_unlocked` so a fresh lock starts clean.
+- `test/test_desktop/al/link/LinkTxStallWatchdogTest.cpp` (new) + `test/test_desktop/Makefile` (`run_test_tx_stall_watchdog` in `TEST_BINS` + build rule; coverage manifest picks it up from `TEST_BINS`).
+- `include/AutoLink.h` / `library.properties` / `idf_component.yml` — `6.0.32 → 6.0.33` lockstep bump (AGENTS rule 3).
+
+### Wire format
+
+Unchanged. The fix is sender-local watchdog state; no new frames, same framer shape, COBS encap, `MAX_CHUNK = 250`, `MSG_HDR = 6`, `POOL_SIZE = 64`, window 32, and seq-space budget as 6.0.32. The recovery path it triggers (drop → BREAK → resweep) is the existing one.
+
+### Regression test
+
+`LinkTxStallWatchdogTest` — three pins. Pin 1 drives the exact wedge (real `ArqCache` with `testFillPool()`, zero pending bits, ASYNC `sendMsg` rejected every tick) and asserts the OK-state timer drops within `idleTimeoutMs` + BREAK sent + `discCount==1`; toggle-off verified red (branch disabled → assertion fails). Pin 2 asserts a successful send clears the streak (link stays OK past `idleTimeoutMs`). Pin 3 asserts a single stale reject with no follow-up does not drop a quiet clean link (the still-live gate).
+
+### Disclosed limitations
+
+- `build/verify_build.sh` could not run in-sandbox (no network; the arduino-cli toolchain download fails). Source WAS touched this release, so the cross-compile carry-over re-opens — tracked in the todo `## Verify` footer. Last cleared end-to-end at 6.0.32 (1027835 / 79320 bytes); the delta since is `Link.h`/`LinkApi.cpp`/`LinkTimers.cpp`/`LinkCore.cpp`, all inside the host-tested link core (no `AutoLinkWeb.cpp` or Arduino-only surface touched), so risk is bounded but the build is formally unverified.
+- The physical wedge (short CRC/desync burst on the peer under ASYNC flood) still needs the FireBeetle pair to confirm the watchdog recovers it end-to-end — folded into the re-lock cadence bench item.
+- Streak stamping is ASYNC-only by design; SYNC's inline `waitForAck` timeout is its own recovery path.
+
+### Result
+
+- `make test` 64/64 unit (~8.3 s wall; new suite 2 ms), `make itest` 3/3 (~40.1 s wall), combined ~48.4 s. Toggle-off → red verified for Pin 1.
+- `python3 build/dashboard_assets.py --check` green; `make test_coverage_manifest` green (new bin picked up from `TEST_BINS`).
+- `python3 build/version.py check` green (20 entries; this entry pushed the oldest off the tail).
+- `build/verify_build.sh` not run — see Disclosed limitations.
+---
+
+## v6.0.32
+
+**Repackage: 6.0.31 → 6.0.32 (no source changes; host + itest + verify_build all green)**
+
+Version-only bump. No `.cpp` / `.h` / `.ino` / `Makefile` / `test` source touched — protocol, dashboard, framer, and build surface are byte-identical to 6.0.31. Per the standing user-pref (always new version on repackage; no two consecutive reuses), the next slot above 6.0.31 is 6.0.32. The fix surface the four open items in `todo.md` call for is unchanged (item 1 stays the live TX-backpressure deadlock; items 2-3 stay FireBeetle-pair-only; item 4 OTA stays blocked on item 2) — this release only re-stamps the version, does not move them.
+
+### What moved
+
+- `include/AutoLink.h` / `library.properties` / `idf_component.yml` — `6.0.31 → 6.0.32` bump in lockstep (AGENTS rule 3).
+- `docs/Version.md` — this entry; `add` + `trim --keep 20` dropped the oldest entry off the tail.
+- `build/verify_build.sh` — re-run this session, the cross-compile carry-over that the 6.0.31 todo `## Verify` footer was tracking is now closed (1027835 B / 78% of program space, 79320 B / 24% of dynamic memory against `esp32:esp32:firebeetle32` / `esp32:esp32@3.3.5`).
+
+### Wire format
+
+Unchanged. No source touched. Same framer shape, COBS encap, `MAX_CHUNK = 250`, `MSG_HDR = 6`, `POOL_SIZE = 64`, window 32, and seq-space budget as 6.0.31.
+
+### Regression test
+
+None added — version-only, no behavior to pin. The full host gate is the signal: `make test` 63/63 unit, `make itest` 3/3, `verify_build.sh` cross-compile clean — all three re-run this session (below).
+
+### Disclosed limitations
+
+- The four Open items stay Open — same fix directions, same file:line anchors, same host-pin recipes. The watchdog surface (`LinkTimers.cpp:188` + `:243`) is unchanged, the heap floor (`uartRxBufferFloor` / `uartTxBufferFloor` / `chunksForMsgLen` derive from `MAX_CHUNK` symbolically) is unchanged, the `/ota/fw` + `/ota/gui` handlers still 503.
+- The physical wedge for item 1, the ASYNC heap headroom for item 2, and the master/slave sweep cadence for item 3 are still FireBeetle-pair-only. Host pin recipe for item 1 (drive `sendMsg` false on full TX buffer with empty ARQ pool, assert the watchdog drops + resweeps within the deadline) is unchanged from the todo.
+
+### Result
+
+- No source touched; full host gate re-run this session: `make test` 63/63 unit (~8.2 s wall), `make itest` 3/3 (~40.1 s wall), `build/verify_build.sh` cross-compile clean (1027835 / 79320 bytes), combined ~48.3 s.
+- `python3 build/version.py check` green (20 entries, --keep=20; this entry pushed the oldest off the tail).
+- `make assets_check` / `make test_coverage_manifest` unaffected — no dashboard source, no new `TEST_BINS`.
+---
+
+## v6.0.31
+
+**todo.md reorg + Version.md tail cleanup (docs only)**
+
+Documentation-only housekeeping, same shape as 6.0.23/6.0.28 — no `.cpp`/`.h`/`.ino` touched, protocol and build surface byte-identical to 6.0.30. Two things get fixed. (1) `docs/Version.md` carried a dangling `---` separator at the file tail (below the oldest entry, v6.0.10), the same trailing-separator artifact 6.0.23 removed once before and that has re-accreted; it is stripped. (2) `todo.md` is re-tightened to the bare minimum a developer needs to resume the work: the four Open items are unchanged in substance and order (the live TX-backpressure deadlock stays Open 1 — a hang with no recovery outranks everything — then heap headroom, re-lock cadence, OTA), but each is trimmed of the bench-log-narrative retelling that duplicates the canonical account in Version.md, keeping only the symptom, the `LinkTimers.cpp` file:line anchors, the fix direction, and the host-pin recipe. The standing cross-compile carry-over (`verify_build.sh` last cleared the build at 6.0.22) is promoted from a recurring per-cycle disclosure into the todo `## Verify` footer so it is tracked in one place rather than re-disclosed each release. No completed items were moved — `todo.md` held only Open items and all four are confirmed still open in source (the symmetric watchdog no-op at `LinkTimers.cpp:243` is unfixed; the `/ota/fw` + `/ota/gui` handlers still return 503 stubs), so this pass re-files what is still Open and cleans the tail; it moves nothing to done.
+
+### What moved
+
+- `docs/Version.md` — this entry; `add` + `trim --keep 20` dropped the oldest entry off the tail. The trailing `---` artifact below the last entry is removed.
+- `todo.md` — four Open items retained, same order, trimmed to symptom + file:line + fix direction + host-pin. Cross-compile carry-over folded into the `## Verify` footer. Title bumped to 6.0.31.
+- `include/AutoLink.h` / `library.properties` / `idf_component.yml` — `6.0.30 → 6.0.31` bump in lockstep (AGENTS rule 3).
+
+### Wire format
+
+Unchanged. No source touched. Same framer shape, COBS encap, `MAX_CHUNK = 250`, `MSG_HDR = 6`, `POOL_SIZE = 64`, window 32, and seq-space budget as 6.0.30.
+
+### Regression test
+
+None added — docs-only, no behavior to pin. The host suite is the gate and is unchanged from 6.0.30: `make test` 63/63 unit, `make itest` 3/3. Both were re-run this session (below).
+
+### Disclosed limitations
+
+- Standing cross-compile carry-over: `build/verify_build.sh` was not re-run in-sandbox (no `arduino-cli` in this environment). No source delta on top of 6.0.30, so risk stays bounded to the already-disclosed surface; the 6.0.22 cross-compile last cleared the build path end-to-end at 1027671 / 79320 bytes. This is now tracked in the todo `## Verify` footer.
+- The four Open items stay Open — this release only re-files and trims them. Item 1 is host-pinnable at the watchdog boundary; items 2-3 remain FireBeetle-pair-only; item 4 (OTA) is blocked on item 2's buffer-sizing answer.
+
+### Result
+
+- No source touched; host suite re-run this session: `make test` 63/63 unit (~6.6 s wall), `make itest` 3/3 (~40.1 s wall), combined ~46.7 s.
+- `python3 build/version.py check` green (20 entries, --keep=20; this entry pushed the oldest off the tail).
+- `make assets_check` / `make test_coverage_manifest` unaffected — no dashboard source, no new `TEST_BINS`.
+- `build/verify_build.sh` not run in-sandbox — see Disclosed limitations.
+---
+
+## v6.0.30
+
+**Drop per-slot 'wire <seq> <bytes>' Ping debug log; facade accessor stays for dashboard JSON**
+
+The `wire <seq> <bytes>` debug line that Ping::loop fired at every slot completion (both the gap-stop drain and the main loop's tail-drain) was the production consumer that closed Open 5 in 6.0.19 — it gave `Link::bytesRecvdForMessage(baseSeq)` its first caller. The accessor is no longer latent, and the dashboard JSON path now reads it directly via the `AutoLink::bytesRecvdForMessage` facade forwarder. The per-slot log line was useful in development but pulled operator-facing noise at high ASYNC rates (it fired once per slot drain, every loop iteration, between the existing `echo` log and the head advance). Removed: both call sites in `Ping.h`, the comment that justified reading through `base_.comm_.` for the log, and the inverse-presence regression pins in `BytesRecvdForwardedToPingTest` (pin b/c/d inverted into a single "wire log absent" pin). The dashboard accessor stays — pin a (facade forwarder delegates to `link->bytesRecvdForMessage`) is unchanged. No protocol change. No build change.
+
+### What moved
+
+- `src/al/pingpong/Ping.h` — two `base_.log_.debug("Ping", "wire %u %u", ...)` call sites deleted (one in each slot-completion drain). The preceding 6-line comment block that described the wire-recvd log is dropped with the call.
+- `test/test_desktop/al/pingpong/BytesRecvdForwardedToPingTest.cpp` — Pins b (format string in two sites), c (reads from facade forwarder), and d (fires inside slot-drain loop) are merged into a single Pin b that asserts the `wire %u %u` format string and `bytesRecvdForMessage(` reference are both absent from `Ping::loop`. Pin a (facade forwarder delegates to `link->bytesRecvdForMessage`) is preserved unchanged — the dashboard JSON path still needs the accessor.
+- `include/AutoLink.h`, `library.properties`, `idf_component.yml`, `todo.md` — version bump `6.0.29 → 6.0.30` (AGENTS rule 3).
+
+### Why
+
+The wire-recvd line was added because the underlying accessor had no consumer — closing the "latent API" gap meant giving it a caller. With the dashboard JSON path serving that role exclusively, the log line became redundant: the operator-facing number for a slot is the local message length (already logged as `echo <seq> <msgBytes> <pending>`), and the wire-ACK sum is only useful for cross-checking transmission (a debugging concern, not an operator one). Per ASYNC TX rate the log fired dozens of times per second on the bench capture, drowning the surrounding state-change chatter.
+
+### Wire format
+
+Unchanged. This is a logging-only change.
+
+### Regression coverage
+
+- `BytesRecvdForwardedToPingTest::test_ping_wire_log_removed` (Pin b): asserts `wire %u %u` is absent anywhere in `Ping.h` and `bytesRecvdForMessage(` is not dereferenced inside `Ping::loop`. Pin a (facade forwarder still delegates to `link->bytesRecvdForMessage`) remains green. Toggling the log back on → red.
+- Existing `PingSendFailureTest` Pin 2 (echo log shape) is unaffected: the 1500-char tail window after each `echo %u %u %d` site still reaches the `head_ = (head_ + 1)` slot advance without the wire log between them.
+- Existing `LinkAckBytesTest`, `RxBytesWireAckTest`, `LinkBaseSeqTrackingTest`, and `LinkMessageRoundtripTest` are all wire-protocol coverage and are unaffected.
+
+### Disclosed limitations
+
+None. This is a logging-shape change only.
+
+### Result
+
+`62/62` host unit, `3/3` itest, `build/verify_build.sh` clean against `esp32:esp32@3.3.5`.
+---
+
+## v6.0.29
+
+**Bench triage: TX-backpressure deadlock (docs-only, no source change)**
+
+Docs-only triage of a fresh 512000/ASYNC bench capture — no `.cpp`/`.h`/`.ino`
+touched, protocol and build surface byte-identical to 6.0.28/6.0.27. The
+capture both confirms one 6.0.27 claim and exposes a new failure mode that the
+6.0.27 fix uncovered. **Confirmed:** the pre-6.0.27 `disc` cascade is gone —
+under a saturated ASYNC flood `disc` held at 0 on both peers through the entire
+run (old Open 1's disc sub-claim, retired). **New failure (now Open 1):** after
+a short CRC/desync burst on the receiver (Pong `frameErrs=3`, `errs` 0→5) the
+master wedges — `Ping send failed (backpressure) n=… arqPending=0` repeats every
+~1.5 s indefinitely, `tx` falls to 0 B/sec and stays there, echos freeze on both
+peers (Ping 2535, Pong 2532), and the link never resweeps. Root cause: the
+failed sends stall upstream of the ARQ pool (TX stream buffer / UART writer),
+so `arqPending` reads 0 and the master's `frameErrs` is 0; the symmetric idle
+watchdog (`LinkTimers.cpp:243`) no-ops on exactly `pendingCount()==0 &&
+frameErrs==0`, and the asymmetric stuck-send check (`LinkTimers.cpp:188`) only
+fires on `pendingCount() > 0`. A sender that is trying to send but cannot is
+indistinguishable from a clean idle link, so recovery never triggers. The
+6.0.27 Open 1 fix (remove Ping's `MAX_SEND_FAIL` self-disconnect) correctly
+stopped the disc cascade but left no other recovery path, converting the noisy
+cascade into a silent deadlock. `todo.md` is re-prioritised around this: the new
+deadlock is Open 1 (most important — a hang with no recovery outranks feature
+work), old Open 1's bench-confirm folds into it (disc part confirmed here,
+recovery part superseded), and heap/cadence/OTA follow.
+
+### What moved
+
+- `todo.md` — old Open 1 (bench-confirm the 6.0.27 cascade fix) retired: its
+  disc sub-claim is confirmed by this capture and recorded above; its
+  frameErrs/recovery sub-claim is superseded by the new deadlock finding. New
+  Open 1 is the TX-backpressure deadlock with root cause + host-pinnable fix
+  direction (watchdog needs a third input: sustained `sendMsg` backpressure
+  rejection distinguishable from quiet). Heap headroom → Open 2, re-lock cadence
+  → Open 3 (now cross-references item 1 — a deadlocked master never enters the
+  sweep), OTA → Open 4. Title and Verify footer updated.
+- `include/AutoLink.h` / `library.properties` / `idf_component.yml` —
+  `6.0.28 → 6.0.29` bump in lockstep (AGENTS rule 3).
+- `docs/Version.md` — this entry; `add` + `trim --keep 20` dropped the oldest
+  entry (v6.0.8) off the tail.
+
+### Wire format
+
+Unchanged. No source touched.
+
+### Regression test
+
+None added — docs-only, no behavior to pin. The new Open 1 fix, when it lands,
+gets a watchdog toggle test (drive `sendMsg` false on a full TX buffer with an
+empty ARQ pool; assert drop + resweep within the deadline). Host suite unchanged
+from 6.0.27 (`make test` 63/63, `make itest` 3/3) — not re-run this session.
+
+### Disclosed limitations
+
+- Standing cross-compile carry-over unchanged: `build/verify_build.sh` not
+  re-run in-sandbox (no `arduino-cli`). No source delta on top of 6.0.27, so
+  risk stays bounded to the already-disclosed surface; 6.0.22 last cleared the
+  build path end-to-end.
+- The new Open 1 is a live, unfixed deadlock. This release only documents it.
+  Items 2-3 remain FireBeetle-pair-only.
+
+### Result
+
+- No source touched; host suite unchanged from 6.0.27, not re-run (docs-only).
+- `python3 build/version.py check` green (20 entries, --keep=20).
+- `make assets_check` / `make test_coverage_manifest` unaffected — no dashboard
+  source, no new `TEST_BINS`.
+---
+
+## v6.0.28
+
+**Docs-only: todo.md re-prioritised, no source changes**
+
+Housekeeping pass on `todo.md` only — no `.cpp`/`.h`/`.ino` touched, protocol
+and build surface byte-identical to 6.0.27. The 6.0.27 release already closed
+Open 1–6 and left the Open list correctly trimmed to items 7–10; this entry
+re-numbers and re-orders that same four-item list most-important-first instead
+of release-chronological-first. The bench-confirmation item (re-flood and
+verify `frameErrs`/`disc` hold at 0 after the 6.0.27 source fix) moves to Open
+1 — it's the standing gate on whether the prior release's fix actually works
+on hardware, which outranks new feature work. Heap headroom (Open 2) and
+re-lock cadence (Open 3) keep their bench-only status. OTA (Open 4) drops to
+last: it's blocked on Open 2's buffer-sizing answer and is net-new feature
+work, not a regression. No item's content changed beyond renumbering and the
+cross-reference updates that follow from it.
+
+### What moved
+
+- `todo.md` — renumbered Open 7→1 (bench-confirm cascade fix), 8→2 (heap
+  headroom), 10→3 (re-lock cadence), 9→4 (OTA, reordered last since blocked on
+  item 2). Cross-references between items updated to match (item 4 now points
+  at item 2 for the heap-headroom block; item 1 now points at item 2 for the
+  baud-aware rx floor coupling). Title bumped to 6.0.28. Verify footer updated
+  to reference item 1 instead of "Open 9".
+- `include/AutoLink.h` / `library.properties` / `idf_component.yml` —
+  `6.0.27 → 6.0.28` bump in lockstep (AGENTS rule 3).
+- `docs/Version.md` — this entry; `add` + `trim --keep 20` dropped the oldest
+  entry off the tail.
+
+### Wire format
+
+Unchanged. No source touched.
+
+### Regression test
+
+None added — docs-only, no behavior to pin. Host suite is unchanged from
+6.0.27 (`make test` 63/63 unit, `make itest` 3/3) — not re-run this session.
+
+### Disclosed limitations
+
+- Standing cross-compile carry-over unchanged from 6.0.27:
+  `build/verify_build.sh` has not been re-run in-sandbox (no `arduino-cli`
+  in this environment). No source delta on top of 6.0.27, so risk stays
+  bounded to the already-disclosed 6.0.27 surface; the 6.0.22 cross-compile
+  last cleared the build path end-to-end.
+- Items 1 and 3 remain FireBeetle-pair-only and are not host-pinnable.
+
+### Result
+
+- No source touched; host suite unchanged from 6.0.27, not re-run this
+  session (docs-only).
+- `python3 build/version.py check` green (20 entries, --keep=20).
+- `make assets_check` / `make test_coverage_manifest` unaffected — no
+  dashboard source, no new `TEST_BINS`.
+---
+
+## v6.0.27
+
+**Close todo Open 1–6 (backpressure self-disconnect cascade, multi-chunk retx-slot reservation, RX wire-ACK byte counter, Pong post-settle drain, idle watchdog on clean link, gap-stall recovery)**
+
+Source-touching release that lands six host-pinnable Open items from `todo.md` together because they're the only ones this release can host-pin; the items form a single coherent fix surface — the ASYNC flood backpressure cascade — plus four adjacent receiver-side / watchdog fixes that the same bench log exposed. No wire-format change; the protocol, ARQ, framer, and seq-budget are byte-identical to 6.0.26. The dominant signature the prior triage releases logged was the Ping `MAX_SEND_FAIL` self-disconnect cascade: under a saturated ASYNC flood, the sender's ARQ cache fills, `sendMsg` returns false (real backpressure), `consecSendFail_` climbs 1→5, and `dropLink()` fires on a saturated pipe — the drop forces a resweep, the relock re-floods, and `disc` climbs 1→N on both peers forever. The deeper root was that the chunk-emit loop in `LinkApi` had only a per-message `hasRoom()` gate; multi-chunk sends still walked past the ARQ pool floor and emitted chunks with no retx slot reserved, so any early loss was unrecoverable. Open 3, 4, 5, 6 surfaced from the same bench log: Pong's pre-blink drain ran before the post-baud-switch line garbage landed (16 CRC rejects per relock); the symmetric idle watchdog fired on a clean idle link (resweep loop); a held gap whose missing `cobsSeq` never arrived pinned the rx window open forever; and a clean SYNC two-peer capture showed Ping's RX total at 0 because the wire-ACK reply path never bumped `rxBytes`. `todo.md` is re-prioritised with all six items closed and the remaining Open list now hardware-bench-only (OTA + bench items). `build/verify_build.sh` not run in-sandbox this session — the sandbox doesn't have `arduino-cli`; risk stays bounded to the touched build path (mostly the link layer and Ping/Pong, no dashboard changes; the cross-compile cleared at 6.0.22 last).
+
+### What moved
+
+- `src/al/pingpong/Ping.h` — Open 1 fix. The send-failure branch's `consecSendFail_++` bump and `MAX_SEND_FAIL` threshold check + `dropLink()` call are removed. The branch now logs the ARQ pending count (`base_.comm_.arqPendingCount()`, a new facade forwarder) instead of the local `count_` (the app echo queue, which reads 0 when the cache is what saturated), sets the `BACKPRESSURE_COOLDOWN_MS` cooldown stamp, and breaks. No escalation to dropLink: the link is its own recovery loop; Ping's job is to pace sends, not to second-guess the link layer's health model. The `consecSendFail_` field, the `MAX_SEND_FAIL = 5` constant, and the `consecSendFail_ = 0` resets are removed as dead state. The log line changes from `"send failed (backpressure) n=%d pending=%d consec=%lu"` to `"send failed (backpressure) n=%d arqPending=%d"` — the misleading `pending=0` reads on a saturated cache are gone. The link-not-OK guard (`if (!base_.comm_.ready()) { break; }`) is preserved from the 6.0.x split; the backpressure branch follows it.
+- `include/AutoLink.h` — `arqPendingCount() const` facade forwarder. Body delegates to `link->arqPendingCount()`. Lock-free contract matches `bytesRecvdFor`'s; the read window is a single `uint32` stamped inside the link task.
+- `src/al/link/Link.h` — `int arqPendingCount() const` accessor; body delegates to `arq_.pendingCount()`. Lives next to `peekTxSeq()` and the existing lock-free stats accessors.
+- `src/al/link/LinkApi.cpp` — Open 2 fix. The multi-chunk ASYNC send loop's chunk-emit now checks `arqCache_.hasRoom()` BEFORE each chunk goes out. On a full pool, `ok = false; break;` with a `sendMsg: ARQ cache exhausted mid-message (emitted %d/%d bytes) — partial send` warning. No chunk goes on the wire without a retx slot reserved; the per-message `hasRoom()` pre-check at the top of `sendMsg` covers the first message, the per-chunk check covers the rest of the burst. The two-stage guard means: (a) the first message of a pipeline bursts through (cache is fresh), (b) the burst stops when the cache floor is reached, (c) the caller's backpressure cooldown absorbs the partial. Pre-fix shape emitted all chunks regardless of cache state and logged `"pool exhausted … slot skipped (retx will be a cache miss)"` for chunks past the floor — those chunks were on the wire but unrecoverable on loss (the link's NAK handler does a cache lookup and finds nothing → `LinkArq` marks Drop → link reset → discCount climbs).
+- `src/al/link/LinkRx.cpp` — Open 4 fix. `onAck` now bumps `rxBytes += RX_ACK_WIRE_BYTES` (= 8: 5 raw ACK COBS-encodes to 6 bytes, wire adds leading 0x00 + trailing 0x00). `onNak` bumps `rxBytes += RX_NAK_WIRE_BYTES` (= 6: 3 raw NAK COBS-encodes to 4 bytes, wire adds 2). The mirror of v6.0.10 Fix 4 (outbound CTRL/ACK/NAK counted in `txBytes`). The pre-fix shape only counted bytes on the app-payload path (`hw.pushAppBuf` → `rxBytes += n`), so a Ping whose peer only emits wire ACKs (the PingPong protocol) saw `rxBytes` stuck at 0 forever — the bench capture exposed this as `RX 0 B/s, total 0 B` on a healthy locked link. The new constants are defined in `LinkContext.h` alongside `MAX_CHUNK` and `MSG_HDR`.
+- `src/al/link/LinkContext.h` — `RX_ACK_WIRE_BYTES = 8` and `RX_NAK_WIRE_BYTES = 6` constants. Single source of truth with the rest of the wire-protocol shape so a future ACK/NAK frame change has one place to update.
+- `src/al/pingpong/Pong.h` — Open 3 fix (drain timing). The `!wasReady_` branch no longer drains BEFORE `blinkWait(4)`. The pre-fix shape ran the drain first; the baud switch from the SWP→OK transition pushed line garbage onto the rx stream AFTER the drain (the drain saw nothing — the bench log shows `drained 0 stale bytes pre-blink`), so the next `recv()` failed CRC and the bench log saw 16 Pong-app rejects per relock. Post-fix: `blinkWait(4)` first (the 4-blink settling indicator takes ~480 ms wall time; the next loop iteration is well after the baud switch is stable), `wasReady_ = true`, `tReady_ = millis()`, return. The post-settle drain runs on the NEXT iteration after `SETTLE_MS = 500`, by which time the line garbage has landed. The log line changes from `"drained %d stale bytes pre-blink"` to `"drained %d stale bytes post-settle"` so the operator can tell what happened.
+- `src/al/pingpong/Pong.h` — Open 3 fix (counter reconcile). The recv-rejected (got<0) log line now includes the link-layer's `frameErrs` counter via `getStats(s)`: `"recv rejected (CRC/desync)  ackCount=%lu  frameErrs=%lu"`. The pre-fix shape only logged `ackCount`; the bench log showed 16 app-level rejects vs. 3 wire-level `frameErrs`, and operators had to correlate the two numbers by hand. Logging them in the same line resolves the mismatch — a single CRC failure produces one `frameErrs` bump and one `errs` bump in `Link::err_unlocked()` (`LinkApi.cpp:46-47`) but can produce multiple app-level rejects (each subsequent `recv()` on a still-corrupt stream returns negative), so the two numbers are different by construction; co-locating them surfaces the relationship.
+- `src/al/link/LinkTimers.cpp` — Open 5 fix. The symmetric idle watchdog (the `rxAge > idleTimeoutMs && txAge > idleTimeoutMs` check in `onTimerOk_unlocked`) is now a no-op when `arq_.pendingCount() == 0 && frameErrs == 0`. Pre-fix shape unconditionally dropped the link on a fully quiet past `idleTimeoutMs`; the bench log showed the watchdog firing on a clean loopback whose last activity was a heartbeat many seconds old, triggering resweeps on a healthy link. The post-fix contract: "quiet is fine" — only drop when there's an actual reason to suspect the link. The asymmetric "stuck send" check (TX active, RX silent) above is unchanged and still fires on `arq_.pendingCount() > 0 && rxAge > FAST_IDLE_RX_MS && txAge < FAST_IDLE_TX_MS`; the symmetric watchdog's drop log line now includes the `arqPending` count and `frameErrs` total for operator correlation.
+- `src/al/link/LinkReorder.{h,cpp}` + `src/al/link/LinkRx.cpp` + `src/al/link/LinkTimers.cpp` — Open 6 fix. `LinkReorder::dropExpired` now takes an out-array of dropped seqs; the Link callers advance `rxSeq` past each one via `reorderAdvanceRxSeq(gap)`. Pre-fix shape: `dropExpired` released the slot and bumped `lostMsgs` but left `rxSeq` pinned at the gap's expected position; the contiguous-resume logic in `flushContiguous` looked up `slots_[exp]` and broke on `in_use==false` — a held gap whose missing `cobsSeq` never arrived pinned the rx window open forever, the receiver gap-stop NAKed the same missing seq indefinitely, and a clean retransmit that arrived after `reorderHoldMs` was silently rejected as stale (the rx seq never moved). Post-fix: `dropExpired` returns the set of dropped seqs; the Link advances `rxSeq` for each one; the next `onPayload` lands in the right slot, `flushContiguous` can resume, and the receiver's gap-stop NAK doesn't loop on the same missing seq. `lostMsgs` bumps per dropped slot for honest per-gap accounting.
+- `src/al/pingpong/Ping.h` — pre-existing `consecSendFail_` field, `MAX_SEND_FAIL = 5` constant, and the `consecSendFail_ = 0` resets (in `setup`, `!wasReady_`, send-success branch, `setPaused`, `clearQueue_`) are removed as dead state after the Open 1 fix. The comment block above `BACKPRESSURE_COOLDOWN_MS = 1000` is rewritten to reflect the new contract (no escalation to drop on backpressure; cooldown is the throttle).
+- `test/test_desktop/al/pingpong/PingSendFailureTest.cpp` — Pin 3 rewritten: was `test_ping_consec_send_fail_counter` (asserted the bump + threshold check + dropLink + reset); is now `test_ping_backpressure_does_not_drop_link` (asserts NO `consecSendFail_++` bump, NO `MAX_SEND_FAIL` threshold, NO `dropLink` in the backpressure branch, the cooldown stamp IS set, and the diagnostic log line reads `arqPendingCount()` not `count_`). Pin 7 renamed and tightened: was `test_ping_send_fail_splits_link_not_ok_from_backpressure` (asserted the link-not-OK guard precedes the consecSendFail bump); is now `test_ping_send_fail_guards_on_link_not_ok` (asserts the link-not-OK guard precedes the backpressure log line and the cooldown stamp — the guard is a true early-return with no side effects). Pin 3 (echo log format) window was 400 chars in 6.0.19, 1500 in 6.0.19's tail-window widening — unchanged here.
+- `test/test_desktop/al/link/ModeSyncAsyncFixesTest.cpp` — Pin 5b (Ping backpressure 1000 ms cooldown) was locating the cooldown assignment via `src.find("consecSendFail_++")`. With Open 1's bump removal, the pin's anchor changes to `src.find("send failed (backpressure)")` (the backpressure branch's first action after the link-not-OK early-return). The 2000-char window after the anchor still covers the cooldown assignment.
+- `test/test_desktop/al/link/LinkMtuRoundtripTest.cpp` — Pin 4 rewritten. The pre-this-fix shape documented and tested that the 32 KB ASYNC send with production `ArqCache` (POOL_SIZE=64) succeeded end-to-end despite the cache-floor skip emitting un-ACKable chunks; the test relied on 0% drop to keep `pendingCount_` from saturating. The Open 2 fix makes the cache-floor skip a stop-and-fail instead. Post-fix contract: `sendMsg(tx, 32768)` with POOL_SIZE=64 returns `false` (chunks 1..240 go out cleanly, chunk 241 hits the per-chunk `hasRoom()` guard at `arqCache_.hasRoom()` returns false, `ok=false; break;`). The pin now asserts `sent == false` and pumps the receiver to verify `cacheA.count == 0` after the partial send drains (every emitted chunk had its retx slot reserved and ACKed; no orphan un-ACKed chunks left behind).
+- `test/test_desktop/al/link/LinkMessageRoundtripTest.cpp` — `test_message_chunk_boundary_carries_then_rejects` rewritten. The pre-this-fix shape tested 240-chunk-cap boundary with the production `ArqCache`; the post-fix contract is the same cap boundary but the failure mode changes from "240-chunk carries, 241st rejected by ARQ cap gate" to "cap-boundary sends reject before emitting un-retxable chunks; under-cap messages round-trip end-to-end". The pin sends an over-cap payload (CAP*250 bytes → 240 data + 1 hdr = 241 chunks, exceeds CAP=240) and asserts `sent == false`, then drains to verify `cacheA.count == 0` (no orphan chunks).
+- `test/test_desktop/al/link/RxBytesWireAckTest.cpp` — new file, Open 4 host pin. Four pins: (1) `onAck` bumps `rxBytes` by `RX_ACK_WIRE_BYTES` (8) per inbound ACK; (2) `onNak` bumps `rxBytes` by `RX_NAK_WIRE_BYTES` (6) per inbound NAK; (3) the `RX_*_WIRE_BYTES` constants live in `LinkContext.h` (single source of truth alongside `MAX_CHUNK` and `MSG_HDR`) and `LinkRx.cpp` references them by name; (4) wire-ACK-only reply path bumps `rxBytes` end-to-end (WireSim loopback: Pong emits wire ACKs but no app echo; Ping's RX counter advances).
+- `test/test_desktop/al/pingpong/PingPongLogHygieneTest.cpp` — new pin `test_pong_post_settle_drain_and_frame_errs_in_log` for Open 3: (a) Pong's drain log line uses "drained %d stale bytes post-settle" (the post-fix wording; pre-fix "drained %d stale bytes pre-blink" would trip); (b) Pong's recv-rejected log line includes "frameErrs=%lu" and the branch calls `getStats` to read the counter from the link layer.
+- `test/test_desktop/al/link/LinkErrorTest.cpp` — two sub-tests in `test_error_counter_link_failures` that exercised the idle watchdog's drop path now stage a pending ARQ slot via `LinkTestAccessor::markAckedPending(0x42)` so the asymmetric-idle check (which still fires on `arqPending>0`) does the drop. The pre-this-fix shape relied on the symmetric watchdog's unconditional drop; the post-fix contract is "watchdog only drops when there's a reason".
+- `test/test_desktop/al/ClockInjectionTest.cpp` — `test_idle_timeout_drops_link` rewritten. The pre-this-fix shape asserted `dropA + dropB == 2` (both nodes dropped after 5500 ms quiet); the post-fix contract is "clean idle link: no drops, watchdog is a no-op without pending ARQ or recent errors" → `dropA + dropB == 0`. The existing test name was already "symmetric idle does NOT drop"; the assertion now matches. `test_idle_watchdog_combined_tx_rx_v5_1_54` similarly updated: `dropA + dropB == 0`.
+- `test/test_desktop/al/link/sweep/LinkSweepPhaseTest.cpp` — `test_v531_heartbeat_miss_drops_quickly` now stages a pending ARQ slot before pumping past `idleTimeoutMs`. The pre-this-fix shape relied on the symmetric watchdog's drop; post-fix the asymmetric check (`rxAge > FAST_IDLE_RX_MS, txAge < FAST_IDLE_TX_MS, arqPending > 0`) does the drop within 10 ticks.
+- `test/test_desktop/al/link/LinkCobsSeqTest.cpp` — `test_lost_msgs_burst_vs_single` second sub-test (the `cfg2.reorderHoldMs = 0` case) updated for the Open 6 contract. Pre-this-fix shape: 3 gaps, 2 lost (frames 4 and 5 held; frame 7 held; rxSeq stays pinned). Post-fix: dropExpired at the top of every onPayload empties the held slots; rxSeq advances past each dropped gap; gaps collapse to 2 (only the original gap, the slot 4 expiry is logged as lost not as a new gap), lostMsgs=1 (only slot 4 expires; slot 5 was never held because frame 5 is Contiguous after the rxSeq advance, not a gap).
+- `test/test_desktop/al/link/LinkReorderTest.cpp` — new pin `test_gap_expired_advances_rx_seq` for Open 6: drive frame 0 (deliver, rxSeq=0), frame 4 (gap, hold slot 4, rxSeq stays 0), then frame 5 with `reorderHoldMs=0` so slot 4 expires on this onRx call. Assert `gaps=1, lostMsgs=1, rxSeq=5` and `!reorderSlotInUse(4)` — the dropped gap advances the window; pre-fix pinned rxSeq=0 forever.
+- `test/common/LinkTestAccessor.h` — new `utilFrameRxFeed(data, len)` accessor that drives `Link::frameRx.feed` directly. Used by `RxBytesWireAckTest` to inject synthetic ACK/NAK frames into the framer's dispatch without going through a full sender/receiver round-trip.
+- `test/test_desktop/Makefile` — `run_test_rx_bytes_wire_ack` added to `TEST_BINS`, the per-suite build/run target lists, and the `test_rx_bytes_wire_ack` short target.
+- `include/AutoLink.h` / `library.properties` / `idf_component.yml` — `6.0.26 → 6.0.27` bump in lockstep (AGENTS rule 3).
+- `docs/Version.md` — this entry; `add` + `trim --keep 20` dropped v6.0.6 off the tail.
+- `todo.md` — Open 1–6 closed. Remaining Open list: 7 (OTA firmware + GUI upload, slots reserved), 8 (ASYNC heap headroom), 9 (ASYNC flood frameErrs/disc=0 — CONFIRMED FAILING, re-test after Open 1+2), 10 (re-lock cadence symmetry + sweep walk-down). Title bumped to 6.0.27.
+
+### Wire format
+
+Unchanged. The Open 1+2 fixes are sender-side ARQ pacing and chunk-emit reservation, not a wire change. The Open 4 fix adds inbound wire-byte accounting that mirrors what the wire already does (the v6.0.10 outbound counter was already counting `txBytes += el + 2` for ACK/NAK frames; this is the inbound mirror). The Open 3+5+6 fixes are link-state machine behaviour changes (drain timing, watchdog gate, gap-stall advance) that don't alter the on-wire shape. Same framer shape, COBS encap, `MAX_CHUNK = 250`, `MSG_HDR = 6`, `POOL_SIZE = 64`, window 32, seq-space 254.
+
+### Regression test
+
+- `run_test_ping_send_failure` — Pin 3 (backpressure does NOT escalate to dropLink): the new contract asserts the backpressure branch has no `consecSendFail_++`, no `MAX_SEND_FAIL` threshold check, no `dropLink()` call; the cooldown stamp IS set; the diagnostic line reads `arqPendingCount()` not `count_`. Pin 7 (link-not-OK guard): the `ready()` check precedes the backpressure log line and the cooldown stamp so the link-not-OK path is a true early-return with no side effects. Both pins toggle red if the source reverts to the pre-this-release shape (re-add the bump + threshold + dropLink in Pin 3; remove or move the ready() guard in Pin 7).
+- `run_test_mode_sync_async_fixes` Pin 5b — the cooldown 1000 ms gate is independent of `txDelayMs`; fires regardless of user pacing. The anchor for the post-fix cooldown assignment is `src.find("send failed (backpressure)")`; reverting the log line to the pre-fix `pending=%d` text or moving the cooldown stamp out of the backpressure branch trips the pin.
+- `run_test_mtu_roundtrip` Pin 4 — 32 KB ASYNC send with production `ArqCache` (POOL_SIZE=64) returns `false` at the per-chunk `hasRoom()` guard (after emitting 240 chunks). Pre-fix shape asserted `sent == true`; the post-fix `sent == false` and `cacheA.count == 0` after drain are the new contract.
+- `run_test_alink_message_roundtrip` — the chunk-boundary test now sends a `CAP*250` byte payload against `TestCache{CAP=240}` and asserts the send is rejected (the cap-boundary payload exceeds the cache-floor). After draining, `cacheA.count == 0` proves every emitted chunk had its retx slot reserved.
+- `run_test_rx_bytes_wire_ack` (new) — Pin 1: `onAck` bumps `rxBytes` by `RX_ACK_WIRE_BYTES` (8). Pin 2: `onNak` bumps `rxBytes` by `RX_NAK_WIRE_BYTES` (6). Pin 3: constants defined in `LinkContext.h`, referenced by name in `LinkRx.cpp`. Pin 4: WireSim loopback ACK-only reply path → receiver `rxBytes > 0`. All four pins toggle red if the inbound count is reverted (Pin 1/2), the constants are moved out of `LinkContext.h` (Pin 3), or the facade accessor is removed (Pin 4).
+- `run_test_pingpong_log_hygiene` — new pin `test_pong_post_settle_drain_and_frame_errs_in_log`: the drain log line uses "post-settle"; the recv-rejected branch includes `frameErrs=%lu` and calls `getStats`. Pre-fix "pre-blink" wording trips Pin (a); missing `frameErrs` field trips Pin (b).
+- `run_test_alink_error` + `run_test_clock_injection` + `run_test_alink_sweep_phase` — the three idle-watchdog-touching tests now stage a pending ARQ slot (`LinkTestAccessor::markAckedPending(0x42)`) before pumping past `idleTimeoutMs`. Pre-this-fix shape relied on the symmetric watchdog's unconditional drop; the post-fix asymmetric check (`arqPending > 0`) is what fires the drop now. The assertions on `discCount` and state transitions stay the same; only the staging changes. Without the staging, the watchdog is a no-op on a clean idle link and the assertions would fail.
+- `run_test_alink_cobsseq` — `test_lost_msgs_burst_vs_single` second sub-test updates for the Open 6 contract. With `reorderHoldMs=0`, frames 4 and 5 (originally both held) now have slot 4 expire when frame 5 arrives (rxSeq advances past the dropped gap); the held-slot count is 1 (slot 4 only), lostMsgs=1, gaps=2 (only the original frame-4 gap).
+- `run_test_linkreorder` — new pin `test_gap_expired_advances_rx_seq`: drive frame 0 (deliver), frame 4 (gap, hold), then frame 5 with `reorderHoldMs=0` so slot 4 expires. Assert `gaps=1, lostMsgs=1, rxSeq=5, !reorderSlotInUse(4)`. Pre-fix shape would assert `gaps=1, lostMsgs=0, rxSeq=0` (window pinned).
+- `run_test_ack_bytes` — unchanged. The pre-existing extended-ACK frame shape (5-byte raw with bytes-recvd) and `bytesRecvdFor(seq)` accessor pins stay green; the `RX_ACK_WIRE_BYTES = 8` constant is consistent with the 5-byte raw ACK COBS-encoded + 2 framing bytes.
+- Existing pins preserved: `run_test_uri_handler_alignment` (12-handler / 12-cap, unchanged), `run_test_handle_root_chunked` (root handler chunked encoding, unchanged), `run_test_base_seq_tracking` (5 pins on base-seq accessor + walk loop, unchanged), `run_test_pingpong_structure` (Ping/Pong role shapes, unchanged), `run_test_ping_gap_transition` (Ping gap-stop transition table, unchanged), `run_test_esphal_*` (EspHal stream buffer / health, unchanged), `run_test_seq_space_guard` (seq-space exhaustion, unchanged), `run_test_mtu_roundtrip` Pins 1/2/3 (multi-chunk round-trip 32 KB and boundary sizes, unchanged — Pin 4 is the only one rewritten).
+
+### Disclosed limitations
+
+- The chunk-emit-level in-flight bound (Open 2) is a real protocol constraint: a multi-chunk ASYNC send whose chunk count exceeds the ARQ pool floor will now FAIL where it previously silently emitted un-ACKable chunks. This means a Ping user who configures a `maxMsg` near the MTU and runs in ASYNC mode with a saturated pipe will see legitimate sends fail with the backpressure cooldown. The fix is correct (the pre-fix shape was unreliable on loss); the caller-side mitigation is to either pipeline shorter messages or wait for the cache to drain. The 32 KB `LinkMtuRoundtripTest` Pin 4 case is the canonical example of this constraint.
+- The Pong pre-blink → post-settle drain timing change (Open 3) means Pong's first post-recovery `loop()` iteration returns without doing recv-side work (the SETTLE_MS=500 wait). On a fast loop this is a sub-ms delay per recovery; on a FreeRTOS task running at 100 Hz it's 10 ms. Operators watching the pong-side "first-ack-after-recovery" timing will see a ~500 ms gap; this is the price of draining garbage that the post-baud-switch line pushed onto the rx stream.
+- The symmetric idle watchdog's new contract (Open 5) is "no drop without reason" — but "no reason" includes the case where the peer has been quietly disconnected for >`idleTimeoutMs` seconds (no UART activity at all because the cable is unplugged). The link stays in OK state until either the peer reconnects (which generates activity) or the application pings the link via a manual `kickoff()` / `setLinkPaused(false)` cycle. The asymmetric "stuck send" check still catches the "I'm sending but not hearing" case (gated on `arqPending > 0`); a passive app that doesn't generate ARQ traffic won't get any watchdog signal of a fully-quiet peer. This is the trade-off: a watchdog that fires on a healthy quiet link is worse than a watchdog that misses a fully-quiet peer (the relock on resweep will catch it).
+- The gap-stall recovery (Open 6) advances `rxSeq` past an expired held gap; this is correct behaviour but it means a receiver that loses a chunk AND the retransmit (both missing) will see the chunk as "lost" rather than waiting forever. The pre-fix shape waited forever and NAKed indefinitely — also wrong, but in a different direction. Operators reading `lostMsgs` should note that an Open-6-recovered gap bumps `lostMsgs` by 1 (one missing chunk counted as lost) and the rx window resumes; pre-fix would have shown `lostMsgs=0` (no loss counted) but a permanent hang.
+- The RX byte counter (Open 4) now counts inbound wire-ACK/NAK bytes; a Pin role node that previously showed `RX 0 B/s, total 0 B` on a healthy link will now show `RX ~ Ping's wire-ACK receive rate`. Operators reading the dashboard RX total should note that on a Ping-role node it now means "wire bytes received" (matches the existing `txBytes` semantics post-6.0.10), not "app payload delivered". For Pong-role nodes the value is essentially the same as before (Pong does receive app payloads, so app + wire = same accounting up to a small offset).
+- Standing cross-compile carry-over: `build/verify_build.sh` not re-run in-sandbox this session (sandbox doesn't have `arduino-cli`). The fix surface is the link layer + Ping/Pong + the facade forwarder, no dashboard changes; the 6.0.22 cross-compile last cleared the build path at 1027671 / 79320 bytes. The touched source is mostly `.cpp` and a small set of `.h` headers; a fresh cross-compile should run clean on a longer-lived environment. AGENTS rule 4 carry-over discharged for 6.0.27 once `verify_build.sh` runs end-to-end in a sandbox with the ESP32 toolchain.
+- Open 7 (OTA firmware + GUI upload) stays Open — slots r10/r11 reserved with 503 stubs since 6.0.22, no implementation this release. Open 8 (ASYNC heap headroom), 9 (flood frameErrs/disc=0 — CONFIRMED FAILING in the prior triage; expected to flip GREEN once this release's bench re-test runs against the Open 1+2 fixes), and 10 (re-lock cadence symmetry + sweep walk-down) stay Open as hardware-bench-only items. They require the FireBeetle pair and WireSim can't catch any of them (byte-exact and untimed).
+
+### Result
+
+- `make test` 63/63 unit suites pass (wall ~7 s). New suite `run_test_rx_bytes_wire_ack`; updated pins in `run_test_ping_send_failure`, `run_test_mode_sync_async_fixes`, `run_test_mtu_roundtrip`, `run_test_alink_message_roundtrip`, `run_test_pingpong_log_hygiene`, `run_test_alink_error`, `run_test_clock_injection`, `run_test_alink_sweep_phase`, `run_test_alink_cobsseq`, `run_test_linkreorder`. New source-grep-only suite added to the manifest exempt list.
+- `make itest` 3/3 host integration suites (loopback / loopback_noise / loopback_sync) unchanged from 6.0.26.
+- `make assets_check` PASS — no dashboard source touched, `AutoLinkWebHtml.h` byte contract unchanged.
+- `make test_coverage_manifest` PASS — `run_test_rx_bytes_wire_ack` added to the source-grep-only exempt tuple (it's a source-grep + runtime-mixed suite and doesn't link `$(AUTOLINK_SRC)`).
+- `python3 build/pretty_print.py` clean reformat on every touched file.
+- `python3 build/version.py check` green (20 entries, --keep=20; this entry pushed v6.0.6 off the tail).
+- `build/verify_build.sh` not run in-sandbox — see Disclosed limitations.
+
+### Verification artifacts
+
+- `make test` wall: ~7 s (63 unit suites including the new RxBytesWireAckTest).
+- `make itest` wall: unchanged from 6.0.22 (~40 s for the three integration suites).
+- Combined host wall: ~47 s.
+- Peak RSS: unchanged from 6.0.22 (~89 KiB largest single-suite resident set).
+- Cross-compile wall: not run this session.
+---
+
+## v6.0.26
+
+**Bench-image triage: Ping RX reads 0 (wire-ACK frames uncounted)**
+
+Triage of a clean two-peer dashboard capture (2026-06-30, Ping 10.10.10.29 / Pong 10.10.10.39, both SYNC, both locked 512000, both state OK, 0 errors / 0 lost / 0 frameErrs, txDelay=100 — a healthy paced run, not a flood). The capture exposes a stats-accuracy defect the flood logs masked: Ping reports `RX 0 B/s, total 0 B` while it is actively matching echoes (the `Ping echo` counter climbs 742→744) and the peer reports `TX total 13.4 KB`. Root cause: `rxBytes` (→ `Stats.rx` → dashboard RX total) is only incremented on the delivered-application-payload path (`hw.pushAppBuf`, `LinkRx.cpp:210,222,273`). In the PingPong protocol Pong does NOT echo a payload back — its reply is a wire-level ACK frame (`Ping.h:1-26`) consumed by the ARQ `waitForAck` path, not by `recvMsg`. Ping therefore never delivers an app message and its RX total stays 0 forever, even though its UART is continuously receiving ACK frames. Those inbound ACK/NAK frames are decoded in `UtilFrameRx::feed` and dispatched to `onAck`/`onNak` (`LinkFrameRx.cpp:30,39,42`; `LinkRx.cpp:300,312`), neither of which touches `rxBytes`. This is the missing mirror of the v6.0.10 Fix 4, which added outbound CTRL/ACK/NAK counting to `txBytes` (the reason Pong's TX is nonzero); the inbound side was never given the symmetric counter. `todo.md` adds this as new Open 4 (RX byte counter ignores wire-ACK/CTRL frames) with the fix — bump `rxBytes` by the decoded frame length for received ACK/NAK/CTRL frames — and a host pin (loopback ACK-only reply → receiver `rxBytes > 0`). The flood/desync items renumber: idle-watchdog → Open 5, gap-stall → Open 6, OTA → Open 7, bench items → 8–10 (re-lock cadence + sweep walk-down stay folded into 10). No completed items remained in `todo.md` to move out — the prior triage releases already re-filed everything still Open — so this pass only adds the new item and re-prioritises. `docs/Version.md` is trimmed to 20 entries (oldest, v6.0.5, dropped).
+
+### What moved
+
+- `todo.md` — new Open 4 (RX byte counter omits wire-ACK/NAK/CTRL frames → Ping RX reads 0; confirmed this clean SYNC capture; call sites `LinkRx.cpp:210,222,273` for the existing payload path and `LinkFrameRx.cpp:30,39,42` / `LinkRx.cpp:300,312` for the uncounted ACK/NAK path; fix is the symmetric inbound counter to v6.0.10 Fix 4). Flood items 1–3 unchanged; idle-watchdog → 5, gap-stall → 6, OTA → 7; bench items → 8–10. Verify footer notes items 1–6 add new host pins. Title bumped to 6.0.26.
+- `docs/Version.md` — this entry; `add` + `trim --keep 20` dropped v6.0.5 off the tail.
+- `include/AutoLink.h` / `library.properties` / `idf_component.yml` — `6.0.25 → 6.0.26` bump in lockstep (AGENTS rule 3).
+
+### Wire format
+
+Unchanged. No `.cpp` / `.h` / `.ino` touched. Same framer shape, COBS encap, `MAX_CHUNK = 250`, `MSG_HDR = 6`, `POOL_SIZE = 64`, window 32, and seq-space budget as 6.0.25. This entry triages the defect into todo.md; it does not fix it.
+
+### Regression test
+
+None added — docs-only, no behavior to pin. The new Open 4 carries its host pin to write when the code lands: a loopback whose reply path is wire-ACK-only, asserting the receiver's `rxBytes > 0` (and reverting the inbound-count addition turns it red). The host suite is the gate and is identical to 6.0.25: `make test` 62/62 unit, `make itest` 3/3.
+
+### Limitations
+
+- The RX-counter fix (todo Open 4) stays Open — this release only triages it. Once it lands, the dashboard RX total on a Ping-role node will reflect inbound ACK/NAK wire bytes rather than reading a flat 0; operators reading RX as "app payload delivered" should note the counter then means "wire bytes received", matching the existing `txBytes` semantics post-6.0.10.
+- The flood cascade (todo Open 1–3, 5, 6) stays Open. The 503 OTA stubs and reserved r10/r11 slots are unchanged from 6.0.22.
+- Standing cross-compile carry-over: `build/verify_build.sh` was not re-run for 6.0.26 (no source delta on top of 6.0.25; the 6.0.22 cross-compile last cleared the build path at 1027671 / 79320 bytes). Risk stays bounded to the unchanged build path.
+- The capture is hardware; items 8–10 remain FireBeetle-pair-only and are not host-pinnable.
+
+### Result
+
+- No source touched; the host suite is unchanged from 6.0.25 (`make test` 62/62 unit, `make itest` 3/3) — not re-run this session (docs-only).
+- `python3 build/version.py check` expected green (20 entries, --keep=20).
+- `make assets_check` / `make test_coverage_manifest` unaffected — no dashboard source, no new TEST_BINS.
+---
+
+## v6.0.25
+
+**Bench-log triage: Ping MAX_SEND_FAIL self-disconnect cascade**
+
+Triage of a second FireBeetle-pair bench capture (2026-06-30, ASYNC, txDelay=0, random fill, locked 512000) that reproduces a *different, cleaner* self-disconnect signature than the 6.0.24 capture. No source, wire-format, build-surface, or test-behavior change — the protocol, ARQ, framing, and seq budget are byte-for-byte identical to 6.0.24. This log shows no `pending=73` / pool-exhaust / `gap stop missing seq=9` path; instead the flood saturates the ARQ cache, `sendMsg` returns false (real backpressure), Ping's `consecSendFail_` counter climbs 1→5 — one per `BACKPRESSURE_COOLDOWN_MS` window — and `Ping.h:372` fires `dropLink()` (`send failed 5 times — dropping link`). The drop forces a resweep, the relock re-floods, and the loop repeats: `disc` climbs 1→6 on both peers and the link never recovers. The `pending=%d` field in the backpressure log is Ping's app echo queue (`count_`), not `arq_.pendingCount()`, so it reads `pending=0` while the ARQ cache is full — masking the cause. The Pong side adds 16 `recv rejected (CRC/desync)` on every 512000 relock (the `drained 0 stale bytes pre-blink` drain runs before the post-baud-switch line garbage arrives). `todo.md` is re-prioritised most-important-first: the Ping `MAX_SEND_FAIL` self-disconnect becomes Open 1 (the proven dominant signature, `Ping.h:372,378`), the chunk-emit-level in-flight bound drops to Open 2 as the deeper root, a new Open 3 captures the Pong stale-byte CRC rejects + the `errs=3`-vs-16-logged stats discrepancy, the idle-watchdog and gap-stall items move to Open 4/5, OTA to Open 6, and the bench items renumber 7–9 (re-lock cadence + sweep walk-down fold into 9).
+
+### What moved
+
+- `todo.md` — reordered most-important-first. New Open 1 (Ping `MAX_SEND_FAIL` self-disconnect on sender backpressure, `Ping.h:371,372,378`, plus the misleading `pending=%d`-logs-`count_` line at `Ping.h:345`), Open 2 (chunk-emit-level in-flight bound, `LinkApi.cpp:247`), Open 3 (Pong stale-byte CRC rejects, `Pong.h:80,109`, + `errs` vs `frameErrs` stats reconcile, `LinkApi.cpp:47`). Idle-watchdog → Open 4 (`LinkTimers.cpp:208,181`), gap-stall → Open 5 (`LinkRx.cpp:187` / `LinkTimers.cpp:142`), OTA → Open 6. Bench items renumbered 7–9; item 8 (flood frameErrs/disc=0) stays CONFIRMED FAILING with this fresh reproduction; item 9 folds the re-lock cadence asymmetry and sweep walk-down together. Verify footer notes items 1–5 add new host pins. Title bumped to 6.0.25.
+- `docs/Version.md` — this entry; `add` + `trim --keep 20` dropped the oldest entry off the tail.
+- `include/AutoLink.h` / `library.properties` / `idf_component.yml` — `6.0.24 → 6.0.25` bump in lockstep (AGENTS rule 3).
+
+### Wire format
+
+Unchanged. No `.cpp` / `.h` / `.ino` touched. Same framer shape, COBS encap, `MAX_CHUNK = 250`, `MSG_HDR = 6`, `POOL_SIZE = 64`, window 32, and seq-space budget as 6.0.24. This entry triages the defect into todo.md; it does not fix it.
+
+### Regression test
+
+None added — docs-only, no behavior to pin. The fixes themselves (todo Open 1–5) each carry a host pin to write when the code lands: a window-ceiling loopback asserting a saturated send pipe yields `sendMsg==false` + cooldown but `discCount == 0` and no resweep; a window-ceiling loopback with one induced in-window loss asserting a cache hit; a Pong recv-path pin for the post-baud-switch drain timing; an idle-past-`idleTimeoutMs` loopback asserting `discCount == 0`; and a `LinkReorder` table test for stepping over an unfillable hole. The host suite is the gate and is identical to 6.0.24: `make test` 62/62 unit, `make itest` 3/3.
+
+### Limitations
+
+- The cascade (todo Open 1–5) stays Open — this release only triages it. The 503 OTA stubs and reserved r10/r11 slots are unchanged from 6.0.22.
+- Standing cross-compile carry-over: `build/verify_build.sh` was not re-run for 6.0.25 (no source delta on top of 6.0.24; the 6.0.22 cross-compile last cleared the build path at 1027671 / 79320 bytes). Risk stays bounded to the unchanged build path.
+- The bench log is hardware-captured; items 7–9 remain FireBeetle-pair-only and are not host-pinnable.
+
+### Result
+
+- No source touched; the host suite is unchanged from 6.0.24 (`make test` 62/62 unit, `make itest` 3/3) — not re-run this session (docs-only).
+- `python3 build/version.py check` expected green (20 entries, --keep=20).
+- `make assets_check` / `make test_coverage_manifest` unaffected — no dashboard source, no new TEST_BINS.
+---
+
+## v6.0.24
+
+**Bench-log triage: ASYNC flood self-disconnect cascade triaged into todo.md (docs only)**
+
+Triage of a FireBeetle-pair bench capture (2026-06-30, ASYNC, txDelay=0, locked 512000) that reproduces a self-inflicted disconnect cascade. No source, wire-format, build-surface, or test-behavior change — the protocol, ARQ, framing, and seq budget are byte-for-byte identical to 6.0.23. The log shows the flood driving `arq_.pendingCount()` to 73, past the ARQ cache floor (`POOL_SIZE = 64`): `cobsSeq 73..81` log "pool exhausted … slot skipped (retx will be a cache miss)", i.e. those chunks went on the wire un-retransmittable. An early loss (`seq=9`) then can never be resent, the receiver stalls in reorder (`GAP seq=10 exp=9` … `diff=73`), `Ping gap stop: missing seq=9` pauses sending, and the `POOL_EXHAUST_DROP_PENDING = 1` backstop tears the link — `disc` climbs 1→7. After the app pauses, the symmetric idle watchdog then loop-resweeps the clean locked link every 10 s. `todo.md` is re-prioritised most-important-first with three new host-pinnable Open items distilled from this (chunk-emit-level in-flight bound, no-resweep-on-sender-cache-full, idle-watchdog no-op on a clean quiet link, plus a receiver gap-stall recovery hardening); OTA drops from Open 1 to Open 4; bench item "flood frameErrs/disc=0" is reclassified from pending to CONFIRMED FAILING with this reproduction; sweep walk-down absorbs the observed master/slave cadence asymmetry.
+
+### What moved
+
+- `todo.md` — reordered most-important-first. New Open 1 (flood self-disconnect: chunk-emit-level in-flight bound + stop resweeping on sender cache-full, with the exact log evidence and `LinkApi.cpp:247` / `LinkTimers.cpp:67,248,263` call sites), Open 2 (idle-watchdog resweep loop, `LinkTimers.cpp:208`), Open 3 (receiver gap-stall recovery, `LinkRx.cpp:187` / `LinkTimers.cpp:142`). OTA moved 1→4 with sub-steps intact. Bench items renumbered 5–7; item 6 (flood frameErrs/disc=0) marked CONFIRMED FAILING; item 7 (sweep walk-down) folded in the observed cadence asymmetry. Verify footer notes items 1–3 add new host pins. Title bumped to 6.0.24.
+- `docs/Version.md` — this entry; `add` + `trim --keep 20` dropped the oldest entry off the tail.
+- `include/AutoLink.h` / `library.properties` / `idf_component.yml` — `6.0.23 → 6.0.24` bump in lockstep (AGENTS rule 3).
+
+### Wire format
+
+Unchanged. No `.cpp` / `.h` / `.ino` touched. Same framer shape, COBS encap, `MAX_CHUNK = 250`, `MSG_HDR = 6`, `POOL_SIZE = 64`, window 32, and seq-space budget as 6.0.23. This entry triages the defect into todo.md; it does not fix it.
+
+### Regression test
+
+None added — docs-only, no behavior to pin. The fixes themselves (todo Open 1–3) each carry a host pin to write when the code lands: a window-ceiling loopback with one induced in-window loss asserting a cache hit and `discCount == 0`; an idle-past-`idleTimeoutMs` loopback with no pending asserting `discCount == 0`; and a `LinkReorder` table test for stepping over an unfillable hole after `reorderHoldMs`. The host suite is the gate and is identical to 6.0.23: `make test` 62/62 unit, `make itest` 3/3.
+
+### Limitations
+
+- The flood cascade, idle-watchdog loop, and gap-stall (todo Open 1–3) stay Open — this release only triages them. The 503 OTA stubs and reserved r10/r11 slots are unchanged from 6.0.22.
+- Standing cross-compile carry-over: `build/verify_build.sh` was not re-run for 6.0.24 (no source delta; the 6.0.22 cross-compile last cleared the build path at 1027671 / 79320 bytes). No source on top of 6.0.23, so the risk stays bounded to the unchanged build path.
+- The bench log is hardware-captured; items 5–7 remain FireBeetle-pair-only and are not host-pinnable.
+
+### Result
+
+- No source touched; the host suite is unchanged from 6.0.23 (`make test` 62/62 unit, `make itest` 3/3) — not re-run this session (docs-only).
+- `python3 build/version.py check` expected green (20 entries, --keep=20).
+- `make assets_check` / `make test_coverage_manifest` unaffected — no dashboard source, no new TEST_BINS.
+---
+
 ## v6.0.23
 
 **todo.md reorg + Version.md hygiene (docs only)**
@@ -123,1046 +825,3 @@ None added — docs-only, no behavior to pin. The host suite is the gate and is 
 
 `make test` 62/62 (~5.8 s wall), `make itest` 3/3 (~40 s wall), `python3 build/version.py check` green (20 entries), `python3 build/dashboard_assets-test.py` regenerates `AutoLinkWebHtml.h` byte-identically to the shipped copy (its `expected` literal still mismatches — now Open 6). No hardware delta vs. 6.0.19.
 ---
-
-## v6.0.19
-
-**wire AutoLink::bytesRecvdForMessage + Ping wire-recvd log line (closes Open 5)**
-
-The 6.0.15 release added `Link::bytesRecvdForMessage(baseSeq)` and the `LinkArq::baseSeqFor(seq)` accessor it walks, but neither had a production caller — `todo.md` Open 5 tracked the decision to make before the API could rot: either wire it into a real consumer or document it as deliberately-latent. This release wires it. `AutoLink` gains a one-line `bytesRecvdForMessage(uint8_t baseSeq) const` forwarder on the public facade (mirroring the existing `bytesRecvdFor` forwarder); Ping's two slot-completion drains in `Ping::loop` gain an additive `wire <seq> <bytes>` debug line that reads through `base_.comm_.bytesRecvdForMessage(queue_[head_].seq)`. The wire-recvd log fires alongside the existing `echo <seq> <msgBytes> <pending>` line, not instead of it — the slot-len log is the operator-facing message size, the wire-recvd log is the peer's wire-ACK confirmation, and both now share the same production-call surface for any future dashboard JSON field. Pinned by `run_test_bytes_recvd_forwarded_to_ping` (4 pins: facade forwarder present, two wire-recvd log sites in Ping::loop, each reads from the facade accessor not the single-chunk `bytesRecvdFor`, each fires inside the slot-drain loop). The existing `run_test_ping_send_failure` Pin 2 had a 400-char window between the echo format string and the `head_++` slot advance; the additional `wire %u %u %u` line + multi-line comment added ~700 chars, so the window is widened to 1500 to reach the head advance in the new layout (the pin's intent — "bytes arg is `queue_[head_].len`, not `bytesRecvdFor()`" — is unchanged).
-
-### What moved
-
-- `include/AutoLink.h` — `uint16_t bytesRecvdForMessage(uint8_t baseSeq) const` public forwarder. Body delegates to `link->bytesRecvdForMessage(baseSeq)` when `link_` is non-null. Lock-free contract matches the existing `bytesRecvdFor` accessor (both fields are stamped by the link task and read from the app context).
-- `src/al/pingpong/Ping.h` — two new `base_.log_.debug("Ping", "wire %u %u", ...)` calls, one at each slot-completion drain in `Ping::loop` (the gap-stop drain and the main loop's tail-drain). Logged alongside the existing `echo %u %u %d` line. Reads through `base_.comm_.bytesRecvdForMessage(queue_[head_].seq)` so the same accessor serves the Ping log path and any future dashboard JSON consumer.
-- `test/test_desktop/al/pingpong/BytesRecvdForwardedToPingTest.cpp` — new source-grep regression pin (4 pins). Source-grep is the right gate because Ping and AutoLink are `#ifdef ARDUINO` and can't run on host; the suite gates the facade forwarder's presence, the two wire-recvd log sites, the per-site facade-call source (vs. a `bytesRecvdFor` single-chunk lookup), and that the wire-recvd log fires inside the per-slot drain loop (before the `head_++` advance).
-- `test/test_desktop/al/pingpong/PingSendFailureTest.cpp` — widened the Pin 2 tail window from 400 to 1500 chars to reach the `head_++` advance in the new layout (the wire-recvd log + its multi-line comment added ~700 chars between the echo format string and the slot advance).
-- `test/test_desktop/Makefile` — `run_test_bytes_recvd_forwarded_to_ping` added to `TEST_BINS` and the per-suite build/run target lists.
-- `test/scripts/coverage/test_coverage_manifest.py` — added `run_test_bytes_recvd_forwarded_to_ping` to the source-grep-only exempt tuple (it's a source-grep suite and doesn't link `$(AUTOLINK_SRC)`).
-- `include/AutoLink.h` / `library.properties` / `idf_component.yml` — `6.0.18 → 6.0.19` bump in lockstep (AGENTS rule 3).
-
-### Wire format
-
-Unchanged. The wire-recvd log reads existing per-chunk state (`bytesRecvd_[seq]`, `baseSeq_[seq]`); no frame shape shift, no new wire bytes, no public API addition beyond the one new facade forwarder. `Link::bytesRecvdFor(baseSeq)` is unchanged — its existing single-chunk contract is preserved.
-
-### Regression coverage
-
-- `run_test_bytes_recvd_forwarded_to_ping` Pin a (source-grep on `include/AutoLink.h`): facade forwarder exists with the exact signature `uint16_t bytesRecvdForMessage(uint8_t baseSeq) const`. A forwarder named differently, returning a different type, or with a different access path leaves the API latent again.
-- `run_test_bytes_recvd_forwarded_to_ping` Pin b (source-grep on `src/al/pingpong/Ping.h`): Ping::loop contains exactly two `"wire %u %u"` log sites, one per slot-completion drain. The two existing `"echo %u %u %d"` sites are preserved (additive, not replacing).
-- `run_test_bytes_recvd_forwarded_to_ping` Pin c (source-grep): each wire-recvd log site reads through `base_.comm_.bytesRecvdForMessage(...)`, NOT the single-chunk `base_.comm_.bytesRecvdFor(...)`. The whitespace-stripped string matcher handles the multi-line clang-format indentation between `comm_` and `.bytesRecvdForMessage(`. A future regression that reverts to the single-chunk accessor (the pre-fix bug shape) trips this pin (`Assertion 'tail.find("base_.comm_.bytesRecvdForMessage(")' failed`).
-- `run_test_bytes_recvd_forwarded_to_ping` Pin d (source-grep): each wire-recvd log site fires inside the per-slot drain loop, before the `head_ = (head_ + 1) % WINDOW` slot advance. The site count is asserted; the head-advance position is checked.
-- Existing pins are preserved: `run_test_base_seq_tracking` (5 pins on the link-layer accessor + accessor presence + walk loop), `run_test_ping_send_failure` Pin 2 (3-arg echo log shape, bytes arg is `queue_[head_].len` not `bytesRecvdFor` — window widened to 1500 chars for the current layout), `run_test_pingpong_log_hygiene` (paused-aware not-ready line, flushRx-after-clearQueue on got<0 + mismatch, Pong recv-only, WIRING? one-shot). All green on the 6.0.19 host suite.
-- `run_test_ping_send_failure` Pin 2 toggle check: revert the tail-window widening (restore the 400-char window) — the pin turns red (`Assertion 'headAdvance != std::string::npos'` failed). The widened window is required for the new layout.
-
-### Disclosed limitations
-
-- The new facade forwarder and the wire-recvd log line are wire/host-equivalent to 6.0.18 — no new host-runnable surface; the cross-compile gate (`build/verify_build.sh`) is the relevant check, and it now runs in-sandbox on this session (arduino-cli + esp32:esp32@3.3.5 installed). Both the host suite (62/62 unit, 3/3 itest) and the cross-compile (Sketch 1027123 bytes, 78% of program storage, 79312 bytes RAM) pass clean.
-- The wire-recvd log is `debug`-level, not `info`-level — an operator reading the default Info log won't see it. Pin 2 of `run_test_ping_send_failure` continues to pin the operator-facing `echo %u %u %d` shape at `debug` level; the new `wire %u %u` line matches that level so an operator who enables Ping debug logging sees both side by side.
-- The Ping log path is `#ifdef ARDUINO` and not host-runnable. The source-grep pin is the structural guarantee; a runtime regression (e.g., a future change that swaps the facade call for a stale cached `uint16_t`) is not caught by the host suite. Out of scope for this release; a future cross-compile-driven fuzz or a runtime integration test could close it.
-- The 6.0.18 dashboard-asset byte count discrepancy (`32094` vs expected `31222`) is unrelated to this release — present on the 6.0.18 baseline before any of my changes. Out of scope.
-
-### Result
-
-`make test` 62/62, `make itest` 3/3, `make all` both, `bash build/verify_build.sh` clean compile against `esp32:esp32:firebeetle32`. No hardware-required delta (Ping's wire-recvd log is `debug`-level and additive; an existing peer / link pair doesn't need any configuration change).
-
-### Cross-checks
-
-- AGENTS rule 4 carry-over discharged: 6.0.18 was the first source-touching tag since 6.0.13 (it was docs-only, but `AutoLinkConfig.h` from 6.0.17 was unverified); 6.0.19 is the first source-touching tag where `build/verify_build.sh` actually runs in the sandbox and passes. The carry-over is closed for 6.0.19.
-- `run_test_version_free_source` green (the literal `6.0.19` reference exists only in the `AUTOLINK_VERSION` macro in `include/AutoLink.h`, the rule's only legitimate exception).
-- `build/version.py check` green (20 entries, --keep=20).
-- `python3 build/pretty_print.py` clean reformat on the four touched files; subsequent `make test` still 62/62.
-- `python3 build/dashboard_assets-test.py` size mismatch is pre-existing on the 6.0.18 baseline (32094 vs 31222), unrelated to this release.
-
-### Verification artifacts
-
-- `make test` wall: 7678 ms (62 unit suites, 1 new pin + the prior 61).
-- `make itest` wall: 40110 ms (3 integration suites).
-- Cross-compile wall: ~3 min on the cached arduino-cli + esp32 toolchain.
-- Peak RSS (largest unit suite): ~85 KiB.
----
-
-## v6.0.18
-
-**todo.md sync for 6.0.17 baud change (docs only)**
-
-Documentation-only follow-up to 6.0.17. The 6.0.17 baud change shipped its source edit, the three version files, and a Version.md entry, but `todo.md` was not updated — it still read "current as of v6.0.16" and carried no record of the 512000 default. This release closes that gap: it records 6.0.17 under Verified done, adds the 6.0.17 hardware re-test block (short-cable lock at 512000, long/noisy-cable walk-down), and adds a new tracked risk (Open 6, 512000 ASYNC rx-servicing latency — the rx buffer floor is baud-independent in *size* but the time-to-overflow at 512000 is ~4.4x shorter than at 115200). It also corrects the Verify section: 6.0.17 is the first source-touching tag since 6.0.13, so the `verify_build.sh` cross-compile carry-over now genuinely applies (6.0.14–6.0.16 were docs/host-equivalent). No source touched.
-
-### What moved
-
-`todo.md` only. Verified-done gains a 6.0.18 (this release) block and a 6.0.17 block; Open gains item 6 (appended, not inserted — Planned 1's prerequisites reference Open 1 and Open 3 by number, so renumbering would drift those cross-refs); the Hardware re-test section gains a 6.0.17 sub-block; the Verify section's cross-compile carry-over is rewritten from "limited to the unchanged build path" to "now live — 6.0.17 edits `AutoLinkConfig.h`, unverified in-sandbox".
-
-### Wire format
-
-Unchanged. No `.cpp`/`.h`/`.ino` touched. Same framer shape, COBS encap, `MAX_CHUNK = 250`, `MSG_HDR = 6`, and seq-space budget as 6.0.17.
-
-### Regression test
-
-None added — docs-only. The host suite is the gate and is identical to 6.0.17: `make test` 61/61 unit (incl. `run_test_baud_index_bounds` 2 pins, `run_test_base_seq_tracking` 5 pins), `make itest` 3/3 (`run_loopback` sweeps the 6-baud default and locks at 512000).
-
-### Limitations
-
-- Standing cross-compile carry-over (inherited from 6.0.17, not introduced here): `build/verify_build.sh` has not been re-run in-sandbox (no arduino-cli / network disabled). 6.0.17's `AutoLinkConfig.h` edit is in the Arduino build path; it must clear the ESP32 cross-compile in a longer-lived environment before the next source-touching tag. 6.0.18 adds no source on top.
-- Open 6 (512000 ASYNC rx-servicing) is hardware-only — WireSim is byte-exact and untimed, so the host loopback locks at 512000 regardless of real-wire bit timing.
----
-
-## v6.0.17
-
-**Add 512000 baud to default allowedBauds list**
-
-The default 5-baud list (`115200, 57600, 38400, 19200, 9600`) was sized for ESP32 UART hardware that the 5.3.x release series ran on. The FireBeetle-ESP32 and similar boards reliably drive 512000 baud over a short cable (the bit period drops to ~19.5 µs, still well above the ~104 µs 9600 floor; cable capacitance dominates only at < 19200). The default-list ceiling was a config-default gap, not a protocol gap — the ARQ / framer / seq-space all derive from `MAX_CHUNK` and `MSG_HDR`, neither of which depends on baud, and the baud-sweep phase machine handles any list length. This release adds `512000` as the new fastest entry, so a freshly-deployed board can sweep up to 512000 without the user hand-editing `cfg.allowedBauds[]`. The list is still 6 entries — well under the 16-entry `AUTOLINK_MAX_BAUDS` cap, no per-suite source change required.
-
-### Fix 1 — `allowedBauds[]` default list + `allowedBaudsCount` default
-
-`AutoLinkConfig::allowedBauds[]` initializer now leads with `512000` followed by the existing five: `{ 512000, 115200, 57600, 38400, 19200, 9600 }`. `allowedBaudsCount` default bumps from `5` to `6`. Existing user sketches that explicitly set `cfg.allowedBauds` / `cfg.allowedBaudsCount` are unaffected — the field stays public per the existing contract and the post-construction choke-point accessors (`Link::allowedBaudsCount()`, `Link::allowedBaud(i)`) bound any OOB write the same way they did pre-this-release. The baud-sweep machine walks the list top-down (`allowedBauds[0]` fastest); a sweep that finds 512000 noisy falls back to 115200 / 57600 / ... on the same path it did before.
-
-### Wire format
-
-Unchanged. The baud list is a runtime config, not a wire-protocol constant. No `.cpp`/`.h`/`.ino` behavior change beyond the two initializer literals. The wire still emits PING / PONG / LCK / REQ / CTRL / ACK / NAK frames at whatever baud the sweep locks on; the framer shape, the COBS encap, the chunk cap (`MAX_CHUNK = 250`), the per-message header (`MSG_HDR = 6`), and the seq-space budget are all byte-identical to 6.0.16.
-
-### Regression test
-
-The existing `run_test_baud_index_bounds` suite (2 runtime pins) still covers the post-construction OOB-write contract on the now-6-entry list — the test writes `cfg.allowedBaudsCount = 20` (and `-1`) and walks every choke-point accessor; the test's runtime numbers (`AUTOLINK_MAX_BAUDS = 16`, `getCurrentBaud` returns the bounded value, OOB indices surface 0) are unchanged. No new test added because the change is a config-default initialization, not a code-path addition: the only way to "revert" is to delete the `512000,` from the initializer and the `+ 1` from the count, and the 6.0.16 list shape had no test asserting the count of entries (every test that cared about the count set its own `kBauds[]` / `kNumBauds`). The default-list contents are operator-facing config, not a behavior pin.
-
-Pinned implicitly by:
-- `make test` (61 / 61 unit suites) — all suites that use the default `AutoLinkConfig cfg;` (without overriding the list) now sweep a 6-baud table. None of those suites asserts a specific count; they all assert behavior that holds for any list length.
-- `make itest` (3 / 3 integration suites) — `run_loopback` (30 s) sweeps the default 6-baud list, locks at `512000` (the new top entry) in the bench scenario, and reports `tx=42577 rx=41370 disc=0 frameErrs=0` with both sides at `state: OK` end-to-end. Pre-this-release at the same 30 s window the loopback locked at `115200` and reported comparable numbers — the sweep's only delta is which entry it locks on; the throughput, disc count, and OK-state hold time are the same.
-- `run_test_baud_index_bounds` (2 pins) — still green at the new 6-entry default; the choke-point accessors bound any OOB write regardless of list length.
-- `run_test_linkcontext` (pin 3) — still green; `LinkContext` interface is unchanged.
-
-### Limitations
-
-- The 512000 entry assumes the wire and both ESP32 UARTs can carry it. Long or shielded cables may force a fallback to 115200 or 57600 — the sweep handles that case automatically (the per-baud dwell is uncapped, so the master will walk down until it finds a baud that returns PONG_ACK within the dwell). Operators with known-bad long cables can remove 512000 by setting `cfg.allowedBauds[0] = 115200; cfg.allowedBaudsCount = 5;` in their sketch.
-- The new entry is the fastest in the list, so the baud-sweep now starts at 512000. The cold-start worst case (`~156ms` at the old 5-baud list) scales to `~176ms` at the 6-baud list (5.3.7's dwell formula: each added entry adds one round-trip + 10% margin to the worst-case sweep). The best case (`~57ms`) is unchanged — the sweep locks at the top baud and never walks down. The sweep change is bounded; the operator-visible delta is ~20 ms in the absolute worst case.
-- The default-list change is host-equivalent: the test sweep runs in MockHal, which doesn't model real wire delay. The 30 s loopback test confirms the protocol holds at the new top baud (no disc, no frame errors, both sides at OK) but does not measure real-wire sweep timing. The 512000 baud on real hardware is unverified in this sandbox (no arduino-cli / no FireBeetle).
-- The Arduino Library Manager / IDF component / Arduino ESP32 core all support 512000 baud on standard baud-rate tables, so the platform layer is fine. The default-list change is the only delta.
-- The 6.0.17 source diff against 6.0.16 is one header (`AutoLinkConfig.h`) and one `int` initializer. No `src/`, `include/`, or `examples/` API change. The `AUTOLINK_MAX_BAUDS = 16` cap is unchanged; the 6-entry default leaves 10 slots of headroom for user-extended lists.
-- The fix does NOT change the wire format, the ARQ cache shape, the seq-space budget, the floor math (`uartRxBufferFloor` / `uartTxBufferFloor` / `chunksForMsgLen`), the link-layer public API, the dashboard JSON shape, or the build surface. Only the config-default list initializer and the count default.
-
-### Files touched
-
-- `src/al/AutoLinkConfig.h` — `allowedBauds[]` initializer now `{ 512000, 115200, 57600, 38400, 19200, 9600 }`; `allowedBaudsCount` default `5` → `6`.
-- `include/AutoLink.h` + `library.properties` + `idf_component.yml` — version bump 6.0.16 → 6.0.17 in lockstep.
-- `docs/Version.md` — this entry (and trim dropped the oldest entry per `--keep=20`).
-- `todo.md` — no change (this is a config-default add, not a TODO item; the existing OTA / heap / OTA-handler / API-consume items all stand).
-
-### Result
-
-- 61 / 61 host unit suites pass (`make test`). Wall: ~6.1 s.
-- 3 / 3 host integration suites pass (`make itest`). Wall: ~40 s.
-- `make loopback` PASS — 30 s two-Link loopback sweeps the new 6-baud list, locks at 512000, `tx=42577 rx=41370 disc=0 frameErrs=0`, both sides at `state: OK`.
-- `make test_coverage_manifest` PASS — no test binary changes; the source-grep-only exempt list is unchanged.
-- `make assets_check` PASS — `AutoLinkWebHtml.h` byte contract unchanged (no dashboard source touched).
-- `python3 build/pretty_print.py` PASS — the touched header formatted cleanly (the initializer reflow is the only delta).
-- `python3 build/version.py check` PASS — 20 entries, --keep=20 (this entry pushed the oldest off the tail).
-- `build/verify_build.sh` not run in this sandbox — `arduino-cli` not installed. Per AGENTS rule 4, the cross-compile must be re-run in a longer-lived environment before release. The change is two literal initializers in one header (one added baud value, one integer default bump); no new symbols, no new RTOS primitive allocations, no header cycle changes. The `esp32:esp32:firebeetle32` cross-compile risk is very low, unverified. The 512000 baud itself is unverified on real hardware (no FireBeetle in sandbox); the protocol's hold at 512000 is pinned by `run_loopback` (MockHal-based, no real-wire delay).
----
-
-## v6.0.16
-
-**todo reorganization + unconsumed-API follow-up tracked (docs only)**
-
-Housekeeping release. No source touched; the wire format, build surface, and host/itest suites are identical to 6.0.15. `todo.md` had a stale shape after 6.0.15: closed item 4 (base-seq tracking) was left in the `## Open` section as a "Closed in 6.0.15" stub instead of being removed, so the Open list read as five items when only four were live. The reorg deletes the stub, renumbers the Open items with no gaps, and adds one genuinely untracked follow-up.
-
-### Fix 1 — Open list reorganized
-
-The base-seq item closed in 6.0.15 is removed from `## Open` (it already lives under Verified done). Remaining Open items renumbered in sequence: heap headroom (1), kFrameOverhead literal (2), max_uri_handlers OTA headroom (3), AGENTS/developer.md split discipline (4). The `kFrameOverhead` source line references in Open 2 were corrected to `AutoLinkConfig.h:377,389` — the old 372/388 had drifted after the 6.0.13 move of MAX_CHUNK / MSG_HDR into `LinkContext.h`. Open 3 gained a note that `run_test_uri_handler_alignment` already pins URIS[]/PATHS[] parity and the cap=10, and that pin must be extended when the OTA routes land.
-
-### Fix 2 — unconsumed API tracked (new Open 5)
-
-The 6.0.15 `Link::bytesRecvdForMessage(baseSeq)` method and the `LinkArq::baseSeqFor(seq)` accessor it walks are exercised only by `run_test_base_seq_tracking` and `LinkTestAccessor` — no production path reads them. The method is correct and pinned, but an unconsumed public API can rot or diverge from the table it reads. New Open 5 records the decision to make before it ages: either wire it into a real consumer (dashboard JSON per-message byte count, or a Pong-side echo cross-check) or document it in `docs/API.md` as a deliberately-latent accessor so a future reader doesn't mistake "no caller" for "dead code."
-
-### Wire format
-
-Unchanged. No `.cpp`/`.h`/`.ino` touched. Only `todo.md`, `docs/Version.md`, and the three version files (`AutoLink.h`, `library.properties`, `idf_component.yml`).
-
-### Regression test
-
-None — docs-only release, no behavior change to pin (mirrors the 6.0.14 docs-only precedent). The standing ESP32 cross-compile carry-over from 6.0.13 is unchanged: host build green, `build/verify_build.sh` not re-run in-sandbox; no source delta in 6.0.14/6.0.15/6.0.16 keeps that risk bounded to the unchanged build path.
----
-
-## v6.0.15
-
-**Per-message bytes-recvd sum + baseSeq tracking regression pin (closes todo item 4)**
-
-The 6.0.6 default bump (maxMsg 1024 → 5120) made the multi-chunk path the steady state, not the corner case. `todo.md` item 4 flagged a v6.0.7 carry-over: Ping's base-seq tracking was more likely to surface at 5120-byte messages (22 chunks vs. 5 at 1024), and the question of whether the baseSeq_ table was correctly populated for a 22-chunk message was never closed. `LinkArq` had been writing `baseSeq_[seq] = (baseSeq == NO_BASE) ? seq : baseSeq` since the table's introduction, but no consumer ever walked it — the field was effectively dead state. `Link::bytesRecvdFor(baseSeq)` returned the first chunk's bytes (= MSG_HDR for the hdr-only frame), not the full message size. A new `Link::bytesRecvdForMessage(baseSeq)` method sums every chunk that shares the same baseSeq, surfacing the data the table was already collecting. A new regression test pins the structural invariant (the per-chunk baseSeq_ mapping is correct at MTU) and the API (the per-message sum equals MSG_HDR + payload length).
-
-### Fix 1 — `LinkArq::baseSeqFor(seq)` public accessor
-
-`baseSeq_[256]` was a private field of `LinkArq` with no read accessor. The table was written by `onSent(seq, baseSeq, ...)` and cleared by `onAcked` / `clearAll`, but no production code path ever read it back — the only "consumer" was the inline comment in `LinkFrameRx.h` describing the intent. The accessor surfaces the field for the new per-message sum query and for any future caller (a dashboard JSON field, a Ping log-line update, etc.) that wants to walk the per-message chunk set. The accessor is a one-line inline — no cost on the hot path; `bytesRecvdForMessage` is the only caller today.
-
-### Fix 2 — `Link::bytesRecvdForMessage(baseSeq)` public API
-
-The new method walks the 256-slot `baseSeq_` table, sums `bytesRecvd_[seq]` for every `seq` whose `baseSeq_[seq] == baseSeq`, and returns the total. For a short ASYNC message (one merged chunk) the total equals `bytesRecvdFor(baseSeq)` — the per-chunk and per-message queries coincide. For a multi-chunk ASYNC message (1 hdr-only + N data chunks all sharing baseSeq), the total equals MSG_HDR + payload length = the full message size. For a SYNC message the table's NO_BASE default makes every chunk its own baseSeq, so the per-message sum equals the per-chunk value (the SYNC path's per-chunk waitForAck pattern doesn't have a single shared-baseSeq grouping).
-
-The implementation is a 256-entry loop, no heap, no lock (matches the existing `bytesRecvdFor` no-lock contract — both fields are stamped by the link task and read from the app context). Walk order is seq 0..255; future work that wants ordered output (e.g. a "chunks received" list) would walk the same way.
-
-### Wire format
-
-Unchanged. The new accessor and the new sum query read existing per-chunk state; no frame shape shift, no new wire bytes, no public API addition beyond the two new methods. `Link::bytesRecvdFor(baseSeq)` is unchanged — its existing single-chunk contract is preserved (Pin 2 of the new test pins this).
-
-### Regression test
-
-New `run_test_base_seq_tracking` suite (5 pins). Runtime + source-grep, one per assertion. AGENTS rule 18 compliant: each pin fails when its fix is reverted.
-
-- **Pin 1** (runtime): ASYNC 5120-byte message round-trips through pong's 22-chunk wire-ACK pipeline. `ping.bytesRecvdForMessage(baseSeq) == 5126` (= MSG_HDR + 5120). Pong's `recvMsg` returns 5120 byte-for-byte. The pre-this-release shape (no `bytesRecvdForMessage`) couldn't express this number — `bytesRecvdFor(baseSeq)` returned 6 (the hdr-only frame's bytes). A future regression that breaks the per-message walk (e.g., returns `bytesRecvd_[baseSeq]` directly, or walks `baseSeq_[i] == i`) trips this pin (`Assertion 't.bytesRecvdForMessage(baseSeq) == 5126' failed`).
-- **Pin 2** (runtime): ASYNC 4-byte short message. `bytesRecvdFor(baseSeq) == bytesRecvdForMessage(baseSeq) == 10` (= MSG_HDR + 4, the merged-chunk length). Pins the single-chunk contract: the per-message sum doesn't change the short-message behavior. Toggle off (e.g., add a `+ 1` to the per-message sum) → red.
-- **Pin 3** (source-grep on `LinkArq.h`): the public `baseSeqFor(seq)` accessor exists. Drop the accessor (e.g., move it to private) → compile error in `Link.h` (which calls `arq_.baseSeqFor(...)`); red.
-- **Pin 4** (source-grep on `Link.h`): the `bytesRecvdForMessage` method body references `arq_.baseSeqFor` and walks 256 entries (comment-stripped — a comment containing "256" doesn't fake the check, the walk loop is required). Pre-this-release shape had no method; an implementation that walks the table but reads `baseSeq_[i]` directly (instead of through the accessor) → red (`Assertion 'arq_.baseSeqFor' failed`).
-- **Pin 5** (source-grep on `LinkArq.cpp`): `onSent` body stamps `baseSeq_[seq] = (baseSeq == NO_BASE) ? seq : baseSeq`. The pre-this-release shape had this exact ternary; a future refactor that drops the NO_BASE default would have data chunks with `baseSeq_[seq] = 0xFF` (NO_BASE) and the per-message sum would sum 0 chunks. Reverting the ternary to a bare `baseSeq_[seq] = baseSeq;` → Pin 5 red (`Assertion 'NO_BASE' failed`).
-
-Toggle-off checks (verified locally):
-- Removing `arq_.baseSeqFor` from `bytesRecvdForMessage`'s body → Pin 4 red.
-- Replacing `bytesRecvdForMessage` with `return bytesRecvd_[baseSeq];` → Pin 1 red (`Assertion 't.bytesRecvdForMessage(baseSeq) == 5126' failed`).
-- Dropping the NO_BASE ternary in `onSent` → Pin 5 red.
-- Removing the public `baseSeqFor` accessor → Pin 3 red (compile error in `Link.h`).
-- Pin 2 catches any future drift that touches the short-message path.
-
-### Limitations
-
-- The per-message sum reads the 256-slot `baseSeq_` table without the link lock, matching the existing `bytesRecvdFor` contract. A future release that wants strict thread safety can add a `hw.lock()` / `hw.unlock()` pair around the walk; the existing per-chunk accessor doesn't have it, so adding it to the new method alone would be inconsistent. Out of scope for this release.
-- The 256-entry walk is O(256) per query. At default `maxMsg=5120` a 22-chunk message's bytes-recvd is queried once per call, so the worst case is 256 iterations per "did message N land?" check. Negligible on ESP32 (a few microseconds at 240 MHz). A future release that wants the per-message sum in a hot path (e.g., a per-loop stats query) could memoize the sum on the last `onAck`; out of scope.
-- The new API is wired but not consumed by any production code path today. Ping's existing `matchEcho_` log line sources its byte count from the local slot's `len` field (the operator-facing message size), not from the wire-ACK-reported bytes-recvd, so the log was already correct without this method. The new API is available for any future consumer — a dashboard JSON field, a Ping-side "last message bytes-recvd" indicator, a Pong-side echo — to walk the per-message chunk set.
-- The fix does NOT change the wire format, the ARQ cache shape, the seq-space budget, or any link-layer public API. The `bytesRecvd_` table is unchanged; the new `baseSeq_` accessor is a one-line inline; the new `bytesRecvdForMessage` is a 256-entry loop. No new RTOS primitive allocations, no new `#ifdef ARDUINO` paths, no header cycle changes. The `esp32:esp32:firebeetle32` cross-compile risk is very low (the touched methods are pure C++ that compiles under `-DAUTOLINK_HOST_TEST` and the production `#ifdef` block alike).
-- The 6.0.15 source diff against 6.0.14 touches three headers (`Link.h`, `LinkArq.h`, `LinkTestAccessor.h`) and one test (`LinkBaseSeqTrackingTest.cpp`). No wire, build-surface, or test-API change beyond the new test.
-
-### Files touched
-
-- `src/al/link/arq/LinkArq.h` — new `uint8_t baseSeqFor(uint8_t seq) const { return baseSeq_[seq]; }` public accessor + leading comment.
-- `src/al/link/Link.h` — new `uint16_t bytesRecvdForMessage(uint8_t baseSeq) const` method; walks 256 entries summing `bytesRecvd_[seq]` for `arq_.baseSeqFor(i) == baseSeq`. Comment explains the no-lock contract (matches `bytesRecvdFor`) and the SYNC / single-chunk / multi-chunk shape.
-- `test/common/LinkTestAccessor.h` — new `bytesRecvdFor(seq)` and `bytesRecvdForMessage(baseSeq)` pass-through accessors. Both host-test only (the test-only shim contract).
-- `test/test_desktop/al/link/LinkBaseSeqTrackingTest.cpp` — NEW (5 pins, runtime + source-grep).
-- `test/test_desktop/Makefile` — `run_test_base_seq_tracking` added to `TEST_BINS` + per-suite build rule + phony target.
-- `include/AutoLink.h` + `library.properties` + `idf_component.yml` — version bump 6.0.14 → 6.0.15 in lockstep.
-- `docs/Version.md` — this entry (and trim dropped v6.0.0 per `--keep=20`).
-
-### Result
-
-- 61 / 61 host unit suites pass (`make test_cpp`), with the new `run_test_base_seq_tracking` as the 61st. All 5 pins (1, 2, 3, 4, 5) green; the existing 60 suites unchanged. Wall: ~7 s.
-- 3 / 3 host integration suites pass (`make itest`). Wall: ~40 s.
-- `make assets_check` PASS — `AutoLinkWebHtml.h` byte contract unchanged (no dashboard source touched).
-- `make test_coverage_manifest` PASS — `run_test_base_seq_tracking` links `$(LINK_SRC)`, so the manifest generator auto-detects its `src_for_*` entries (no exempt-list addition required).
-- `python3 build/pretty_print.py` PASS — the touched files (`Link.h`, `LinkArq.h`, `LinkTestAccessor.h`, `LinkBaseSeqTrackingTest.cpp`) formatted cleanly.
-- `python3 build/version.py check` PASS — 20 entries, --keep=20 (this entry pushed v6.0.0 off the tail).
-- `build/verify_build.sh` not run in this sandbox — `arduino-cli` not installed. Per AGENTS rule 4, the cross-compile must be re-run in a longer-lived environment before release. The change is one new public accessor (a one-line inline in a header), one new public method (a 256-entry loop), and two new test accessors — no new symbols, no new RTOS primitive allocations, no header cycle changes. The `esp32:esp32:firebeetle32` cross-compile risk is very low, unverified.
----
-
-## v6.0.14
-
-**Reorganize todo.md; track OTA + URI-handler headroom as planned work (docs only)**
-
-Docs only — no source, wire, or build-surface change. `todo.md` was carrying a duplicated 6.0.12 block (listed twice, under "Verified done" and again as "this release") and had no entry for the OTA work, even though firmware + GUI OTA is the next planned feature. Reorganized `todo.md` into Done / Open / Planned / Hardware re-test / Verify sections, de-duplicated the 6.0.12 entry, and added three tracked items grounded in the current tree: the OTA feature (firmware `POST /ota/fw`, GUI-zip-to-LittleFS `POST /ota/gui`, dual-app + LittleFS partition table), the `max_uri_handlers` / `URIS[]`/`PATHS[]` headroom prerequisite that blocks adding those two endpoints, and a carry-over to confirm the v6.0.7 base-seq tracking status at the default 5120-byte (22-chunk) message size. No `.cpp`/`.h`/`.ino` touched; version bumped in lockstep across `AutoLink.h`, `library.properties`, `idf_component.yml`.
-
-### Regression test
-
-None — documentation reorg with no behavioral change. The `version.py check` structural gate and the existing `run_test_mode_sync_async_fixes` pins remain the relevant guards; nothing in the source tree moved.
-
-### Limitations
-
-Host unit tests, host itest, and the ESP32 cross-compile were not re-run in the delivery sandbox (no toolchain network access). The change set is `docs/Version.md` + `todo.md` + the three version-string files, none of which feed the compile or the wire, so the build surface is byte-unchanged from 6.0.13. Re-run `make test` / `make itest` / `./build/verify_build.sh` in a networked environment if a gate is required before tagging.
----
-
-## v6.0.13
-
-**MAX_CHUNK-symbolic floor math + chunksForMsgLen de-duplication**
-
-The UART buffer floor helpers (`uartRxBufferFloor`, `uartTxBufferFloor`) and the seq-space helper `chunksForMsgLen` all carry a literal `kChunkCap = 250` (and `kHdr = 6`) that mirrors `MAX_CHUNK` and `MSG_HDR` from `al/link/LinkContext.h`. The mirrors are intentional — `AutoLinkConfig.h` is host-linkable without pulling in the link layer — but the duplication is a drift hazard. A future `MAX_CHUNK` bump in `LinkContext.h` (e.g. raising the chunk cap from 250 to 384 for an MTU expansion) would leave the floor math, the framer, and the seq-space guard all tracking different values: the rx/tx buffers would size for the old chunk cap, the framer would emit the new cap, and the seq-space guard would compute chunk counts against the new cap. Silent wire vs. buffer desync. The fix pulls `MAX_CHUNK` and `MSG_HDR` symbolically out of `LinkContext.h` (where they belong as wire-protocol constants) and removes the literal mirrors from the three helpers.
-
-### Fix 1 — `MSG_HDR` moved to `LinkContext.h`
-
-`MSG_HDR = 6` was declared in `al/link/Link.h`. `Link.h` already includes `LinkContext.h`, so the constant was reachable from any TU that pulled in the link header — but `AutoLinkConfig.h` deliberately didn't (it would have dragged `Link.h`'s Arduino-free-but-heavy surface into every host test that just wanted the config struct). `MSG_HDR` is a wire-protocol constant (the per-message header length the first chunk carries), so it sits next to `MAX_CHUNK` in `LinkContext.h`. `Link.h`'s duplicate definition was deleted in favour of an include-chain re-export. No call-site changes — every TU that includes `Link.h` (which is every TU that uses the link layer) already gets `LinkContext.h` transitively.
-
-### Fix 2 — `chunksForMsgLen` references `MAX_CHUNK` / `MSG_HDR` symbolically
-
-The pre-v6.0.13 body:
-
-```cpp
-constexpr int kChunkCap = 250;
-constexpr int kHdr = 6;
-if (len + kHdr <= kChunkCap)
-    return 1;
-int n = (len + kChunkCap - 1) / kChunkCap;
-return 1 + n;
-```
-
-— the same wire-protocol constants mirrored as literals. This release:
-
-```cpp
-if (len + MSG_HDR <= MAX_CHUNK)
-    return 1;
-int n = (len + MAX_CHUNK - 1) / MAX_CHUNK;
-return 1 + n;
-```
-
-The function semantics are byte-identical at the current constant values (`MAX_CHUNK = 250`, `MSG_HDR = 6`). The merge-frame cap (hdr + payload fitting in one coalesced frame) still trips at `len + 6 <= 250`; the chunk-count math still evaluates to `ceil(len / 250)` for long messages. The mirror is gone — a `MAX_CHUNK` bump in `LinkContext.h` shifts both the merge-frame boundary and the chunk-count divisor in lockstep.
-
-### Fix 3 — `uartRxBufferFloor` / `uartTxBufferFloor` reference `MAX_CHUNK` symbolically
-
-The pre-v6.0.13 body had `constexpr int kChunkCap = 250;` duplicated inside both floor helpers. The post-fix body uses `MAX_CHUNK` from `LinkContext.h`:
-
-```cpp
-size_t perChunk = (size_t)MAX_CHUNK + kFrameOverhead;
-```
-
-`kFrameOverhead = 4` stays as a literal — it captures the COBS encap + zero-frame-delimiter pair, which is a property of the framing layer (the encap bytes the wire sees, not the per-chunk payload cap). The derivation is identical at the current value: `perChunk = 250 + 4 = 254`, and the rx floor at the default `AUTOLINK_ARQ_PIPELINE_WINDOW = 32` is `254 * 32 * 5/4 = 10160`, the tx floor is `254 * 3/2 = 381`. A future `MAX_CHUNK` bump shifts both floors in lockstep.
-
-`AutoLinkConfig.h` now `#include`s `LinkContext.h` at file top. `LinkContext.h` is pure C++ (`#include <stdint.h>` only) — no Arduino, no FreeRTOS — so the host test environment still compiles cleanly.
-
-### Wire format
-
-Unchanged. The constant substitutions are byte-identical at the current values; the wire sees the same chunk sizes, same per-message headers, same floor numbers.
-
-### Regression test
-
-`run_test_mode_sync_async_fixes` Pin 2d (new) covers the symbolic-derivation invariant. Source-grep scope:
-
-- `AutoLinkConfig.h` must NOT contain `kChunkCap = 250` (the literal mirror is gone).
-- `uartRxBufferFloor` / `uartTxBufferFloor` / `chunksForMsgLen` bodies must each reference `MAX_CHUNK` symbolically.
-- `chunksForMsgLen` body must reference `MSG_HDR` and contain the formula patterns `len + MSG_HDR <= MAX_CHUNK` and `(len + MAX_CHUNK - 1) / MAX_CHUNK` (comment-stripped — a comment containing the constant name doesn't fake the formula check).
-
-Runtime check (Pin 2d-runtime):
-
-- `uartRxBufferFloor(ASYNC) == (MAX_CHUNK + 4) * AUTOLINK_ARQ_PIPELINE_WINDOW * 5/4 == 10160`
-- `uartTxBufferFloor(ASYNC) == (MAX_CHUNK + 4) * 3/2 == 381`
-
-Toggle off (revert perChunk to literal `250` in either floor function) → Pin 2d source-grep fires red. Toggle off (revert `chunksForMsgLen` to literal `len + 6 <= 250`) → Pin 2d formula check fires red.
-
-The pre-existing Pin 2a/2b/2c (mode scaling, pipeline-window reference) still pin the runtime behavior; Pin 2d layers the symbolic-derivation invariant on top.
-
-### Limitations
-
-`kFrameOverhead = 4` stays a literal — it's a framer-overhead constant, not a `LinkContext.h` constant. If a future framer change shifts the on-wire overhead (e.g. adding a per-frame length prefix or moving to a non-COBS encap), the floors would need a sibling constant alongside `MAX_CHUNK` in `LinkContext.h`. Out of scope for this MINOR; surfaced here as a follow-up if the framer shape ever changes.
-
-The 6.0.13 source diff against 6.0.12 touches three headers (`AutoLinkConfig.h`, `LinkContext.h`, `Link.h`) and one test (`ModeSyncAsyncFixesTest.cpp`). No wire, build-surface, or test-API change beyond the new Pin 2d pins.
----
-
-## v6.0.12
-
-**docs: developer.md + AGENTS.md split**
-
-Documentation-only release. No source, wire-format, build-surface, or test changes — the protocol, ARQ, framing, and seq budget are byte-for-byte unchanged from 6.0.11. The version-string bump rides through `include/AutoLink.h` / `library.properties` / `idf_component.yml` in lockstep so the contract stays consistent.
-
-### Change 1 — `docs/developer.md` added
-
-A new `docs/developer.md` collects the project-agnostic engineering principles (deep modules, composition over inheritance, one concern per unit, short names, test-through-interfaces, regression-pin discipline, red-loop-first debugging). It carries the *why*; `AGENTS.md` carries the project-specific *how*.
-
-### Change 2 — `AGENTS.md` split and de-duplicated
-
-The general rationale that previously lived inline in `AGENTS.md`'s code-style and testing rules was moved into `docs/developer.md`. The affected rules (11 comments, 13 short names, 14 composition, 15 one-concern, and the Testing block) now state the principle as a one-line `(principle: docs/developer.md)` defer and keep only the project-specific application — e.g. rule 14 keeps the ESP32 vtable/`IHal` detail, rule 13 keeps this codebase's name vocabulary. A header note points readers at `docs/developer.md` for the reasoning.
-
-### Change 3 — cross-references
-
-`README.md`'s Document Index gains a `docs/developer.md` row and corrects the stale "last 8 releases" to "last 20" (matching `version.py trim --keep 20`). `AGENTS.md`'s header references `docs/developer.md`.
-
-### Change 4 — `todo.md` reorganized
-
-Prior open item 1 (backpressure cooldown no-op) is moved to Verified done — it shipped in 6.0.11. Remaining open items renumbered: heap-headroom RISK and magic-number MINOR carry forward; a new DOC item tracks keeping the AGENTS/developer split clean. Title updated to the current version.
-
-### Wire format
-
-Unchanged.
-
-### Regression test
-
-None — no code path changed. Host suite, itest, loopback, and the ESP32 cross-compile are expected green/unchanged from 6.0.11; the only delta the build sees is the `AUTOLINK_VERSION` string.
-
-### Limitations
-
-Docs-only: the open hardware-verification items (ASYNC heap headroom, backpressure-storm suppression under a full cache at `txDelayMs=0`) are still untested on the FireBeetle and remain in `todo.md`.
----
-
-## v6.0.11
-
-**Backpressure cooldown gate independent of txDelayMs**
-
-The v6.0.10 ASYNC-thrash fix-bundle shipped a `BACKPRESSURE_COOLDOWN_MS = 1000` throttle on Ping's `sendMsg` failure branch (the exact storm that produced the `Ping send failed (backpressure) n=1378 pending=0 consec=1` log spam on a full ARQ cache), but the throttle stamped `tNextSendMs_` and the send-loop gate only honors `tNextSendMs_` when `cfg.txDelayMs > 0`. ASYNC flood mode (the scenario that produced the storm in the first place) runs with `cfg.txDelayMs = 0`, so the v6.0.10 throttle was a no-op — the bench log was unchanged between 6.0.10 and pre-6.0.10. One fix pins the failure class.
-
-### Fix 1 — `backpressureCoolUntilMs_` stamp + txDelayMs-independent gate
-
-The pre-v6.0.11 backpressure branch:
-
-```cpp
-tNextSendMs_ = millis() + BACKPRESSURE_COOLDOWN_MS;
-```
-
-was the right wall-clock target, but the gate at the top of the send loop was:
-
-```cpp
-if (txDelayMs > 0 && (int32_t)(now - tNextSendMs_) < 0)
-    break;
-```
-
-— gated on `txDelayMs > 0`, so a flood-mode sketch (`txDelayMs = 0`) walked the gate past it on every iteration and `consecSendFail_` ticked up toward `MAX_SEND_FAIL = 5` with the throttle stamp sitting unused on the side. The 1000 ms cooldown was active in name only.
-
-This release:
-
-- Adds `uint32_t backpressureCoolUntilMs_ = 0;` to the `Ping` class. Comment explains: "ASYNC-only backpressure cooldown stamp. Set when sendMsg() trips consecSendFail_++, honored by the send-loop gate regardless of cfg.txDelayMs. Distinct from tNextSendMs_ (which the gate only honors when txDelayMs > 0) so ASYNC flood mode still throttles on a real backpressure hit."
-- The send-loop writes `backpressureCoolUntilMs_ = millis() + BACKPRESSURE_COOLDOWN_MS;` on the backpressure branch (replacing `tNextSendMs_`).
-- The send-loop adds a sibling gate that fires regardless of `txDelayMs`:
-
-```cpp
-if (backpressureCoolUntilMs_ != 0 &&
-    (int32_t)(now - backpressureCoolUntilMs_) < 0)
-    break;
-```
-
-- The `backpressureCoolUntilMs_` stamp is cleared in two places that reset other counters: the link-lost transition (`if (!base_.comm_.ready())` branch in `loop()`) and the SWP→OK transition (`if (!base_.wasReady_)` branch). Stale throttle from before the drop / recovery doesn't carry across.
-
-The two gates are orthogonal. `tNextSendMs_` is user-pacing (the configurable `cfg.txDelayMs` inter-send delay). `backpressureCoolUntilMs_` is the ASYNC-only emergency brake on a stalled pipeline. SYNC mode never trips the backpressure branch (the sender blocks inline for the receiver ACK), so the cooldown is ASYNC-only by construction.
-
-### Wire format
-
-Unchanged. The throttle is wall-clock pacing inside `Ping::loop` — it doesn't affect the on-the-wire COBS+CRC frame format, doesn't change the ARQ cache shape, doesn't change the seq-space budget, and doesn't touch any Link-layer logic. The cooldown just stops Ping from hammering `sendMsg` on a full ARQ cache. Lowering `tNextSendMs_` (the v6.0.7 default-bump) is unaffected.
-
-### Regression test
-
-`run_test_mode_sync_async_fixes` extended from 11 to 12 pins. Pin 5b rewritten + Pin 5c added. AGENTS rule 18 compliant: each pin fails when its fix is reverted.
-
-- **Pin 5b (rewritten, source-grep on `Ping.h`):** the backpressure-failure branch sets `backpressureCoolUntilMs_ = millis() + BACKPRESSURE_COOLDOWN_MS`. The `BACKPRESSURE_COOLDOWN_MS = 1000` constant is still defined on the class. The pre-v6.0.11 shape wrote `tNextSendMs_` here, which the gate never honored in ASYNC flood mode. Reverting the stamp assignment back to `tNextSendMs_ = millis() + BACKPRESSURE_COOLDOWN_MS` flips Pin 5b red (`Assertion 'backpressureCoolUntilMs_ = ... must be set on the backpressure branch' failed`). clang-format splits the assignment across lines (`backpressureCoolUntilMs_ =\n    millis() + BACKPRESSURE_COOLDOWN_MS;`); the pin matches both halves.
-- **Pin 5c (new, source-grep on `Ping.h`):** the cooldown gate in the send-loop fires regardless of `cfg.txDelayMs`. The pin locates the gate pattern (`backpressureCoolUntilMs_ != 0 && (int32_t)(now - backpressureCoolUntilMs_) < 0`), walks back to the parent `if (...)`, and asserts the gate's parenthesized expression does NOT contain the substring `txDelayMs`. The pre-v6.0.11 shape was a sibling `if (txDelayMs > 0 && ... backpressureCoolUntilMs_ ...)` (or wrote to `tNextSendMs_` and the gate was the same `txDelayMs > 0` gate that was already there) — coupling the cooldown to user pacing. Re-coupling the gate (e.g. `if (txDelayMs > 0 && backpressureCoolUntilMs_ != 0 && (int32_t)(now - backpressureCoolUntilMs_) < 0)`) flips Pin 5c red. Removing the gate entirely also flips Pin 5c red (`Assertion 'send-loop must contain a cooldown gate of the form backpressureCoolUntilMs_ != 0 && (now - stamp) < 0' failed`).
-- Pins 1, 2, 3, 4, 5a unchanged.
-
-Toggle-off checks (verified locally):
-- Reverting the backpressure branch to `tNextSendMs_ = millis() + BACKPRESSURE_COOLDOWN_MS;` → Pin 5b flips red (`Assertion 'backpressureCoolUntilMs_ = ...' failed`).
-- Replacing the cooldown gate with `if (txDelayMs > 0 && backpressureCoolUntilMs_ != 0 && (int32_t)(now - backpressureCoolUntilMs_) < 0)` → Pin 5c flips red (`Assertion 'the cooldown gate must NOT be conditioned on txDelayMs' failed`).
-- Removing the cooldown gate entirely (the pre-v6.0.11 plus-change shape where `tNextSendMs_` was set but never honored) → Pin 5c flips red.
-
-### Limitations
-
-- The cooldown stamp is wall-clock (`millis() + 1000`), not loop-iteration count, so it scales with baud — the link task gets more wall-clock at higher baud to drain the cache, the cooldown is fixed at 1000 ms regardless. A future change that wants a baud-aware cooldown could read `link_.nowBaud()` and scale; out of scope for this fix.
-- The cooldown is ASYNC-only by construction: SYNC mode's send blocks inline for the receiver ACK, so `sendMsg` only returns false for `Link not OK` (which the existing `if (!base_.comm_.ready()) break;` guard already short-circuits before the consec counter bumps). No SYNC-mode churn.
-- The cooldown clears on link-lost and SWP→OK transitions. A fresh resweep cycle doesn't carry a stale throttle from the previous cycle. A future change that wanted to preserve cooldown across a brief resweep would need a different policy; current behavior matches operator intent (after recovery, send at full line rate until real backpressure reappears).
-- The `BACKPRESSURE_COOLDOWN_MS = 1000` constant is hard-coded in `Ping.h`. A future change that wants it configurable could read from `cfg`; the ASYNC-only backpressure branch is the right place for the knob. Out of scope for this fix.
-- The 12-pin `run_test_mode_sync_async_fixes` suite remains a source-grep / runtime-pin-only test, on the `test_coverage_manifest.py` source-grep-only exempt list. No `src_for_*` entry required.
-- The fix does NOT touch `EspHal::begin()`'s abort path. The `HAL not healthy` halt still fires (with the v6.0.8 300 ms LED blink) when heap refusal trips; the cooldown change is downstream of the link's runtime backpressure signal, not the boot-time heap-refusal signal.
-
-### Files touched
-
-- `src/al/pingpong/Ping.h` — new `uint32_t backpressureCoolUntilMs_ = 0;` field; send-loop gate reads it via a txDelayMs-independent sibling gate; backpressure branch sets the new stamp (not `tNextSendMs_`); link-lost and SWP→OK transitions clear the stamp.
-- `test/test_desktop/al/link/ModeSyncAsyncFixesTest.cpp` — Pin 5b rewritten to assert the `backpressureCoolUntilMs_ = millis() + BACKPRESSURE_COOLDOWN_MS` stamp shape; new Pin 5c `test_pin_ping_cooldown_gate_independent_of_txDelayMs` asserts the gate is independent of `txDelayMs` (locates the gate pattern, walks back to the parent `if`, asserts the gate header contains no `txDelayMs`); both pins registered in `main()`.
-- `include/AutoLink.h` + `library.properties` + `idf_component.yml` — version bump 6.0.10 → 6.0.11 in lockstep.
-- `docs/Version.md` — this entry (and trim dropped v6.0.1 per `--keep=20`).
-
-### Result
-
-- 60 / 60 host unit suites pass (`make test_cpp`); `make all` ~21 s wall. The extended `run_test_mode_sync_async_fixes` is the 60th; all 12 pins (1a/1b/1c, 2a/2b/2c, 3, 4a/4b/4c, 5a/5b/5c) green; the existing 59 suites unchanged. Toggle-off checks (above) verified locally.
-- 3 / 3 host integration suites pass (`make itest`). Wall: ~40 s.
-- `make assets_check` PASS — `AutoLinkWebHtml.h` byte contract unchanged (no dashboard source touched).
-- `make test_coverage_manifest` PASS — the extended suite is still on the source-grep-only exempt list, no `src_for_*` entry required.
-- `python3 build/pretty_print-test.py` PASS — the touched files formatted cleanly.
-- `python3 build/version.py check` PASS — 20 entries, --keep=20 (this entry pushed v6.0.1 off the tail).
-- `build/verify_build.sh` not run in this sandbox — `arduino-cli` is not installed. Per AGENTS rule 4, the cross-compile must be re-run in a longer-lived environment before release. The change is a single new field declaration + a sibling gate + a stamp-target swap (no new symbols, no new RTOS primitive allocations, no header cycle changes). The `esp32:esp32:firebeetle32` cross-compile risk is very low, unverified.
----
-
-## v6.0.10
-
-**ASYNC link-thrash fixes: mode-to-HAL forward, mode-aware UART buffers, retx/reorder coupling, wire-frame txBytes, version-first log, backpressure cooldown**
-
-Bench logs from a v6.0.9 ASYNC flood at 115200 with `txDelayMs=0` showed two independent root defects that compounded: the HAL held a stale `cfg.mode` copy and sized UART / stream buffers for SYNC while the link was running ASYNC, and the receiver's reorder buffer (`reorderHoldMs=1500 ms`) expired the held tail before the sender's `okTickMs()`-driven ARQ retx loop (`max(idleTimeoutMs/3, 50, syncAckTimeoutMs) = 3333 ms` at the defaults) could retransmit the missing chunk. The first chunk loss (Pong seq=58, a UART rx overrun on a 2 KB SYNC-sized buffer) was unrecoverable: 59..100,126 sat in the reorder buffer past `reorderHoldMs`, `lostMsgs` climbed, and the link cycled `P1 -> P2 -> BREAK -> P1` on the back of each forced resweep. Two cosmetic-but-confusing problems rode along: Pong's `tx=0 B/sec` because the wire-ACK/NAK/CTRL paths didn't bump `txBytes`, and the live boot log placed `v<version>` AFTER the `calling comm_.begin()` diagnostic. Five fixes pin the failure class.
-
-### Fix 1 — `IHal::setMode` + `AutoLink::setMode` forwards to the HAL
-
-`AutoLink::setMode` mutated only the `Link` copy of `cfg.mode`. `EspHal` holds its own `AutoLinkConfig cfg` (passed by value to both the link and the HAL) and never saw the update. The NVS+reboot restore path (`PingPongBase::bringUpLink` calls `setMode` BEFORE `begin()`) flipped the link to ASYNC while the HAL's `cfg.mode` stayed at its ctor's default — the boot log printed `mode=SYNC` against a wire that was running ASYNC, the UART / stream buffer floor came from the SYNC shape, and the cross-mode size mismatch drove the seq=58 rx overrun.
-
-This release adds `virtual void setMode(AutoLinkConfig::Mode){}` to `IHal` (default no-op) and implements it on `EspHal`. `AutoLink::setMode` now forwards to `hal->setMode(m)` AND `link->setMode(m)`. `EspHal::setMode` re-derives the UART and stream-buffer floors from the new mode pre-`begin()` (the live UART / stream buffers can't be resized in flight — FreeRTOS stream buffers are immutable-after-create); post-`begin()` it only updates `cfg.mode` so the boot log stays honest, matching the existing NVS+reboot contract for mode toggles.
-
-### Fix 2 — `uartRxBufferFloor` / `uartTxBufferFloor` scale by mode
-
-The `cfg.rxBufferSize = 2048` / `cfg.txBufferSize = 256` defaults are SYNC-sized. ASYNC at 115200 with `txDelayMs=0` pipelines a multi-chunk window; 2 KB rx overruns on a single burst and the first chunk drops. No mode-based scaling existed in 6.0.9. This release adds two host-linkable helpers in `AutoLinkConfig.h`:
-
-- `uartRxBufferFloor(cfg)`: SYNC passes `cfg.rxBufferSize` through unchanged; ASYNC returns `perChunk * AUTOLINK_ARQ_PIPELINE_WINDOW * 5/4` = `~10.2 KB` at the default window=32. Caller's larger `cfg.rxBufferSize` still wins via `max()`.
-- `uartTxBufferFloor(cfg)`: SYNC passes `cfg.txBufferSize` through unchanged; ASYNC returns `perChunk * 3/2` = `~381 B` at the defaults.
-
-Both reference `AUTOLINK_ARQ_PIPELINE_WINDOW` so a future window bump stays in lockstep. `EspHal::begin()` reads the derived values (not `cfg.rxBufferSize` / `cfg.txBufferSize` directly) for `uart_driver_install`, and the boot log line shows the derived size. `streamBufferFloor` already covered the rx *stream* buffer (one coalesced message plus headroom, mode-independent) and is unchanged.
-
-### Fix 3 — `okTickMs` clamps at `reorderHoldMs/2` in ASYNC mode
-
-The sender's OK-state timer tick is the only path that drives the ARQ retransmit loop (see `LinkTimers::onTimerOk_unlocked` walking the 256-slot table). The pre-this-release shape capped the tick at `max(idleTimeoutMs/3, 50, syncAckTimeoutMs) = 3333 ms` at the default `idleTimeoutMs=10000`; the receiver's `reorder_.dropExpired(now, reorderHoldMs=1500)` expired the held frames before the sender's tick could fire a retx. A single ASYNC chunk loss was unrecoverable: even a good retransmit landed on a Pong that had already discarded the tail.
-
-This release clamps the tick at `reorderHoldMs/2` in ASYNC mode. The new tick is 750 ms at the default `reorderHoldMs=1500` — the retx always lands ahead of the receiver's expiry, with a 750 ms cushion for wire-side round-trip. SYNC mode is unchanged (the sender blocks inline for the receiver ACK and never walks the ARQ table, so the clamp doesn't apply). The SYNC-mode floor (`max(50, syncAckTimeoutMs)`) is also unchanged.
-
-The new ASYNC retx cadence is a single retx attempt per `reorderHoldMs/2` window. With `syncAckTimeoutMs=500` and `reorderHoldMs=1500`, a missing chunk gets at most 3 retx attempts (at 750 ms intervals) before the receiver gives up — the receiver's expiry is the backstop, not the sender's. The pre-this-release shape's `syncAckTimeoutMs` was the per-slot "elapsed since `sentAtMs_`" threshold inside `LinkArq::decideSlot`; the *tick* itself was the gating factor for how often the table was walked. The fix tightens the tick to a value where the table walk always beats the receiver's expiry.
-
-### Fix 4 — Wire-frame `txBytes` counter for CTRL / ACK / NAK / retx
-
-The Stats.tx field is wired from `txBytes`, which `buildAndSendMsg_unlocked` bumped for data-payload bytes. CTRL frames (PING/PONG/LCK), wire-ACK frames, NAK frames, and resendCobsFrame_unlocked (the ARQ retx path) went out via `sendFrame_unlocked` / `sendAckFrame_unlocked` / `sendCtrlCobsFrame_unlocked` / `resendCobsFrame_unlocked` — none of those bumped `txBytes`. Pong's wire output is almost entirely ACK/NAK and its `tx` rate reported `0 B/sec` even while it was actively ACKing every received chunk.
-
-This release adds `txBytes += <encoded length>; lastTxMs = hw.nowMs();` to each of the four paths. The data path (already counted) is unchanged. The resendCobsFrame_unlocked counter is for `n > 0` so a zero-byte control retx doesn't double-count. The asymmetric-idle detector's `txAge < FAST_IDLE_TX_MS` branch now fires on Pong too, which is the correct shape — Pong's tx side is real wire activity.
-
-### Fix 5 — Version log line first; ASYNC backpressure cooldown 1000 ms
-
-Two operator-facing fixes that ride along with the protocol fixes:
-
-- `bringUpLink` emits `log.info("AutoLink", "v" AUTOLINK_VERSION)` as the first line — before the NVS prefs read and before `calling comm_.begin()`. The pre-fix shape placed the version line AFTER `begin()` returned, so the first log line answered `what just happened in begin()` rather than `what firmware is this?`. The pre-v6.0.9 bogus `maxMsg > streamBufSize` warning made the wrong line first; even on a clean v6.0.9 boot, the `v<version>` line followed a `D PingPongBase calling comm_.begin()` diagnostic. The new order: `v<version>` first, then the NVS read, then the `begin()` diagnostic.
-- Ping's ASYNC backpressure failure branch (`consecSendFail_++` in `Ping::loop`) sets `tNextSendMs_ = millis() + BACKPRESSURE_COOLDOWN_MS` (= 1000 ms) before the loop exits. The bench log showed `Ping send failed (backpressure) n=1378 pending=0 consec=1` firing on every loop iteration against a full ARQ cache, with no throttle — the loop was spending wall-clock on log lines that told the operator nothing new and starving the link task. 1000 ms is the same order as `syncAckTimeoutMs`: one round-trip's worth of time for the link to drain. The MAX_SEND_FAIL escalation (5 consecutive failures -> `dropLink()`) is unchanged.
-
-### Wire format
-
-Unchanged. All five fixes are runtime / sizing / log behavior. No wire frame shifts, no public-API additions beyond `IHal::setMode` (defaulted to a no-op on the base class, so existing host tests that don't implement it still link).
-
-### Regression test
-
-New `run_test_mode_sync_async_fixes` suite (11 pins). Source-grep + runtime pins, one per assertion. AGENTS rule 18 compliant: each pin fails when its fix is reverted.
-
-- **Pin 1a** (source-grep on `IHal.h`): `virtual void setMode(AutoLinkConfig::Mode)` declared. Toggle off (drop the virtual) -> red.
-- **Pin 1b** (source-grep on `include/AutoLink.h`): `AutoLink::setMode` body calls both `hal->setMode(m)` AND `link->setMode(m)`. Pre-fix shape only called `link->setMode(m)`, leaving the HAL's cfg copy stale.
-- **Pin 1c** (source-grep on `src/al/hal/EspHal.h`): `EspHal::setMode` body re-derives `rx_buffer_size_` / `tx_buffer_size_` / `stream_buf_size_` from the new mode pre-begin. The post-begin path is unchanged (live buffers can't be resized).
-- **Pin 2a** (runtime): `uartRxBufferFloor(cfg)` for `cfg.mode = ASYNC` is > 4 KB at the default window; `cfg.mode = SYNC` passes `cfg.rxBufferSize` through. The pre-fix shape returned `cfg.rxBufferSize = 2048` regardless of mode, which underran on the bench's multi-chunk ASYNC flood.
-- **Pin 2b** (runtime): `uartTxBufferFloor(cfg)` floors the ASYNC tx at a multi-chunk-safe size; a caller-set larger `cfg.txBufferSize` wins via `max()`. SYNC passes through.
-- **Pin 2c** (source-grep on `AutoLinkConfig.h`): `uartRxBufferFloor` body references `AUTOLINK_ARQ_PIPELINE_WINDOW`, so a future window bump scales the rx floor in lockstep.
-- **Pin 3** (source-grep on `LinkSweep.cpp`): `okTickMs` body gates the `reorderHoldMs/2` clamp on `cfg.mode == AutoLinkConfig::Mode::ASYNC` and clamps the tick at `cfg.reorderHoldMs / 2`. Pre-fix shape capped at 3333 ms regardless of mode; the new shape caps at 750 ms in ASYNC.
-- **Pin 4a/b/c** (source-grep on `LinkTx.cpp`): `sendFrame_unlocked` (CTRL/PING/PONG), `sendAckFrame_unlocked` (5-byte wire ACK), and `sendCtrlCobsFrame_unlocked` (3-byte NAK) all bump `txBytes` by the encoded frame length and stamp `lastTxMs`. Pre-fix shape only counted the data-payload path.
-- **Pin 5a** (source-grep on `PingPongBase.h`): `bringUpLink` body places `AUTOLINK_VERSION` log line BEFORE the NVS prefs read AND BEFORE `calling comm_.begin()`. Pre-fix shape placed the version after `begin()`.
-- **Pin 5b** (source-grep on `Ping.h`): the `consecSendFail_++` branch sets `tNextSendMs_ = millis() + BACKPRESSURE_COOLDOWN_MS`; the `BACKPRESSURE_COOLDOWN_MS = 1000` constant is defined on the class. Pre-fix shape had no throttle on the backpressure branch.
-
-Toggle-off checks (verified locally):
-- Drop `virtual void setMode` from `IHal.h` -> Pin 1a flips red.
-- Restore `AutoLink::setMode` to its pre-fix `if (link) link->setMode(m);` body -> Pin 1b flips red (`Assertion 'AutoLink::setMode must forward to hal->setMode(m)' failed`).
-- Drop the `rx_buffer_size_ = rxBufferFloor(cfg);` line from `EspHal::setMode` pre-begin branch -> Pin 1c flips red.
-- Drop the `cfg.mode == AutoLinkConfig::Mode::ASYNC` clamp from `okTickMs` -> Pin 3 flips red (`Assertion 'okTickMs must gate the reorderHoldMs clamp on ASYNC mode' failed`).
-- Drop `txBytes += CTRL_FRAME_SIZE` from `sendFrame_unlocked` -> Pin 4a flips red.
-- Drop the `tNextSendMs_ = millis() + BACKPRESSURE_COOLDOWN_MS` line from Ping's backpressure branch -> Pin 5b flips red.
-- Move the `log.info("AutoLink", "v" AUTOLINK_VERSION)` line to after `comm.begin()` -> Pin 5a flips red.
-
-### Limitations
-
-- Fix 1's `IHal::setMode` is a defaulted virtual on the base class. Production code that constructs an `EspHal` and calls `setMode` on it is fine (the override is wired). Custom HAL implementations in user code that don't override `setMode` will silently no-op — same shape as a `MockHal` that doesn't override `begin()`. A user-side `IHal` extension that's ASYNC-aware should override `setMode`; the default no-op is the same shape as a `MockHal` test fixture that ignores the field.
-- Fix 2's ASYNC rx floor (`~10.2 KB` at the default window=32) is sized for one in-flight pipeline. A future bump to `AUTOLINK_ARQ_PIPELINE_WINDOW` scales the rx floor in lockstep (Pin 2c's contract) but does NOT resize the stream buffer's `streamBufferFloor` (which is mode-independent: one coalesced message + headroom). Operators who need a larger ASYNC pipeline should also bump `cfg.streamBufferSize` directly.
-- Fix 3's `okTickMs` clamp only applies in ASYNC mode. A user who sets `cfg.reorderHoldMs` to a very small value (e.g., 50 ms) gets an OK-state tick of 50 ms in ASYNC — fine, the clamp floors at 50 ms so the link task can still do work. The asymmetric-idle / pool-exhaust paths inside `onTimerOk_unlocked` will fire faster, which is the right shape for a tight pipeline.
-- Fix 4's wire-frame counter covers CTRL/ACK/NAK/retx. The `txBytes` field is still the only public Stats.tx (no `txFrames` / `rxFrames` counter yet). A future release that wants a per-frame rate can split the field; for now the byte counter is the same number for the operator.
-- Fix 5's `BACKPRESSURE_COOLDOWN_MS = 1000` is hard-coded in `Ping.h`. A future change that wants it configurable could read from `cfg`; the ASYNC-only backpressure branch is the right place for the knob. Out of scope for this fix-bundle.
-- The `version.py add` scaffolded this entry at the top of `docs/Version.md`; the author filled in the body. Trim dropped v6.0.0 (the 20-entry cap) per the existing `--keep=20` invariant.
-
-### Files touched
-
-- `src/al/hal/IHal.h` — include `AutoLinkConfig.h`; declare `virtual void setMode(AutoLinkConfig::Mode){}`.
-- `include/AutoLink.h` — `AutoLink::setMode` body forwards to `hal->setMode(m)` before `link->setMode(m)`; leading comment explains the NVS+reboot contract.
-- `src/al/hal/EspHal.h` — `setMode` override; pre-begin re-derives `rx_buffer_size_` / `tx_buffer_size_` / `stream_buf_size_` from the new mode; new fields `rx_buffer_size_` / `tx_buffer_size_`; `begin()` reads the derived values for `uart_driver_install`; the boot log line shows the derived size. `setSpd` and the post-begin path are unchanged.
-- `src/al/AutoLinkConfig.h` — new `inline size_t uartRxBufferFloor(const AutoLinkConfig &cfg)` and `uartTxBufferFloor(const AutoLinkConfig &cfg)` host-linkable helpers. SYNC passes through; ASYNC scales by `AUTOLINK_ARQ_PIPELINE_WINDOW * 5/4` (rx) and `* 3/2` (tx). Caller-set larger values win via `max()`.
-- `src/al/link/LinkSweep.cpp` — `okTickMs` body adds the ASYNC-mode clamp at `reorderHoldMs/2`. SYNC mode is unchanged.
-- `src/al/link/LinkTx.cpp` — `sendFrame_unlocked`, `sendAckFrame_unlocked`, `sendCtrlCobsFrame_unlocked`, and `resendCobsFrame_unlocked` all bump `txBytes` by the encoded frame length and stamp `lastTxMs`. The data path is unchanged.
-- `src/al/pingpong/PingPongBase.h` — `bringUpLink` body emits the version log line FIRST, before the NVS read and before `calling comm_.begin()`.
-- `src/al/pingpong/Ping.h` — the ASYNC backpressure failure branch sets `tNextSendMs_ = millis() + BACKPRESSURE_COOLDOWN_MS`; new `static constexpr uint32_t BACKPRESSURE_COOLDOWN_MS = 1000;` constant.
-- `include/AutoLink.h` + `library.properties` + `idf_component.yml` — version bump 6.0.9 -> 6.0.10 in lockstep.
-- `test/test_desktop/al/link/ModeSyncAsyncFixesTest.cpp` — NEW (11 pins).
-- `test/test_desktop/Makefile` — `run_test_mode_sync_async_fixes` added to `TEST_BINS` + per-suite build rule + phony target.
-- `docs/Version.md` — this entry (and trim dropped v6.0.0 per `--keep=20`).
-
-### Result
-
-- 60 / 60 host unit suites pass (`make test_cpp`), with the new `run_test_mode_sync_async_fixes` as the 60th. All 11 pins (1a/1b/1c, 2a/2b/2c, 3, 4a/4b/4c, 5a/5b) green; the existing 59 suites unchanged. Wall: ~7 s.
-- 3 / 3 host integration suites pass (`make itest`). Wall: ~40 s.
-- `make assets_check` PASS — no dashboard source touched, `AutoLinkWebHtml.h` byte contract unchanged.
-- `make test_coverage_manifest` PASS — `run_test_mode_sync_async_fixes` is a source-grep-only test, added to the exempt list (no `src_for_*` entry required).
-- `python3 build/pretty_print-test.py` PASS — all touched files formatted cleanly.
-- `python3 build/version.py check` PASS — 20 entries, --keep=20 (this entry pushed v6.0.0 off the tail).
-- `build/verify_build.sh` not run in this sandbox — `arduino-cli` is not installed. Per AGENTS rule 4, the cross-compile must be re-run in a longer-lived environment before release. The changes are: 2 new helper functions in a header already on every translation unit's include path, 4 `IHal`/`EspHal`/`AutoLink`/Link method body changes (no new symbols, no new RTOS primitive allocations, no header cycle changes), 1 link-layer tick-clamp + 4 wire-counter bumps (link-layer only, no public API), and 2 Ping/PongBase line-shape changes. The `esp32:esp32:firebeetle32` cross-compile risk is very low, unverified.
----
-
-## v6.0.9
-
-**Lower stream-buffer floor; drop bogus maxMsg > streamBufferSize check**
-
-### Fix 1 — `streamBufferFloor` drops the 16-slot ARQ pipeline factor
-
-The previous floor was `slots * 2 * (cfg.maxMsg + kHdr)` with `slots=16` — ~164 KB at the v6.0.6 default `maxMsg=5120`. The intent was to size the RX staging buffer for a full 16-slot ARQ pipeline, but the RX staging buffer is not the ARQ cache: `ArqCache::POOL_BUF_MAX` already owns the pipeline's storage, and the staging buffer only needs to hold one in-flight coalesced message plus drain headroom. The 32× factor consumed ~150 KB of heap that nothing actually needed and tripped `xStreamBufferCreate` on tight ESP32 boards.
-
-This release lowers the floor to `2 * (cfg.maxMsg + kHdr)` — ≈10.3 KB at the default. One full coalesced message plus a retransmit's worth of headroom, both modes covered. The RX staging buffer's contract is unchanged (drain coalesced + multi-chunk payloads between `popAppBuf` calls), but the heap cost drops 16×. Caller's larger `cfg.streamBufferSize` still wins.
-
-The formula lives in `src/al/AutoLinkConfig.h` as a host-linkable inline function; `EspHal::streamBufferFloor` is a one-line forward to keep the call-site shape in `begin()`. Host tests pin the formula by calling the production helper, not a re-implementation.
-
-### Fix 2 — Drop the `cfg.maxMsg > cfg.streamBufferSize` warning in `LinkCore` ctor
-
-The pre-fix ctor logged a noisy error when `cfg.maxMsg > cfg.streamBufferSize` — but `cfg.streamBufferSize` is the user-set hint, not the actual buffer size used by the HAL. After Fix 1, the actual buffer is always `>= 2 * maxMsg`, so the check was always wrong: every sketch with the v6.0.6 default `maxMsg=5120` and the default `streamBufferSize=2048` saw a spurious `E (355) boot error` on every boot, with no actual wire impact. The check is removed. The seq-space and ARQ-cache warnings already in the ctor are unchanged.
-
-### Wire format
-
-Unchanged. Both fixes are sizing-default / false-positive-error-log cleanups. No wire frame shifts, no public-API additions. `EspHal::streamBufferFloor` still exists with the same signature; it now delegates to the AutoLinkConfig free function.
-
-### Regression test
-
-New `run_test_esphal_stream_buf_floor` suite (5 pins) + existing `run_test_esphal_begin_and_health` updated:
-
-- **Pin 1** (new, runtime): `streamBufferFloor(default_cfg)` returns `2 * (5120 + 6) = 10252` bytes — exactly the new formula, well under the heap-realistic 32 KB ceiling. Pre-fix shape produced ~160 KB and tripped this pin.
-- **Pin 2** (new, runtime): caller-set `cfg.streamBufferSize = 64 KB` wins over the floor. The fix preserves the original "caller's larger cfg.streamBufferSize wins" contract.
-- **Pin 3** (new, source-grep on `AutoLinkConfig.h`): the formula body uses `multiples = 2` and `multiples * (cfg.maxMsg + kHdr)`. The pre-fix `slots = 16`, `slots * 2`, and `32 * (cfg.maxMsg ...)` tokens must NOT appear in the body. Toggling any of these back flips the pin red.
-- **Pin 4** (new, source-grep on `EspHal.h`): `EspHal::streamBufferFloor` is a thin forwarder — body contains `::autolink::streamBufferFloor(cfg)` and NOT any of `kHdr` / `multiples` / `slots` / `32 *`. Single source of truth: formula lives in AutoLinkConfig.h, the HAL doesn't redefine it.
-- **Pin 5** (new, source-grep on `LinkCore.cpp`): the `cfg.maxMsg > cfg.streamBufferSize` check + the `maxMsg > streamBufSize` log message are gone from the LinkCore ctor's first 2000 chars. Toggling either back flips the pin red.
-- **`run_test_esphal_begin_and_health` updated**: the prior pin (which asserted `slots = 16` and the 16-slot unconditional floor) is rewritten to match the new architecture — EspHal forwards to AutoLinkConfig::streamBufferFloor, the formula is `multiples = 2` in AutoLinkConfig.h, the 16-slot / 32× / mode-branch tokens are gone from both files.
-
-Toggle-off checks (verified locally):
-- Restoring `constexpr int slots = 16;` and `slots * 2 * (cfg.maxMsg + kHdr)` in AutoLinkConfig.h → Pin 1 flips red (floor jumps from ~10 KB to ~160 KB).
-- Re-adding `cfg.maxMsg > cfg.streamBufferSize` in LinkCore.cpp ctor → Pin 5 flips red.
-- Removing `::autolink::streamBufferFloor(cfg)` from EspHal::streamBufferFloor (or re-inlining the formula) → Pin 4 flips red.
-
-### Limitations
-
-- The floor covers one in-flight coalesced message plus headroom. Under ASYNC mode at default `maxMsg=5120`, the ARQ cache (in `ArqCache::POOL_BUF_MAX`) holds the pipeline's pending chunks; the staging buffer only sees the bytes that have been ACK-decoded and need to drain to the user via `recv()`. The 10 KB staging buffer is comfortably above `chunksForMsgLen(5120) * MAX_CHUNK ≈ 5.5 KB` of a worst-case in-flight decode. A future bump to `maxMsg >= 32 KB` would re-trigger the size scaling — but at that point the seq-space guard at `Link::sendMsg` would have rejected the send first.
-- The 2× factor is hand-tuned for the default `maxMsg=5120`. Operators who want a larger staging buffer can set `cfg.streamBufferSize` directly — same knob as before. The floor is a *floor*, not a ceiling.
-- The LinkCore ctor's seq-space warning and ARQ-cache headroom warning are unchanged. Those still fire when the user-supplied `maxMsg` would consume too many chunks (e.g. `maxMsg >= ~62 KB` trips the seq-space guard) or saturate the cache (chunk count `> POOL_SIZE / 2`). The deleted check was always false-positive at the v6.0.6 defaults; the surviving checks are real.
-- The fix does NOT touch the EspHal::begin() abort path. `xStreamBufferCreate` can still fail under extreme heap pressure (e.g. dashboard + WiFi + heavy log buffer all up); the existing `run_test_esphal_stream_buf_abort` gate keeps that contract pinned. The lower floor makes that abort path rarer, not impossible.
-
-### Files touched
-
-- `src/al/AutoLinkConfig.h` — forward-declare `AutoLinkConfig`; declare `inline size_t streamBufferFloor(const AutoLinkConfig &cfg)`; define after the struct body. Pure arithmetic, host-linkable.
-- `src/al/hal/EspHal.h` — `EspHal::streamBufferFloor` now a one-line forward to `::autolink::streamBufferFloor`; `stream_buf_size_` field comment updated to reference the new formula location; stale "16-slot ARQ pipeline" comment removed.
-- `src/al/link/LinkCore.cpp` — removed `cfg.maxMsg > cfg.streamBufferSize` warning + the `maxMsg > streamBufSize` log message; the seq-space + ARQ-cache warnings further down the ctor are unchanged.
-- `include/AutoLink.h` + `library.properties` + `idf_component.yml` — version bump 6.0.8 → 6.0.9 in lockstep.
-- `test/test_desktop/al/hal/EspHalStreamBufFloorTest.cpp` — NEW (5 pins).
-- `test/test_desktop/al/hal/EspHalBeginAndHealthTest.cpp` — `test_esphal_derives_stream_buffer_size_from_maxmsg_and_mode` rewritten to match the new architecture (single source of truth in AutoLinkConfig.h; thin forward in EspHal.h).
-- `test/test_desktop/Makefile` — added `run_test_esphal_stream_buf_floor` to `TEST_BINS` + per-suite build rule + phony target.
-- `test/scripts/coverage/test_coverage_manifest.py` — `run_test_esphal_stream_buf_floor` added to the source-grep-only exempt list (it's a pure source-audit / formula-call test, no `$(AUTOLINK_SRC)` in its link set).
-- `docs/Version.md` — this entry (and trim dropped v6.0.0 per `--keep=20`).
-
-### Result
-
-- 59 / 59 host unit suites pass (`make test_cpp`); `make all` ~5 s wall. The new `run_test_esphal_stream_buf_floor` is the 59th; the rewritten `run_test_esphal_begin_and_health` continues to pass against the new architecture.
-- 3 / 3 host integration suites pass (`make itest`). Wall: ~40 s.
-- `make assets_check` PASS — `AutoLinkWebHtml.h` byte contract unchanged (no dashboard source touched).
-- `make test_coverage_manifest` PASS — the new suite is on the source-grep-only exempt list, no `src_for_*` entry required.
-- `python3 build/pretty_print-test.py` PASS — the touched files formatted cleanly.
-- `python3 build/version.py check` PASS — 20 entries, --keep=20 (this entry pushed v6.0.0 off the tail).
-- `build/verify_build.sh` not run in this sandbox — `arduino-cli` not installed. Per AGENTS rule 4, the cross-compile must be re-run in a longer-lived environment before release. The change is a formula swap (no new symbols, no new RTOS primitive allocations, no header cycle changes — the new `AutoLinkConfig::streamBufferFloor` is a host-linkable inline in a header already on every translation unit's include path) plus a single ctor-line removal — cross-compile risk is very low, unverified.
----
-
-## v6.0.8
-
-**HAL-unhealthy halt blinks 300ms instead of silent delay(1000)**
-
-### Fix 1 — `PingPongBase::bringUpLink` halt path blinks at 300ms
-
-The previous halt on `!comm.isHealthy()` after `comm.begin()` was `while (true) delay(1000);` — silent on the bench unless an operator was staring at the debug Serial. When the EspHal stream-buffer allocation fails (heap refusal), the previous fix made the failure visible in the log (`HAL not healthy after begin() ... halting to avoid silent wire`) but a sketch in a case with no USB-Serial attached — or one whose operator walked away after the boot banner — would just look like a frozen board. The failure shape was technically correct (no wire, no corruption) but operationally invisible.
-
-This release swaps the silent delay loop for a visible LED blink:
-
-```cpp
-while (true) {
-    comm.blinkWait(1, 300, 300, 0);
-}
-```
-
-300 ms on / 300 ms off is the "trouble" cadence: slow enough to distinguish from normal wire-activity blinks (which fire on every successful Ping send via the v6.0.1 blink patch), fast enough to be impossible to miss. `blinkWait(1, 300, 300, 0)` calls the existing non-blocking overload (`start`), so the loop never yields via `delay` — it just keeps firing the blinker. The blink fires on whatever LED the user's sketch wired to the blinker (typically the on-board LED on the FireBeetle32).
-
-The `!comm.isHealthy()` gate itself is unchanged; this is a UX fix on the halt path, not a fix to the abort-detection logic. The EspHal abort that triggers this path (xStreamBufferCreate failure → `running=false`, `healthy=false`, `return;` without setting `healthy=true`) is still in place; the user's first signal that the abort fired is now the 300ms-blinking LED, not a debug Serial line they may not be reading.
-
-### Wire format
-
-Unchanged. The halt is a terminal state on a non-functional link — no wire frames are emitted, none can be received. The fix is purely UX on the operator-facing failure indicator.
-
-### Regression test
-
-`run_test_esphal_stream_buf_abort` (the existing 2-pin suite) extended; `test_pingpongbase_halts_on_unhealthy` rewritten:
-
-- **Pin 2 (rewritten)**: source-grep scopes inside `bringUpLink`'s body and asserts (a) `!comm.isHealthy()` gate is present, (b) `HAL not healthy` log message is present, (c) `while (true)` infinite-loop marker is present, (d) `comm.blinkWait(1, 300, 300, 0)` appears inside the loop, (e) `delay(1000)` does NOT appear inside the slice (the old silent-halt shape is gone).
-- Pin 1 unchanged (EspHal abort path verification).
-
-Toggle-off checks (verified):
-- Reverting `bringUpLink`'s halt loop to `while (true) delay(1000);` → `test_pingpongbase_halts_on_unhealthy` flips red (`Assertion 'halt loop must blink the LED at 300 ms cadence' failed`).
-- Removing the `!comm.isHealthy()` gate → pin flips red (`Assertion 'bringUpLink must check !comm.isHealthy()'`).
-- Restoring `delay(1000)` anywhere in the slice → `Assertion 'halt loop must not be a silent delay(1000) loop'` flips red.
-
-### Limitations
-
-- The 300ms-blink cadence is a fixed-loop shape — it does not differentiate failure modes (xStreamBufferCreate refusal vs uart_driver_install OOM vs task-create failure all produce the same blink). A future enhancement could flash a different pattern per failure (e.g., 3 short blinks for stream-buf, 2 short for task create) by reading the EspHal's diagnostic state into `bringUpLink`, but that crosses the PingPongBase / EspHal boundary and would need a small accessor on the HAL. Out of scope for this UX-fix release.
-- The blink fires on the user-configured blinker pin (default: the on-board LED). A sketch that wires the blinker to a non-LED GPIO (e.g., a buzzer) would now beep at 300ms intervals on a HAL failure — same shape, different output. The blink parameterization is the user's, not ours.
-- The halt is still a halt. There is no recovery path; the operator must power-cycle or hit the reset button. A future release that wanted self-recovery would have to expose a retry hook from `bringUpLink`, distinct from this UX fix.
-- The fix does NOT change the `EspHal::begin()` abort path itself. The stream-buffer allocation failure still cleans up mutex + task_exit_sem, sets `running=false`, and returns without `healthy=true`. The visible LED blink is downstream of that gate firing; the gate's contract is unchanged.
-
-### Files touched
-
-- `src/al/pingpong/PingPongBase.h` — `bringUpLink`'s halt loop body swapped from `while (true) delay(1000);` to `while (true) { comm.blinkWait(1, 300, 300, 0); }`; leading comment updated to describe the new visible-halt shape; inline rationale comment added.
-- `test/test_desktop/al/hal/EspHalStreamBufAbortTest.cpp` — `test_pingpongbase_halts_on_unhealthy` rewritten: positive assertion for `comm.blinkWait(1, 300, 300, 0)`, negative assertion for `delay(1000)`. Slice width bumped from 2500 to 3000 chars to fit the new inline rationale.
-- `include/AutoLink.h` + `library.properties` + `idf_component.yml` — version bump 6.0.7 → 6.0.8 in lockstep.
-- `docs/Version.md` — this entry.
-
-### Result
-
-- 58 / 58 host unit suites pass (`make test_cpp`), including the rewritten `run_test_esphal_stream_buf_abort` with the new positive / negative assertions. Wall: ~7 s.
-- 3 / 3 host integration suites pass (`make itest`). Wall: ~40 s.
-- `make assets_check` PASS — `AutoLinkWebHtml.h` byte contract unchanged (no dashboard source touched).
-- `make test_coverage_manifest` PASS — no new TEST_BINS entries; the change to `bringUpLink`'s halt body is within the existing source-contributing map.
-- `python3 build/pretty_print-test.py` PASS — the touched files formatted cleanly.
-- `python3 build/version.py check` PASS — 20 entries, --keep=20.
-- `build/verify_build.sh` not run in this sandbox — `arduino-cli` not installed. Per AGENTS rule 4, the cross-compile must be re-run in a longer-lived environment before release. The change is a 2-line loop body swap + a comment update + a test-pin rewrite — no new `#ifdef ARDUINO` paths, no new RTOS primitive allocations, no header cycle changes — so the `esp32:esp32:firebeetle32` cross-compile risk is very low, unverified.
----
-
-## v6.0.7
-
-**Default txDelayMs 50 -> 0; restore full line-rate out of the box**
-
-### Fix 1 — `AutoLinkConfig::txDelayMs` default lowered 50 -> 0 ms
-
-The 6.0.1 default of 50 ms was sized to give the `/stats` + `/logs` poll enough headroom when the dashboard was the bottleneck: at the 5-baud table a 50 ms post-send delay left a comfortable 1 s poll cycle for the dashboard to keep up with the wire. That math is correct when the dashboard is up. A sketch that boots without WiFi — or one that doesn't open the dashboard at all — ships at ~half the wire's natural throughput for no operator-visible reason, because Ping's loop honors `cfg.txDelayMs` unconditionally.
-
-This release lowers the default to 0 ms. Full line-rate out of the box. Operators who want a throttled bench run can pick a value via the dashboard's delay-ms dropdown (which now defaults to 0) or set `cfg.txDelayMs` directly in their sketch.
-
-The rationale for the original 50 ms throttle (and the 100 ms before it) is unchanged for dashboard-pressured benches — the dropdown and the constructor argument still let callers apply it. The default just stops imposing it.
-
-### Fix 2 — HTML delay-ms dropdown selected option 50 -> 0
-
-`src/al/web/dashboard_html_part_b.html`'s `<select id="delayMs">` had `<option value="50" selected>` since 6.0.1. The dashboard's JS reconciles the dropdown to `snap.txDelayMs` on every `/stats` poll, so a firmware-side default bump alone would have flipped the visible selection on the next poll (5.3.x did exactly that), but the source-of-truth HTML still pointed at 50. The clean fix is to flip the `selected` attribute to `<option value="0">` so a fresh page load shows 0 until the user (or the wire) overrides it. `AutoLinkWebHtml.h` is regenerated by `build/dashboard_assets.py` from the updated `part_b`.
-
-### Fix 3 — README's stale `100 ms` prose updated
-
-The README's `Random mode ...` paragraph still said "The default per-transmit delay is 100 ms" — a stale value from 5.3.x that 6.0.1 missed updating (it changed the source default but not the README). v6.0.6 noted this discrepancy as out-of-scope; this release closes the gap. New prose: "The default per-transmit delay is 0 ms — full line-rate out of the box (configurable via the dashboard's delay-ms widget or `cfg.txDelayMs`)."
-
-### Wire format
-
-Unchanged. The default txDelayMs is a pacing delay between Ping sends — it doesn't affect the on-the-wire COBS+CRC frame format, doesn't change the ARQ cache shape, doesn't change the seq-space budget, and doesn't touch any Link layer logic. Lowering the default to 0 just removes the inter-send idle window.
-
-### Regression test
-
-Two existing suites extended, two assertions updated:
-
-- `run_test_autolink::test_txDelayMs_default_and_setter` (AutoLinkTest.cpp): the two `cfg.txDelayMs == 50` and `link.txDelayMs() == 50` assertions now read `== 0`. Toggle off (revert to 50) → red.
-- `run_test_pingpong_blink_and_delay` Pin 3 (HTML default): the source-grep that asserted `value="50" selected` now asserts `value="0" selected`, and the negative-pin set expands from `{50}` to `{50, 100}` so a future regression that re-selects either previous default trips red.
-- `run_test_pingpong_blink_and_delay` Pin 4 (firmware default): the source-grep now asserts the substring `= 0` appears after `int txDelayMs = `, and the negative-pin set expands to `{50, 100}` for the same reason.
-
-Toggle-off checks (verified locally):
-- Reverting `cfg.txDelayMs` to `50` → `run_test_autolink::test_txDelayMs_default_and_setter` flips red (`Assertion 'cfg.txDelayMs == 0' failed`).
-- Reverting the HTML's `selected` to `value="50"` → `run_test_pingpong_blink_and_delay` Pin 3 flips red.
-
-### Limitations
-
-- A sketch that boots with a slow or contended `/stats` consumer (a busy TTY-to-PC serial bridge, a log-dumping sketch, or a custom dashboard that polls harder than the stock one) may observe `/logs` polling gaps at the new 0 ms default. The fix is to set `cfg.txDelayMs = 50` in the sketch — same knob as before, now opt-in instead of opt-out.
-- The HTML dropdown's `<option value="0">` line replaces the `selected` attribute from `value="50"`; the option itself (and the JS reconciliation) is unchanged. A future bump to a different default would touch one HTML line + one firmware line + two regression pins.
-- The wire-level backpressure from `Link::sendMsg`'s seq-space guard still applies unchanged. The 0 ms delay doesn't relax that.
-- This release is the doc-only / default-bump cleanup that v6.0.6's Limitations section flagged. No protocol change, no public-API change beyond the default.
-
-### Files touched
-
-- `src/al/AutoLinkConfig.h` — `txDelayMs = 0` (was 50); leading comment rewritten to describe the new rationale.
-- `src/al/web/dashboard_html_part_b.html` — `<option value="0" selected>` (was `value="50" selected`).
-- `src/al/web/AutoLinkWebHtml.h` — regenerated by `build/dashboard_assets.py` from the updated `part_b`.
-- `include/AutoLink.h` + `library.properties` + `idf_component.yml` — version bump 6.0.6 → 6.0.7 in lockstep.
-- `test/test_desktop/al/AutoLinkTest.cpp` — `test_txDelayMs_default_and_setter` updated for new default; leading comment rewritten.
-- `test/test_desktop/al/pingpong/PingPongBlinkAndDelayTest.cpp` — Pin 3 + Pin 4 updated for new default; function names `test_dashboard_default_delayMs_is_0` and `test_config_default_txDelayMs_is_0`.
-- `README.md` — "default per-transmit delay is 100 ms" → "default per-transmit delay is 0 ms — full line-rate out of the box".
-- `docs/Version.md` — this entry.
-
-### Result
-
-- 58 / 58 host unit suites pass (`make test_cpp`). The two updated pins + two updated assertions all flip red when reverted. Wall: ~7 s.
-- 3 / 3 host integration suites pass (`make itest`). Wall: ~40 s.
-- `make assets_check` PASS — `AutoLinkWebHtml.h` is current with the updated `dashboard_html_part_b.html`.
-- `make test_coverage_manifest` PASS — no new TEST_BINS; existing source-contributing + exempt buckets unchanged.
-- `python3 build/pretty_print-test.py` PASS — the touched files formatted cleanly.
-- `python3 build/version.py check` PASS — 20 entries, --keep=20.
-- `build/verify_build.sh` not run in this sandbox — `arduino-cli` not installed. Per AGENTS rule 4, the cross-compile must be re-run in a longer-lived environment before release. The change is a one-line default + one HTML attribute flip + three doc-comment updates — no new `#ifdef ARDUINO` paths, no new RTOS primitive allocations, no header cycle changes — so the `esp32:esp32:firebeetle32` cross-compile risk is very low, unverified.
----
-
-## v6.0.6
-
-**Raise default maxMsg 1024 -> 5120; introduce AUTOLINK_DEFAULT_MAX_MSG**
-
-### Fix 1 — Centralize the default maxMsg in `AUTOLINK_DEFAULT_MAX_MSG`
-
-The default `cfg.maxMsg = 1024` was a literal scattered across `AutoLinkConfig.h`, `PingPongBase.h`, `Ping.h`, `include/AutoLink.h`, and the host tests' source-grep pins. Three places could drift apart: the static_asserts in `AutoLinkConfig.h`, the `BUF_SIZE` buffer in `PingPongBase.h`, and the `maxSeqSize_` default in `Ping.h`. Any future maxMsg bump required touching all three plus the test pins plus the API doc fallback.
-
-This release:
-
-- Adds a canonical `AUTOLINK_DEFAULT_MAX_MSG = 5120` constant in `src/al/AutoLinkConfig.h` (host-linkable, no `al/link/LinkContext.h` deps — the constant lives next to `chunksForMsgLen` for the same reason).
-- Replaces both `chunksForMsgLen(1024)` literals in the seq-space static_asserts with `chunksForMsgLen((int)AUTOLINK_DEFAULT_MAX_MSG)` (5x for the new default: 1 + ceil(5120/250) = 22 chunks, still well under `COBS_SEQ_SPACE = 254`).
-- Sets `AutoLinkConfig::maxMsg = AUTOLINK_DEFAULT_MAX_MSG`; `Link::maxMsg()` is unchanged (still reads `cfg.maxMsg`).
-- Replaces the `PingPongBase::BUF_SIZE = 1024` literal with `AUTOLINK_DEFAULT_MAX_MSG`. The buffer is sized to the canonical message cap; tests that need smaller buffers set their own per-instance `cfg.maxMsg`.
-- Sets `Ping::maxSeqSize_`'s pre-`setup()` default to `(int)AUTOLINK_DEFAULT_MAX_MSG`. The runtime `setup()` path still overrides it with `base_.comm_.maxMsg()` after `bringUpLink` so user-supplied per-sketch overrides continue to flow through.
-- Updates `AutoLink::maxMsg()`'s pre-construction fallback from the literal `1024` to `AUTOLINK_DEFAULT_MAX_MSG` so a sketch that reads `cfg.maxMsg` before `comm.begin()` sees the same number the rest of the codebase does.
-
-The literal `1024` still appears in `LinkIOTest.cpp`, `LinkBaudPreferenceTest.cpp`, `AutoLinkTest.cpp`, `LinkMessageRoundtripTest.cpp`, etc. — these are explicit per-test `cfg.maxMsg = 1024` overrides, not defaults. Pinned by `run_test_seq_space_guard` Pin 4 + Pin 5 and `run_test_config_defaults_centralized`.
-
-### Fix 2 — Bump default message size from 1 KB to 5 KB
-
-The previous 1024-byte default was the maximum single-chunk payload (no MSG_HDR coalesce) for the old 1 KB chunk cap. The current 250-byte `MAX_CHUNK` makes a 1024-byte message a 5-chunk send (1 hdr + 4 data) — small for any multi-chunk pipeline test, and below the 64-slot `ArqCache::POOL_SIZE` steady-state window. Operators running Ping's random mode at the default size saw almost no multi-chunk traffic.
-
-5 KB = 22 chunks, still under `COBS_SEQ_SPACE = 254`, leaves room for ~2 inflight messages before the seq-space guard trips, and exercises the multi-chunk path meaningfully in steady state. The runtime warn at the `Link` ctor still fires once on the new default ("maxMsg=5120 takes 22 chunks — seq-space guard will reject at ~11 inflight messages"); the warning is informational, the budget comfortably covers the default.
-
-### Fix 3 — `WireSim.h` scratch buffers bumped to `AUTOLINK_DEFAULT_MAX_MSG`
-
-The two `uint8_t buf[1024]` instances in `test/common/WireSim.h` (the closed-loop simulator's loopback scratch) are not tied to `cfg.maxMsg` — they're fixed-size drive-loop helpers. Pre-this-release they silently truncated any `sim_.linkA().recvMsg(buf, sizeof buf)` call whose peer sent > 1024 bytes. The 6.0.x MTU roundtrip suite already exercised 32 KB messages, but it used a 2-node MockHal directly, not `WireSim.h`. The bump makes the scratch buffers match the new default; per-instance overrides still apply through `Link`'s own `cfg.maxMsg`-driven receive buffer.
-
-### Wire format
-
-Unchanged. The constant introduction, the default bump, and the scratch-buffer bump are all sizing-default changes; no wire frame shifts, no public-API additions. `AutoLink::maxMsg()`'s signature is unchanged; the fallback is now sourced from the constant.
-
-### Regression test
-
-Four existing suites extended, one new pin path:
-
-- `run_test_config_defaults_centralized` (AutoLinkTest.cpp): default `cfg.maxMsg` now pinned to `AUTOLINK_DEFAULT_MAX_MSG`. Toggle off (revert to the literal `1024`) → red.
-- `run_test_seq_space_guard` Pin 4: `chunksForMsgLen((int)AUTOLINK_DEFAULT_MAX_MSG)` now asserted to equal `1 + (5120 + 250 - 1) / 250 = 22` and `<= COBS_SEQ_SPACE`. Toggle off (revert to `chunksForMsgLen(1024)` literal) → red.
-- `run_test_seq_space_guard` Pin 5: source-grep asserts the `AUTOLINK_DEFAULT_MAX_MSG` substring appears in both static_asserts and that the budget-vs-msg invariant still holds (`ARQ_CHUNK_BUDGET >= chunksForMsgLen(...) * 2`). The substring check is wrap-tolerant — clang-format puts the LHS and RHS on separate lines.
-- `run_test_alink_message_edge::test_send_rejections_log_errors`: the "oversized" test payload is now `AUTOLINK_DEFAULT_MAX_MSG + 1` bytes (was hardcoded `2048`). Pre-this-release, with default `maxMsg = 1024`, 2048 was the smallest reject-capable size. With the new 5120 default, the test now exercises the new cap.
-
-Toggle-off checks (verified locally):
-- Reverting the default in `AutoLinkConfig.h` to `1024` → `run_test_config_defaults_centralized` flips red.
-- Reverting Pin 4's chunks math to the `1024` literal → `run_test_seq_space_guard` Pin 4 flips red.
-
-### Limitations
-
-- 5 KB is the new *default*, not a ceiling. Per-sketch `cfg.maxMsg = 65535` is unchanged; the seq-space guard at `Link::sendMsg` still rejects any single message whose chunk count alone would exceed `COBS_SEQ_SPACE`. Operators who want a larger default should set `cfg.maxMsg` in their sketch's config, not rely on bumping the canonical constant — the constant is shared across the static_asserts, `BUF_SIZE`, and `AutoLink::maxMsg()`'s fallback, so a bump is a single-source change but still requires bumping the seq-space budget in lockstep (`ARQ_CHUNK_BUDGET` would have to grow for the new ceiling to be comfortably covered).
-- `WireSim.h`'s bump to `AUTOLINK_DEFAULT_MAX_MSG` covers the new default. A future `cfg.maxMsg > AUTOLINK_DEFAULT_MAX_MSG` test still needs its own per-suite scratch buffers (or a WireSim that grows the buffer to match `cfg.maxMsg`). Out of scope for this release.
-- The README's prose mentions "100 ms" for the default `cfg.txDelayMs` (which is actually 50 ms since 6.0.1). This release does not touch that — the discrepancy is pre-existing and out of scope for the maxMsg bump. Will be cleaned up in a future doc-only release.
-- The new `AUTOLINK_DEFAULT_MAX_MSG` constant is `size_t`; the static_asserts cast it to `int` for `chunksForMsgLen`. A future bump past `INT_MAX` would need a separate `chunksForMsgLen(size_t)` overload; well outside the foreseeable envelope (32 KB / 64 KB / 128 KB all fit comfortably).
-
-### Files touched
-
-- `src/al/AutoLinkConfig.h` — `AUTOLINK_DEFAULT_MAX_MSG = 5120` constant; both `chunksForMsgLen(1024)` static_asserts swapped for the constant; comment block updated; field default `maxMsg = AUTOLINK_DEFAULT_MAX_MSG`.
-- `src/al/pingpong/PingPongBase.h` — `BUF_SIZE = AUTOLINK_DEFAULT_MAX_MSG`.
-- `src/al/pingpong/Ping.h` — `maxSeqSize_ = (int)AUTOLINK_DEFAULT_MAX_MSG` pre-setup default; `pickMsgSize_`'s leading comment rewritten for the new range shape; `RANDOM_MIN_BYTES` comment no longer references the old 1024 floor.
-- `include/AutoLink.h` — `AutoLink::maxMsg()` fallback reads `AUTOLINK_DEFAULT_MAX_MSG`.
-- `test/test_desktop/al/AutoLinkTest.cpp` — default pin reads the constant.
-- `test/test_desktop/al/link/LinkSeqSpaceGuardTest.cpp` — Pin 4 + Pin 5 use the constant; file-leading comment updated.
-- `test/test_desktop/al/link/LinkMessageEdgeTest.cpp` — oversize test payload is `AUTOLINK_DEFAULT_MAX_MSG + 1`.
-- `test/common/WireSim.h` — two `buf[1024]` instances bumped to `AUTOLINK_DEFAULT_MAX_MSG`.
-- `README.md` — random-mode range `[1024, maxMsg]` → `[1, maxMsg]`.
-- `docs/API.md` — `(default 1024)` → `(default 5120)`.
-- `include/AutoLink.h` + `library.properties` + `idf_component.yml` — version bump 6.0.5 → 6.0.6 in lockstep.
-- `docs/Version.md` — this entry.
-
-### Result
-
-- 58 / 58 host unit suites pass (`make test_cpp`), including the updated `run_test_seq_space_guard`, `run_test_alink_message_edge`, and `run_test_config_defaults_centralized`. Wall: ~8 s.
-- 3 / 3 host integration suites pass (`make itest`). Wall: ~40 s.
-- `make test_coverage_manifest` PASS — no new TEST_BINS; existing exempt / contributing buckets unchanged.
-- `make assets_check` PASS — `AutoLinkWebHtml.h` byte contract unchanged (no dashboard source touched).
-- `python3 build/pretty_print-test.py` PASS — all touched files formatted cleanly.
-- `python3 build/version.py check` PASS — 20 entries, --keep=20.
-- `build/verify_build.sh` not run in this sandbox — `arduino-cli` not installed. Per AGENTS rule 4, the cross-compile must be re-run in a longer-lived environment before release. The change is a single constant introduction + a default-bump + a buffer-bump; no new `#ifdef ARDUINO` paths, no new RTOS primitive allocations, no header cycle changes — cross-compile risk is low, unverified.
----
-
-## v6.0.5
-
-**Mode-toggle: skip second confirm in reboot() after radio**
-
-### Fix 1 — `reboot(skipConfirm)` opt-out for the radio handler
-
-The 6.0.4 `onLinkModeChange` showed its own `confirm()` before the `/mode?m=...` POST (warning the user a reboot is coming) and then, on a successful ack, called `reboot()`. `reboot()` opens with `confirm('Reboot the device now? ...')` for the Reboot button's standalone path. The result: the user got two confirm dialogs in sequence for a single click — first the mode-toggle confirm, then the Reboot button's confirm. The second dialog was redundant (the user had already consented to the reboot when they confirmed the mode change) and confusing (a different message, a different question).
-
-This release:
-
-- Adds a `skipConfirm` parameter to `reboot()`: when truthy, the function skips the Reboot button's confirm and proceeds straight to the `/reboot` POST. Default-arg-style call sites (the Reboot button's `onclick="reboot()"`) still see the confirm.
-- `onLinkModeChange` calls `reboot(true)` after a successful `/mode` ack — the user already consented in the handler's first `confirm()`.
-
-```js
-async function reboot(skipConfirm){
-  if(!skipConfirm && !confirm('Reboot the device now?...'))return;
-  ...
-}
-```
-
-Pinned by `run_test_mode_toggle_ui` Pin 2: source-grep scopes inside `onLinkModeChange`'s body and asserts (a) `reboot(true)` appears, (b) `reboot()` (no-arg) does NOT appear in the body, (c) the `async function reboot(` signature contains the `skipConfirm` parameter. Toggle off (revert to `reboot()`) flips red.
-
-### Wire format
-
-Unchanged. Single JS-function parameter change. No wire frame shifts, no public-API additions.
-
-### Regression test
-
-`run_test_mode_toggle_ui` Pin 2 extended:
-
-- New positive: `body.find("reboot(true)") != npos` — the call site must pass the opt-out flag.
-- New negative: `body.find("reboot()") == npos` inside the handler body — the no-arg call would re-introduce the double confirm.
-- New positive on the global scope: `src.find("async function reboot(")` followed by `src.find("skipConfirm", rebootSig) != npos` — the function signature must accept the parameter, so a future refactor that drops it (and lets `reboot(true)` silently become `reboot()` again) flips red.
-
-Pins 1, 3, 4, 5, 6, 7 unchanged.
-
-Toggle-off checks (verified locally):
-- Changing `reboot(true)` back to `reboot()` in the handler → Pin 2 flips red (`Assertion 'reboot(true) must be called after /mode ack (skipConfirm opt-out for already-confirmed caller)' failed`).
-
-### Limitations
-
-- The `skipConfirm` parameter is positional. A future change that adds a second opt-out flag would benefit from switching to an options-object signature (`reboot({skipConfirm:true, reason:'mode-toggle'})`); left as a future polish because the single-arg shape is the minimum diff to close the bug.
-- The Reboot button's `onclick="reboot()"` keeps the confirm; only callers that have already confirmed the reboot can opt out. The current sole caller is `onLinkModeChange`. Any future caller that wants the opt-out must consciously pass `true`.
-
-### Files touched
-
-- `src/al/web/dashboard.js` — `reboot(skipConfirm)` parameter; `if(!skipConfirm && !confirm(...))` guard; `onLinkModeChange` success branch now calls `reboot(true)`.
-- `src/al/web/AutoLinkWebHtml.h` — regenerated by `build/dashboard_assets.py`.
-- `include/AutoLink.h` + `library.properties` + `idf_component.yml` — version bump 6.0.4 → 6.0.5 in lockstep.
-- `test/test_desktop/al/web/ModeToggleUITest.cpp` — Pin 2 extended with the three new assertions above; Pin 2 leading comment updated.
-- `docs/Version.md` — this entry.
-
-### Result
-
-- 58 / 58 host unit suites pass (`make test_cpp`), including `run_test_mode_toggle_ui` with the new positive / negative assertions. Wall: ~7.5 s.
-- 3 / 3 host integration suites pass (`make itest`). Wall: ~40 s.
-- `make assets_check` PASS — `AutoLinkWebHtml.h` current with the updated JS.
-- `make test_coverage_manifest` PASS — no new TEST_BINS entries.
-- `python3 build/pretty_print-test.py` PASS — JS sources untouched by clang-format (skipped by extension); C++ test file formatted cleanly.
-- `python3 build/version.py check` PASS — 20 entries, --keep=20.
-- `build/verify_build.sh` not run in this sandbox — `arduino-cli` not installed. Per AGENTS rule 4, the cross-compile must be re-run in a longer-lived environment before release. Change is one JS function parameter + one call site; no new `#ifdef ARDUINO` paths, no new RTOS primitive allocations, no header cycle changes — cross-compile risk is low, unverified.
----
-
-## v6.0.4
-
-**Mode toggle: NVS-only /mode handler, JS-driven reboot, radio on Pong**
-
-### Fix 1 — `handleMode` persists to NVS only; live `link_.setMode(...)` removed
-
-The previous handler called `self->link_.setMode(newMode)` immediately after parsing the `?m=SYNC|ASYNC` query and then persisted the same value to NVS — a "live, no reboot" toggle. Mode is not actually live-applicable: changing `cfg.mode` flips the ARQ pool's *intended* behavior (SYNC per-chunk wait vs ASYNC gap-stop / pool-exhaustion drop), but the EspHal stream buffer was sized at boot and FreeRTOS stream buffers can't be resized in flight, and the `cfg.mode != SYNC` branch in `LinkTimers::onTimerOk_unlocked` reads the field without re-checking any other init-time state. The result on the wire was `cfg.mode = SYNC` with a 30 KB ASYNC-shaped stream buffer and an ASYNC-shaped ARQ pool — the snap-reported mode diverged from the actual wire behavior. Operators pressing the radio on the dashboard saw the dashboard pill flip but the bench log stayed on the previous mode.
-
-This release drops the live apply. `handleMode` writes to NVS (`putUChar("mode", ...)` in the `autolink` namespace) and returns 200. The dashboard's radio handler kicks `reboot()` after a successful POST; the reboot re-runs `bringUpLink`'s NVS-read path which calls `comm.setMode(...)` *before* `comm.begin()`, so the next wire frame is on the freshly-initialized buffer floor + SYNC wait logic.
-
-The leading comment in `handleMode` documents the contract; the test pins it.
-
-### Fix 2 — `dashboard.js` `onLinkModeChange` confirms and reboots after the POST
-
-The previous JS handler optimistically flipped the radio (`currentLinkMode = val; highlightLinkMode()`) and let the next `/stats` poll reconcile — no reboot, no UI feedback that a reboot was needed. With Fix 1 in place the optimistic flip is wrong (a reboot is coming and the page reloads from scratch). This release:
-
-- Wraps the POST in a `confirm()` that names the new mode and the reboot side-effect, so the user can bail before the link drops.
-- On a successful `/mode?m=...` ack the handler calls the existing `reboot()` function — same code path the Reboot button uses. The user sees the standard "Rebooting..." affordance and the post-reboot reload.
-- Removes the optimistic `currentLinkMode = val` / `highlightLinkMode()` update; the page reload reconciles everything from the firmware's snap.
-
-### Fix 3 — `linkModeGroup` rendered on both Ping and Pong dashboards
-
-The `linkModeGroup` div was tagged `class="lvl-group ping-only"`, which the CSS uses to hide it on Pong. Mode is a symmetric choice — Pong's `Link::mode()` is the same field as Ping's, the snap reports the same value on both sides, and a Pong-side operator pressing the radio needs the same effect. This release drops `ping-only` from the `linkModeGroup` div. The fill-mode / start / pause widgets stay `ping-only` (those are Ping-only concepts).
-
-`AutoLinkWeb::handleMode` works for both roles already — the snap task reads `link_.mode()` directly via the `AutoLinkWeb`-owned `AutoLink& link_`, so Pong's `snap_.linkMode` is populated correctly without an `installWebHooks` call.
-
-### Wire format
-
-Unchanged. All three fixes are dashboard / handler behavior. The wire contract is identical; the buffer floor and SYNC wait logic that *are* part of the wire contract stay init-time (Fix 1 explicitly routes the new mode through `comm.begin()`).
-
-### Regression test
-
-`run_test_mode_toggle_ui` (extended to 7 pins, was 6). New pins + changes:
-
-- **Pin 1** (updated): source-grep verifies `id="linkModeGroup"` is on a `<div>` whose tag string does NOT contain `ping-only`. Pre-fix shape had the class and the div was hidden on Pong.
-- **Pin 2** (rewritten): source-grep scopes inside `onLinkModeChange`'s body and asserts (a) `/mode?m=` POST, (b) `reboot()` is called inside the success branch, (c) the optimistic `currentLinkMode=val` write is gone. Pre-fix shape updated the radio without rebooting.
-- **Pin 5** (rewritten): source-grep scopes inside `handleMode`'s body and asserts (a) `link_.setMode(` does NOT appear (the live apply is gone), (b) `esp_restart` does NOT appear (5.3.x's reboot-on-toggle path stays gone), (c) `putUChar("mode"` + `prefs.begin("autolink"` are present (NVS persistence is the entire side-effect).
-- **Pin 7** (new): source-grep scopes inside `onLinkModeChange`'s body, locates the `confirm(` call, asserts it appears *before* the `/mode?m=` POST and that the message string contains `reboot` so the user knows the side-effect before clicking OK.
-
-Pins 3, 4, 6 unchanged.
-
-Toggle-off checks (verified locally):
-- Adding `ping-only` back to the `linkModeGroup` div → Pin 1 flips red (`Assertion 'linkModeGroup div tag must not contain ping-only' failed`).
-- Removing `reboot()` from the success branch of `onLinkModeChange` → Pin 2 flips red.
-- Re-adding `self->link_.setMode(...)` to `handleMode` → Pin 5 flips red.
-- Removing the `confirm(` call → Pin 7 flips red.
-
-### Limitations
-
-- The reboot between radio click and new-mode wire takes 5–10 s. Operators who want sub-second mode-switching need a future wire-level control frame (out of scope; the wire protocol has no "change mode" command — mode is init-time by design).
-- The radio handler's `confirm()` is browser-native and blocks the page until the user clicks OK. A future UI that wants inline previews can fold the confirm into a custom modal; the existing `confirm()` keeps the diff minimal.
-- The previous "live" `handleMode` had a bug where the snap-reported mode flipped while the wire stayed on the old mode. The `run_test_mode_toggle_ui` Pin 5 contract ("no live `link_.setMode`") is the regression wall; if a future change wants to re-introduce a live apply, it has to also resize the stream buffer and re-init the SYNC wait state — both non-trivial — and rewrite Pin 5.
-- `bringUpLink`'s NVS read path (`prefs.getUChar("mode", 0xFF)`) was already wired by the previous release and is unchanged here. The reboot in Fix 2 is what activates it.
-
-### Files touched
-
-- `src/al/web/dashboard_html_part_b.html` — `linkModeGroup` div class `lvl-group ping-only` → `lvl-group`.
-- `src/al/web/dashboard.js` — `onLinkModeChange` body: added `confirm()` gate, removed optimistic `currentLinkMode=val; highlightLinkMode()`, added `reboot()` call after `/mode` ack; leading comment updated.
-- `src/al/web/AutoLinkWebHandlers.cpp` — `handleMode` body: removed `self->link_.setMode(newMode)` live apply; leading comment now documents NVS-only + reboot-required contract.
-- `src/al/web/AutoLinkWebHtml.h` — regenerated by `build/dashboard_assets.py` from the updated part_b + JS.
-- `include/AutoLink.h` + `library.properties` + `idf_component.yml` — version bump 6.0.3 → 6.0.4 in lockstep.
-- `test/test_desktop/al/web/ModeToggleUITest.cpp` — Pin 1 + Pin 2 + Pin 5 rewritten; new Pin 7; file-leading comment + main() updated to reflect the new contract.
-- `docs/Version.md` — this entry.
-
-### Result
-
-- `make test_cpp` PASS — 58/58 host unit suites pass. The 7-pin `run_test_mode_toggle_ui` passes; the 3 new / rewritten pins trip red when reverted. Wall: ~7 s.
-- `make assets_check` PASS — `AutoLinkWebHtml.h` is current with the updated dashboard sources.
-- `make test_coverage_manifest` PASS — no new TEST_BINS entries; the changes to existing files are within the existing source-contributing map.
-- `python3 build/pretty_print-test.py` PASS — the touched .cpp + .html formatted cleanly.
-- `python3 build/version.py check` PASS — 20 entries, --keep=20.
-- `build/verify_build.sh` not run in this sandbox — `arduino-cli` is not installed. Per AGENTS rule 4, the cross-compile must be re-run in a longer-lived environment before release. Changes are local to the dashboard HTML/JS, the handler body (removed one line, updated leading comment), and the test source — no new `#ifdef ARDUINO` paths, no new RTOS primitive allocations, no header cycle changes — so the `esp32:esp32:firebeetle32` cross-compile risk is low, but unverified.
----
-
-## v6.0.3
-
-**Resweep churn + Pong CRC/desync fix: split link-not-OK from backpressure, dropLink no-op on sweep, Ping flushRx at SWP→OK, heap log on resweep**
-
-### Fix 1 — Split send-not-OK from real backpressure in Ping's send loop
-
-`Ping::sendMsg` returning false conflated two distinct reasons — link not OK (transient, the link is self-recovering via its own sweep) and ARQ cache full / seq-space exhausted (real backpressure). Treating them identically made `consecSendFail_` escalate to `dropLink()` on a link that was already resweeping, kicking a fresh P1 on top of the in-progress sweep and doubling the resweep cycle. The fix gates the counter on link state:
-
-```cpp
-if (!base_.comm_.sendMsg(sendBuf_, n, &seq)) {
-    if (!base_.comm_.ready()) {
-        break;          // link not OK; sweep handles it; don't count, don't drop
-    }
-    consecSendFail_++;  // real backpressure only
-    ...
-}
-```
-
-`Ping::ready()` is the existing facade accessor (`link->getState() == State::OK`); no new public API. Pinned by `run_test_ping_send_failure` Pin 7.
-
-### Fix 2 — `Link::dropLink()` is a no-op when state != OK
-
-A late `dropLink()` on a link that has already left OK (mid-sweep, mid-recovery) used to `reset_unlocked(true)` + `sendBreak()` a second time, restarting the handshake from a fresh P1 on top of the in-progress sweep. The field logs at ~28.7s and ~35.7s show the back-to-back P1→P2→P3 cycles. The fix early-returns unless the link is in OK:
-
-```cpp
-void Link::dropLink() {
-    hw.lock();
-    if (state != State::OK) {
-        hw.unlock();
-        return;
-    }
-    reset_unlocked(true);
-    ...
-}
-```
-
-Once a sweep is running, let it run. Pinned by `TestAccessorStructureTest::test_droplink_no_op_when_already_sweeping`.
-
-### Fix 3 — Ping flushes the raw rx path on SWP→OK transition
-
-Pong's loop already drained stale bytes pre-blink (`drained %d stale bytes pre-blink`); Ping had a parallel drain (`drained %d stale echo(s) pre-settle`) but only via `recv()`. A half-received frame from before the drop (header parsed but payload truncated by the link reset) lands in the rx stream buffer; the user-level `recv()` drain leaves it in place, and the next `recvMsg()` reads a truncated header and fails the CRC. The fix flushes the raw rx path *before* the recv drain:
-
-```cpp
-if (!base_.wasReady_) {
-    base_.comm_.flushRx();         // clear hw-level queue + stream buf
-    int drained = 0;
-    while (base_.comm_.recv(recvBuf_, sizeof recvBuf_) > 0) drained++;
-    ...
-}
-```
-
-`AutoLink::flushRx()` calls `Link::flushRx()` which clears the app buffer and `flushRxHw()`. The crc-fail / desync burst before each BREAK (and the seq-numbering jump post-recovery) was this bug class. Pinned by `run_test_ping_send_failure` Pin 8.
-
-### Fix 4 — Free-heap log on each disc-triggered resweep (triage aid)
-
-`Link::reset_unlocked` now logs `resweep: disc=%lu freeHeap=%u` on the count-and-resweep branch (`count && state == State::OK`), wrapped in `#ifdef ARDUINO` so the host build is unaffected. The log is the triage hook for the disc-counter-climb symptom: a stable freeHeap across cycles confirms Fixes 1-3 (state-machine race) are sufficient; a monotonic freeHeap drop points at POOL_SIZE starvation during `uart_driver_install` (a separate fix that's out of scope for this release). On the FireBeetle32 a stable freeHeap across cycles is the expected outcome. Pinned by `BoundaryInvariantsTest` Pin 7.
-
-### Wire format
-
-Unchanged. All four fixes are runtime / state-machine behavior. No wire frame shifts, no public-API additions (Fix 1 reuses the existing `ready()` accessor).
-
-### Regression test
-
-Three existing suites extended with three new pins:
-
-- `run_test_ping_send_failure` Pin 7 (Fix 1): source-grep verifies the send-failure branch contains `if (!base_.comm_.ready()) { break; }` *before* `consecSendFail_++`. Pre-fix shape bumped the counter unconditionally and let the drop-on-threshold fire on a link that was already resweeping.
-- `run_test_ping_send_failure` Pin 8 (Fix 3): source-grep verifies `base_.comm_.flushRx()` appears in Ping's `!wasReady_` block before the `recv()` drain loop. Pre-fix shape only drained via `recv()`, leaving a half-received frame in the rx buffer to fail the next CRC.
-- `TestAccessorStructureTest::test_droplink_no_op_when_already_sweeping` (Fix 2): source-grep verifies the `state != State::OK` guard precedes `reset_unlocked(true)` in `Link::dropLink()`. Pre-fix shape reset twice on a mid-sweep late drop.
-- `BoundaryInvariantsTest` Pin 7 (Fix 4): source-grep verifies the resweep log lives inside `#ifdef ARDUINO`, mentions both `resweep` and `freeHeap`, and that `LinkCore.cpp` pulls in `<esp_system.h>` for `esp_get_free_heap_size()`.
-
-Toggle-off checks (verified):
-- Removing the `ready()` guard in Ping.h → `run_test_ping_send_failure` Pin 7 flips red (`Assertion 'send-failure branch must check !base_.comm_.ready() to distinguish self-recovering from backpressure' failed`).
-- Removing the state guard in `dropLink()` → `TestAccessorStructureTest::test_droplink_no_op_when_already_sweeping` flips red (`Assertion 'dropLink() must guard on state != State::OK' failed`).
-- Removing `flushRx()` from Ping's `!wasReady_` block → `run_test_ping_send_failure` Pin 8 flips red (`Assertion '!wasReady_ block must call base_.comm_.flushRx()' failed`).
-- Removing the heap log → `BoundaryInvariantsTest` Pin 7 flips red (`Assertion 'reset_unlocked must log 'resweep' on disc-count bump' failed`).
-
-### Limitations
-
-- Fix 4's heap log is device-only (`#ifdef ARDUINO`); the host suite doesn't observe it. The triage value is for the bench run, not the unit-test gate.
-- The seq-space guard from v6.0.1 still rejects chunk counts > COBS_SEQ_SPACE; Fix 1 doesn't change the seq budget. The two fixes are complementary: v6.0.1 bounds the seq-space aliasing, v6.0.3 stops the post-drop resweep churn from doubling.
-- Fix 3's `flushRx()` flushes the hw-level queue AND the stream buffer. A future caller that bypassed `AutoLink::flushRx()` and called `Link::sendFrame_unlocked` directly would still see the half-received frame; the fix only covers the facade path.
-- Fix 2's guard is at the public `Link::dropLink()` entry. The internal `reset_unlocked` is still called from `err_unlocked`, `kickoff`, and the timer-driven paths — those are intentional and don't double-reset because they fire from within the link layer's own state machine.
-
-### Files touched
-
-- `src/al/link/LinkApi.cpp` — `Link::dropLink()` guards on `state != State::OK`.
-- `src/al/link/LinkCore.cpp` — `reset_unlocked`'s count-and-resweep branch logs `resweep: disc=%lu freeHeap=%u` under `#ifdef ARDUINO`; `<esp_system.h>` include added.
-- `src/al/pingpong/Ping.h` — send-loop failure branch early-returns on `!base_.comm_.ready()`; `!wasReady_` block calls `flushRx()` before the recv drain.
-- `include/AutoLink.h` + `library.properties` + `idf_component.yml` — version bump 6.0.2 → 6.0.3 in lockstep.
-- `test/test_desktop/al/pingpong/PingSendFailureTest.cpp` — Pin 7 + Pin 8.
-- `test/test_desktop/al/link/TestAccessorStructureTest.cpp` — `test_droplink_no_op_when_already_sweeping`.
-- `test/test_desktop/al/BoundaryInvariantsTest.cpp` — Pin 7.
-- `docs/Version.md` — this entry.
-
-### Result
-
-- 58 / 58 host unit suites pass (`make test_cpp`). Wall: ~8.6 s.
-- 3 / 3 host integration suites pass (`make itest`). Wall: ~40 s.
-- `make test_coverage_manifest` PASS (the three source-grep-only pins don't add new TEST_BINS entries; `run_test_ping_send_failure` already had coverage through its existing pins).
-- `python3 build/pretty_print-test.py` PASS (17/17 assertions; the new source changes formatted cleanly).
-- `python3 build/version.py check` PASS (20 entries, --keep=20; the new entry pushed v6.0.1 down to the trim boundary).
