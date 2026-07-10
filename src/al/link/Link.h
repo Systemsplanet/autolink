@@ -99,6 +99,22 @@ class Link : private UtilFrameRx::Listener,
     uint64_t txBytes, rxBytes;
     uint64_t discCount, frameErrs;
 
+    // ASYNC-mode inter-chunk gap: cfg.asyncChunkGapMs is the
+    // microsecond-resolution wait between successive chunks
+    // of a single multi-chunk send. Implemented as a single
+    // hw.delayMs() call; on the host it's a no-op (no UART
+    // to drain), on the ESP32 it spins the task long enough
+    // for the peer's uart_event_task to pull the just-emitted
+    // bytes out of the RX FIFO before the next chunk
+    // arrives. Returns 0 in SYNC mode (one frame in flight,
+    // ACK-gated, no burst shape to pace). Pinned by
+    // AsyncChunkGapTest.
+    int interChunkGapMs_unlocked() const {
+        if (cfg.mode != AutoLinkConfig::Mode::ASYNC)
+            return 0;
+        return cfg.asyncChunkGapMs < 0 ? 0 : cfg.asyncChunkGapMs;
+    }
+
     bool onSyncAckTimeout_unlocked(bool midMessage);
 
     struct SyncOp {
@@ -136,6 +152,23 @@ class Link : private UtilFrameRx::Listener,
     // everything from base through txSeq-1, not just base
     // alone).
     int gbnAttempts_ = 0;
+    // gbnBackoffMs_ is the inter-resend cadence the OK-state
+    // timer arm applies after a whole-window retransmit
+    // round, computed by decideGbnBackoff(gbnAttempts_,
+    // syncAckTimeoutMs, gbnBackoffCapMs_). Resets to 0 on any
+    // forward progress (cumulative ACK that advances
+    // gbnBase_, or pendingCount dropping). Caps at
+    // gbnBackoffCapMs_ (8*syncAckTimeoutMs by default) so a
+    // permanently-stuck base still hits maxRetx within a
+    // bounded wall budget. See GbnBackoffTest for the
+    // host-side pin.
+    uint32_t gbnBackoffMs_ = 0;
+    // Snapshot of gbnBase_ at the last whole-window resend
+    // round, used to detect forward progress (base advanced)
+    // between rounds. 0xFF sentinel for "no resend round yet"
+    // — picked because the ARQ table initializes at seq=0 and
+    // a fresh link never has gbnBase_ == 0xFF.
+    uint8_t gbnLastRetxBase_ = 0xFF;
     void gbnResendWindow_unlocked(uint32_t now);
 
     bool linkPaused_ = false;
@@ -197,6 +230,19 @@ class Link : private UtilFrameRx::Listener,
     void hwLock() override { hw.lock(); }
     void hwUnlock() override { hw.unlock(); }
     uint32_t hwNowMs() const override { return hw.nowMs(); }
+
+    // GBN backoff cap: 8 * syncAckTimeoutMs, floored at
+    // syncAckTimeoutMs. Caps the exponential doublings so a
+    // permanently-stuck base still trips maxRetx within a
+    // bounded wall budget — at 500 ms RTO this is 4 s of
+    // stretched cadence, well below the 10 s idle watchdog
+    // that would otherwise escalate the drop.
+    uint32_t gbnBackoffCapMs_unlocked() const {
+        uint32_t cap = (uint32_t)cfg.syncAckTimeoutMs * 8u;
+        if (cap < (uint32_t)cfg.syncAckTimeoutMs)
+            cap = (uint32_t)cfg.syncAckTimeoutMs;
+        return cap;
+    }
     void hwSetSpd(uint32_t b) override { hw.setSpd(b); }
     void hwStartTimer(int ms) override { hw.startTimer(ms); }
     uint8_t reorderExpectedSeq() const;
