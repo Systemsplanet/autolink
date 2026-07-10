@@ -146,6 +146,13 @@ HealthAction Link::applyHealth_unlocked(uint32_t now) {
 // cache IS the window, so there's no cache-miss/fake-ACK
 // retirement path left to take. Returns true if the caller
 // must sendBreak (link was dropped).
+//
+// Forward-progress detection between rounds: if gbnBase_
+// advanced since the last whole-window resend, the stall is
+// over — reset gbnAttempts_ + gbnBackoffMs_ to 0 so the next
+// stall starts from the base RTO (no extra latency on the
+// happy path). Otherwise increment gbnAttempts_ and let the
+// timer arm apply decideGbnBackoff()'s exponential cadence.
 bool Link::sweepRetx_unlocked(uint32_t now) {
     if (cfg.mode == AutoLinkConfig::Mode::SYNC || !arq_.gbnActive())
         return false;
@@ -159,7 +166,20 @@ bool Link::sweepRetx_unlocked(uint32_t now) {
         reset_unlocked(true);
         return state == State::SWP;
     }
+    // Forward progress = base advanced OR pending count
+    // dropped, since the last retx round. Snapshots taken
+    // BEFORE gbnResendWindow_unlocked() so a cumulative ACK
+    // racing the resend is counted as progress for the NEXT
+    // round (the current round already resends).
+    if (gbnLastRetxBase_ != 0xFF && gbnLastRetxBase_ != arq_.gbnBase()) {
+        gbnAttempts_ = 0;
+        gbnBackoffMs_ = 0;
+    }
     gbnAttempts_++;
+    gbnLastRetxBase_ = arq_.gbnBase();
+    gbnBackoffMs_ =
+        decideGbnBackoff(gbnAttempts_, (uint32_t)cfg.syncAckTimeoutMs,
+                         gbnBackoffCapMs_unlocked());
     gbnResendWindow_unlocked(now);
     return false;
 }
@@ -174,7 +194,18 @@ bool Link::onTimerOk_unlocked() {
         return true;
     if (sweepRetx_unlocked(now))
         return true;
-    hw.startTimer(okTickMs());
+    // GBN backoff: if the just-completed retx round left
+    // gbnBackoffMs_ > 0 (i.e., the base is stuck and the
+    // exponential cadence is engaged), stretch the next timer
+    // fire by that amount instead of the regular okTickMs().
+    // The base is now re-stamped so the next decideSlot()
+    // call starts from the post-resend age, not the
+    // pre-resend age that would otherwise Retx again on the
+    // very next tick.
+    uint32_t next = okTickMs();
+    if (gbnBackoffMs_ > next)
+        next = gbnBackoffMs_;
+    hw.startTimer(next);
     return false;
 }
 
