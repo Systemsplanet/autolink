@@ -1,41 +1,102 @@
-# todo.md — v6.0.40
+# todo.md — v6.1.13
 
-Release history: `docs/Version.md`. Order = priority. Nothing here is done.
+Release history: `docs/Version.md`. Closed/archived items live in
+`docs/Version.md` and are not re-listed here.
 
-## Open
+## 1. Cross-compile gates not run this session
 
-1. **Restore the device-path verification loop, then bench-validate the
-   6.0.33–6.0.40 backlog.** `verify_build.sh` last cleared the build at
-   6.0.32; source-touching releases since shipped cross-compile-unverified
-   and 6.0.37 exists only because the host gate misses Arduino-only
-   breakage by construction. Run `./build/verify_build.sh`
-   (esp32:esp32@3.3.5), then on the FireBeetle pair: re-lock cadence
-   symmetry (slave free-runs P1→P2 ~300 ms for ~6 s post-disc while master
-   idles — reproduce first, dwells are pinned by
-   `PongP1GuardOutlastsMasterP2Test` et al.), sweep walk-down
-   (512000 → 115200 → … lock on first PONG_ACK), ASYNC-flood CRC/desync
-   wedge + the unified health-monitor drop/resweep end-to-end
-   (`LinkHealth.h` via `LinkTimers.cpp`), heap-cap boot log, and both OTA
-   uploads (`curl --data-binary @fw.bin /ota/fw`; `zip -0` GUI →
-   `/ota/gui`, `GET /` serves from LittleFS).
+No network egress in this sandbox: `bash build/verify_build.sh` and
+`bash build/check_arduino_iface.sh` were not run against
+`esp32:esp32@3.3.5` / `esp32:esp32:firebeetle32`. Re-run both before
+ship per AGENTS rule 4.
 
-2. **SYNC: resync on the failure, not the watchdog.** A lost mid-message
-   ACK wedges the length-prefixed framer; recovery waits up to
-   `idleTimeoutMs` (10 s default). Issue BREAK immediately on a
-   mid-message `waitForAck` timeout so both framers realign in one
-   round-trip. Regression: extend `LinkSyncStallWatchdogTest` — wedge
-   drops within one RTO, not one idle window; toggle-off → red.
+## 2. Hardware bench validation (physical FireBeetle pair)
 
-3. **ASYNC: raise the delivery floor under loss.** ~74 % delivery at 1 %
-   frame loss (post-6.0.34) is not bulletproof — losses trace to
-   `reorderHoldMs` (1500, `AutoLinkConfig.h:258`) expiring before retx
-   closes the gap, and pool exhaustion under sustained flood. Derive
-   reorder hold from measured RTO × `maxRetx` instead of a fixed 1500 ms;
-   add a loss-sweep itest (0.1 / 1 / 5 %) with pinned per-rate floors
-   (target ≥ 99 % at 1 %); pin pool headroom under flood.
+- GBN loss floor: reproduce sustained frame loss on real UART noise
+  (not just MockHal) and confirm the loss-sweep floors (99% @ 1% loss)
+  hold outside simulation.
+- Re-lock cadence symmetry, sweep walk-down, ASYNC flood bench, OTA
+  (both upload paths).
+- Confirm split-delivery CTRL frames (the v6.1.7 `okCarry_` fix)
+  reassemble cleanly when a real UART read lands mid-candidate — the
+  host itest exercises this via hand-split `onRx()` chunks, not an
+  actual fragmented hardware read.
+
+## 3. (Archived v6.1.11) LCK state machine arm is unreachable
+
+Closed in v6.1.11 via option (a) — full LCK state-machine deletion
+(see `docs/Version.md` v6.1.11 "What moved"). State::LCK +
+handleLck_unlocked + onTimerLck_unlocked + lckRetries_ + the
+decideLckTick / LckAction helpers all gone; the wire vocabulary
+(REQ_CMD / LOCK_CMD) stays for any future option (b) re-introduction.
+
+## 4. (Archived v6.1.11) Sweep-timeout arms uncovered by host tests
+
+Closed in v6.1.11 — new `run_test_sweep_timeout_arms` clock-injected
+host pin (see `docs/Version.md` v6.1.11 "What moved"). Four pins:
+master P3 Stay / FallbackLockSlowest, pong P2 Stay / DropToPhase1.
+The arms now have a regression pin; their behavior is the
+documented-and-tested shape going forward.
+
+## 5. (Archived v6.1.12) SYNC RTO ladder low coverage — illusory
+
+Closed in v6.1.12 — re-audit found the gap was illusory. The SYNC
+ladder (`syncRtoStep_unlocked` / `syncAwaitAcked_unlocked`) is already
+pinned by `run_test_sync_resync_spiral::test_pin_sync_retx_ladder_resends_before_drop`
+(4 LCs of `test_syncRtoStep` + `test_syncAttempt`). The side-effect
+side (`onSyncAckTimeout_unlocked` mid-message drop + BREAK, single-
+frame `noteTxReject_unlocked` only) is pinned by
+`run_test_sync_stall_watchdog` (Pins 3-4). All four target paths are
+host-covered; the v6.1.10 todo's "only via itest" claim was wrong.
+See `docs/Version.md` v6.1.12.
+
+## 6. (Archived v6.1.12) findMsgHeaderResync_unlocked — illusory
+
+Closed in v6.1.12 — re-audit found the gap was illusory.
+`LinkRx.cpp::findMsgHeaderResync_unlocked` is host-covered by three
+existing unit suites:
+- `run_test_alink_message_corrupt` (`test_corrupt_msg_header_resync_to_next_message`
+  + `test_corrupt_msg_header_no_resync_clears_buffer`) drives the
+  function through the recvMsg public surface with injected
+  corrupt-then-valid + all-junk appBuf payloads.
+- `run_test_alink_message_resync` (oversize-L header, junk-prefix
+  resync, false-boundary rejection, multi-chunk loss surfaces).
+- `run_test_msg_codec` (the pure-decision shim — `msgResyncScan`).
+
+The function is not directly named in any of these tests (the
+recvMsg wrapper calls it), so gcov's per-symbol accounting reads
+0%, but the runtime contract is fully pinned. See
+`docs/Version.md` v6.1.12.
+
+## 7. (Closed v6.1.12) AutoLinkConfig clamp helpers — inlining artifact documented
+
+Closed in v6.1.12. The 0% gcov reading on `clampToMaxBauds()` /
+`allowedBaudSafe()` is an attribution artifact (both functions are
+defined in `src/al/AutoLinkConfig.h` and gcc inlines them into every
+Link.cpp site that calls them). Action taken: `clampToMaxBauds()` got
+an explicit `inline` keyword (was implicit) so future maintainers
+read the inlining as a documented decision rather than a missing
+declaration. The function's behavioral round-trip is covered by
+the broader Link suite that drives baud-index flows.
+
+## 8. (Closed v6.1.12) Not-host-testable TUs — documented
+
+Closed in v6.1.12. The three TUs are intentionally uncovered by
+host tests:
+- `src/al/link/Link.cpp` is an include-only TU (1 line: `#include
+  "al/link/Link.h"`); its purpose is to give the Arduino toolchain
+  a single-file compilation unit for the inline definitions in
+  `Link.h`. The host suite pulls in every fragment directly.
+- `src/al/web/AutoLinkWeb.cpp`, `AutoLinkWebHandlers.cpp` are
+  `#ifdef ARDUINO`-gated handlers depending on `WiFi` /
+  `Preferences` / `LittleFS` and need the ESP32 toolchain.
+  CompileCheckTest Pins 1-3 already pin the ARDUINO-gated file
+  shape (every guarded source parses cleanly under the stub
+  Arduino header). Cross-compile gate (`verify_build.sh`) covers
+  the real ESP32 path. No host-testable addition is possible
+  without an ESP-IDF host shim that's out of scope.
 
 ## Verify
-`cd test && make test && make itest && ./build/verify_build.sh`
-(70/70 unit, 4/4 itest. Cross-compile MANDATORY before flashing — OTA
-`esp_ota_*`/LittleFS paths compile only in the Arduino build. Item 1
-needs the FireBeetle pair.)
+`cd test && make test && make itest` — full suite green this session,
+cross-compile gates still UNVERIFIED (item 1, no network). Re-run
+gates before any release ship per AGENTS rule 4.
