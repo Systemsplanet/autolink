@@ -10,6 +10,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "rom/ets_sys.h"
 #include "freertos/task.h"
 #include "freertos/timers.h"
 #include "freertos/stream_buffer.h"
@@ -350,6 +351,17 @@ public:
     }
 
     void delayMs(int ms) override { vTaskDelay(pdMS_TO_TICKS(ms)); }
+
+    // Sub-tick busy-wait. Pinned by AsyncChunkGapTest. A
+    // millisecond-resolution vTaskDelay would round up to the
+    // next tick (typically 10 ms on FreeRTOS @ 100 Hz), which
+    // is too coarse for the inter-chunk gap and would 10x the
+    // ASYNC throughput. ets_delay_us() is the legacy
+    // busy-wait primitive ESP-IDF exposes for sub-tick waits
+    // and is the right tool here — the wait is short
+    // (microseconds, well under any tick) and we're already
+    // holding the user task.
+    void delayUs(uint32_t us) override { ets_delay_us(us); }
 
     uint32_t nowMs() override {
 #ifdef ARDUINO
