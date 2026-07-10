@@ -125,6 +125,21 @@ public:
         }
     }
     void delayMs(int) override {}
+    // Sub-ms pacing for the inter-chunk gap test. Advances
+    // the mock clock by `us` microseconds (rounded up to ms
+    // for pumpClock's whole-ms granularity). The
+    // AsyncChunkGapTest asserts the *gap magnitude* on the
+    // mock clock rather than a wall-clock measurement so the
+    // host test stays subsecond.
+    uint64_t totalDelayUs = 0;
+    int delayUsCalls = 0;
+    void delayUs(uint32_t us) override {
+        delayUsCalls++;
+        totalDelayUs += us;
+        uint32_t ms = (us + 999) / 1000;
+        if (ms > 0)
+            now += ms;
+    }
     void clearTx() {
         txBuf.clear();
         txBaudPerByte.clear();
