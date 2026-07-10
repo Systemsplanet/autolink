@@ -85,7 +85,6 @@ summary block.
 | `run_test_alink_baud_preference` | `al/link/sweep/LinkBaudPreferenceTest.cpp` | Baud-preference + rate-window regression guards |
 | `run_test_alink_sweep_phase` | `al/link/sweep/LinkSweepPhaseTest.cpp` | 3-phase sweep + asymmetric fast detection |
 | `run_test_alink_sweep_p1_guard` | `al/link/sweep/LinkSweepP1GuardTest.cpp` | Phase-1 stuck-peer guard |
-| `run_test_linkreorder` | `al/link/LinkReorderTest.cpp` | Hold-on-gap reorder buffer + staleness cap |
 | `run_test_sync_mode` | `al/SyncModeTest.cpp` | SYNC mode: stop-and-wait send, zero ARQ slots, recovery after wire drop, ACK timeout |
 | `run_test_compile_check` | `al/CompileCheckTest.cpp` | Source-level compile-check for ARDUINO-gated code (EspHal, AutoLinkWeb, PingPongMain, Ping) |
 | `run_test_esp_idf_error_etiquette` | `al/EspIdfErrorEtiquetteTest.cpp` | Source-level audit: every ESP-IDF call site has paired `esp_err_to_name` log |
@@ -136,7 +135,8 @@ Run via `cd test && make itest`. Each runs for seconds and exits
 | `run_loopback` | Two-Link end-to-end on a host pipe. Default 30 s; configurable via `make loopback` / `make loopback_quick` / raw binary args. |
 | `run_loopback_noise` | Same with stochastic frame drops + intermittent BREAKs. ~5 s. |
 | `run_loopback_sync` | SYNC-mode end-to-end (blocking per-message ACK path). ~5 s. |
-| `run_loopback_multichunk` | Random 300-3000 B multi-chunk ASYNC under 1% frame loss with byte-keyed content verification. Pins NAK fast-retransmit + the RTO sweep end-to-end (delivery floor, zero silent corruption). ~5 s. |
+| `run_loopback_multichunk` | Random 300-3000 B multi-chunk ASYNC under 1% block loss with byte-keyed content verification. Pins NAK fast-retransmit + the RTO sweep end-to-end (delivery floor, zero silent corruption). ~5 s. |
+| `run_loopback_losssweep` | ASYNC delivery-floor sweep at 0.1/1/5% true per-frame loss (MockHal `wholeFrameDropPermille`). Pins 99/99/80% delivery, zero corruption, zero disconnects at the two flood rates. ~15 s. |
 
 # 🔌 Embedded Integration Suite
 
