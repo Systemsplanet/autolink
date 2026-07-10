@@ -317,6 +317,8 @@ bool Link::onAck(uint8_t ackedCobsSeq, uint16_t bytesRecvd) {
     arq_.setGbnBase(
         (ackedCobsSeq == COBS_SEQ_MAX) ? 0 : (uint8_t)(ackedCobsSeq + 1));
     gbnAttempts_ = 0;
+    gbnBackoffMs_ = 0;
+    gbnLastRetxBase_ = 0xFF;
     arq_.setGbnActive(arq_.pendingCount() > 0);
     return false;
 }
