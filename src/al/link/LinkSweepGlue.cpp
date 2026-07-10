@@ -54,6 +54,9 @@ void Link::lockOk_unlocked(int idx, const char *tag) {
     errWindowCount_ = 0;
     lastRxMs = lastTxMs = hw.nowMs();
     lockedAtMs_ = hw.nowMs();
+    gbnAttempts_ = 0;
+    gbnBackoffMs_ = 0;
+    gbnLastRetxBase_ = 0xFF;
     Log::log().info(TAG, "Locked %lu baud (%s)",
                     (unsigned long)cfg.allowedBaudSafe(idx), tag);
     changeState_unlocked(State::OK);
