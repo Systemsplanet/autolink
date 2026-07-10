@@ -50,6 +50,11 @@ public:
     virtual void startTimer(int ms) = 0;
     virtual void stopTimer() = 0;
     virtual void delayMs(int ms) = 0;
+    // Microsecond-resolution wait for sub-tick pacing (e.g.,
+    // ASYNC-mode inter-chunk gap). Default is the ms-level
+    // delayMs * 1000 — good enough when no finer primitive is
+    // available; ESP32 overrides with ets_delay_us.
+    virtual void delayUs(uint32_t us) { delayMs((int)((us + 999) / 1000)); }
     virtual uint32_t nowMs() = 0;
 
     virtual void lock() = 0;
