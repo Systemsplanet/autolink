@@ -190,6 +190,8 @@ void Link::reset_unlocked(bool count, bool preservePreferredBaud) {
     txRejFirstMs_ = txRejLastMs_ = 0;
     arq_.clearAll();
     gbnAttempts_ = 0;
+    gbnBackoffMs_ = 0;
+    gbnLastRetxBase_ = 0xFF;
     resetSeq_unlocked();
     lastAckSeq_ = 0xFF;
     lastNakSeq_ = 0xFF;
