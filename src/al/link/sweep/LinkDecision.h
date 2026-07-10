@@ -138,6 +138,31 @@ inline ArqAction decideArqSlot(uint32_t ageMs, uint8_t retxCount,
     return ArqAction::Retx;
 }
 
+// GBN whole-window resend cadence: when the base is stuck for
+// N consecutive retransmit rounds with no forward progress,
+// back off exponentially up to `maxMs`. Reset on any forward
+// progress (cumulative ACK that advances gbnBase_, or
+// pendingCount() dropping). The single RTO round (noProgress=1)
+// is unchanged — the backoff only kicks in once we've actually
+// proven the base isn't moving, so a transient stall on the very
+// first RTO doesn't add latency to a healthy recovery.
+//
+// Pure function of the two knobs the timer arm passes. Pinned by
+// GbnBackoffTest.
+inline uint32_t decideGbnBackoff(int noProgress, uint32_t baseMs,
+                                 uint32_t maxMs) {
+    if (noProgress <= 1)
+        return baseMs;
+    if (baseMs == 0)
+        return 0;
+    if (maxMs < baseMs)
+        maxMs = baseMs;
+    uint64_t b = baseMs;
+    for (int i = 1; i < noProgress && b < (uint64_t)maxMs; i++)
+        b <<= 1;
+    return b > maxMs ? maxMs : (uint32_t)b;
+}
+
 // The deleted-replaced sweep helper and its small enum were only
 // called by the dropped onTimerSwp_unlocked path that routed the
 // sweep arm through EnterLck. The current sweep uses direct
