@@ -336,10 +336,13 @@ private:
                 s = 1;
             return s;
         }
+        int cap = maxSeqSize_;
+        if (RANDOM_MAX_BYTES < cap)
+            cap = RANDOM_MAX_BYTES;
         int minSize = RANDOM_MIN_BYTES;
-        if (minSize > maxSeqSize_)
-            minSize = maxSeqSize_;
-        int span = maxSeqSize_ - minSize + 1;
+        if (minSize > cap)
+            minSize = cap;
+        int span = cap - minSize + 1;
         if (span < 1)
             span = 1;
         return minSize + (int)random((uint32_t)span);
@@ -380,6 +383,17 @@ private:
     static constexpr uint32_t SETTLE_MS = AUTOLINK_APP_SETTLE_MS;
 
     static constexpr int RANDOM_MIN_BYTES = 1;
+
+    // Half the GBN window: a RANDOM message stays co-admittable with
+    // a pipeline that is already up to half-full, so the sender never
+    // parks on a message that can't fit the free window while inflight
+    // chunks drain. Without this bound a full-maxMsg random draw (22
+    // chunks) collides with a loaded window (drop), the app cools
+    // down, and the stuck base spins whole-window retransmits until
+    // the link drops — the ASYNC-random death spiral in the bench
+    // logs. Pinned by AsyncRandomAdmissionTest.
+    static constexpr int RANDOM_MAX_BYTES =
+        maxLenForChunkBudget(AUTOLINK_ARQ_PIPELINE_WINDOW / 2);
 
     static constexpr uint32_t BACKPRESSURE_COOLDOWN_MS = 1000;
 
