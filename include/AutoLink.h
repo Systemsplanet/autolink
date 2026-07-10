@@ -1,15 +1,4 @@
-// Public facade: stream-style API over
-// Link. ARQ payload cache lives in
-// al/link/arq/ArqCache.{h,cpp} behind IArqCache.
-// AutoLink owns an ArqCache by value and
-// hands a reference to Link at construction;
-// reference semantics make the lifetime
-// contract unbreakable at compile time.
-// Host-only EspHal / EspBlinkHal stubs live
-// in test/common/EspHalStub.h. Public ctor
-// body lives in src/AutoLink.cpp so the
-// public HAL boundary doesn't leak into the
-// host build.
+
 #pragma once
 #include "al/link/arq/ArqCache.h"
 #include "al/link/Link.h"
@@ -32,22 +21,14 @@ struct EspHal;
 #endif
 
 namespace autolink {
-#define AUTOLINK_VERSION "6.0.40"
+#define AUTOLINK_VERSION "6.1.12"
 
 class AutoLinkTestAccessor;
 
 class AutoLink {
 private:
 #ifdef AUTOLINK_HOST_TEST
-    // The host-test ctor takes an IHal by
-    // reference; the caller still owns the
-    // object. RefViewDeleter makes the
-    // unique_ptr non-owning so the test's
-    // MockHal isn't double-freed when the
-    // facade destructs. The production ctor
-    // constructs an EspHal by value and
-    // transfers ownership — the deleter
-    // fires only on that path's release().
+
     struct RefViewDeleter {
         void operator()(IHal *) const noexcept {}
     };
@@ -58,32 +39,21 @@ private:
 
     IHalPtr hal;
     std::unique_ptr<Link> link;
-    // ARQ cache sized for Ping's pipeline
-    // window. Ping owns the window (it's
-    // the flow controller); the cache
-    // validates its own pool holds a full
-    // window plus retx headroom. Default
-    // ctor of ArqCache would use the
-    // compile-time fallback; passing
-    // AUTOLINK_ARQ_PIPELINE_WINDOW here
-    // means widening the pipeline on Ping
-    // flows through to the cache at the
-    // same call site.
+
     ArqCache arqCache_{ AUTOLINK_ARQ_PIPELINE_WINDOW };
 #ifdef ARDUINO
     EspBlinkHal blinkHal;
     UtilBlink blinker;
 #endif
 
-    // Host-test hooks: friends of
-    // AutoLinkTestAccessor only; production
-    // sketches have no path to call these.
     friend class AutoLinkTestAccessor;
     int arqCacheSizeForTest() const { return arqCache_.size(); }
     Link *linkForTest() { return link.get(); }
     const Link *linkForTest() const { return link.get(); }
     ArqCache *arqCacheForTest() { return &arqCache_; }
     const ArqCache *arqCacheForTest() const { return &arqCache_; }
+#ifdef AUTOLINK_HOST_TEST
+    // Host-only shims reached via AutoLinkTestAccessor.
     void test_arqCache_put(uint8_t seq, const uint8_t *b, int len, uint8_t) {
         arqCache_.testPut(seq, b, len);
     }
@@ -93,42 +63,15 @@ private:
     bool test_arqCache_retx(uint8_t seq) {
         const uint8_t *buf = nullptr;
         int len = 0;
-        bool hit = arqCache_.testRetx(seq, &buf, &len);
-        (void)buf;
-        (void)len;
-        return hit;
+        return arqCache_.testRetx(seq, &buf, &len);
     }
     int test_arqCache_findBySeq(uint8_t s) {
         return arqCache_.slotInUse(s) ? (int)s : -1;
     }
-    void test_markAckedPending(uint8_t s) {
-        if (link)
-            link->test_markAckedPending(s);
-    }
-
-    // SYNC-mode host test hooks. The
-    // Arduino build blocks inside send()
-    // while the FreeRTOS link task
-    // concurrently delivers the ACK. The
-    // host build has no concurrent link
-    // task, so the test must drive the
-    // wire step-by-step. Splitting send()
-    // into begin + still-waiting lets the
-    // test pump time between halves.
-    bool test_sendMsgBeginForTest(const uint8_t *b, int len) {
-        return link && link->test_sendMsgBegin(b, len);
-    }
-    bool test_sendMsgStillWaitingForTest() {
-        return link && link->test_sendMsgStillWaiting();
-    }
-    int syncAckTimeoutMsForTest() const {
-        return link ? link->cfg.syncAckTimeoutMs : 500;
-    }
+#endif
 
 public:
-    // Back-compat re-export for tests/dashboard.
     static constexpr int ARQ_CACHE_SLOTS_PUBLIC = ArqCache::SLOTS;
-
 
     AutoLink(const AutoLink &) = delete;
     AutoLink &operator=(const AutoLink &) = delete;
@@ -143,18 +86,7 @@ public:
 #endif
 
 #ifdef AUTOLINK_HOST_TEST
-    // Host-test seam: inject a non-EspHal IHal
-    // (MockHal or test stub) by reference. The
-    // production ctor above is the only path
-    // sketches can reach; this exists so the
-    // facade is testable against an IHal
-    // implementation the device build can't
-    // construct (no FreeRTOS). Reference
-    // arguments reject null at compile time
-    // and make ownership unambiguous — the
-    // caller still owns the IHal, and
-    // RefViewDeleter above prevents the
-    // facade dtor from double-freeing it.
+
     AutoLink(IHal &hal_in, bool isMasterNode,
              AutoLinkConfig cfg = AutoLinkConfig()) {
         cfg.clampToMaxBauds();
@@ -164,15 +96,6 @@ public:
 #endif
 
     void begin() {
-        // Order matters: bring up the link
-        // layer first (state init, dwell
-        // compute, ARQ cache reset) and then
-        // the HAL (UART install, event task,
-        // timer). The pre-refactor flow had
-        // hal->begin() call link->begin()
-        // through the HAL's back-pointer;
-        // the ILinkEvents split removed that
-        // path so the facade owns the order.
         link->begin();
 #ifdef ARDUINO
         hal->begin();
@@ -206,16 +129,9 @@ public:
 
     void setLinkPaused(bool p) { link->setLinkPaused(p); }
 
-    // Fire the wire-side SWP handshake start. Used by
-    // Ping to defer the master break until the user
-    // pushes the dashboard's Start button. No-op when
-    // the link is already running or when paused.
     void kickoff() { link->kickoff(); }
 
     void setMode(AutoLinkConfig::Mode m) {
-        // Both the link and the HAL hold a
-        // HAL first: a pre-begin NVS-restored mode must
-        // size the HAL buffers before the link follows.
         if (hal)
             hal->setMode(m);
         if (link)
@@ -225,10 +141,6 @@ public:
         return link ? link->mode() : AutoLinkConfig::Mode::SYNC;
     }
 
-    // Configured max message size. Forwarded to
-    // Link; falls back to the AutoLinkConfig default
-    // before the facade is constructed so callers
-    // like Ping can read it from any state.
     size_t maxMsg() const {
         return link ? link->maxMsg() : AUTOLINK_DEFAULT_MAX_MSG;
     }
@@ -239,8 +151,6 @@ public:
     }
     int txDelayMs() const { return link ? link->txDelayMs() : 0; }
 
-    // Ping's gap-stop detector reads these; the link
-    // takes its lock internally.
     uint8_t lastAckSeq() const {
         return link ? link->lastAckSeq() : (uint8_t)0xFF;
     }
@@ -253,20 +163,9 @@ public:
     uint16_t bytesRecvdFor(uint8_t seq) const {
         return link ? link->bytesRecvdFor(seq) : (uint16_t)0;
     }
-    // Sender-side ARQ cache depth. Ping reads this
-    // on a send() failure to log the actual reason
-    // (cache full vs seq-space exhausted) instead of
-    // the local echo queue, which is always <= WINDOW
-    // and reads 0 when the cache is what saturated.
-    // No lock: lock-free contract matches
-    // bytesRecvdFor's. Returns 0 when link is null.
+
     int arqPendingCount() const { return link ? link->arqPendingCount() : 0; }
-    // Sum of wire-ACK-reported bytes the peer
-    // pushed to its app buffer across every
-    // chunk sharing baseSeq. Equals MSG_HDR +
-    // payload for multi-chunk ASYNC; equals
-    // bytesRecvdFor for single-chunk. Lock-free
-    // (matches bytesRecvdFor's contract).
+
     uint16_t bytesRecvdForMessage(uint8_t baseSeq) const {
         return link ? link->bytesRecvdForMessage(baseSeq) : (uint16_t)0;
     }
@@ -302,9 +201,7 @@ public:
             return link->sendMsg(b, len);
         return link->sendMsg(b, len, nullptr);
     }
-    // outBaseSeq returns the FIRST chunk's cobsSeq so
-    // Ping can match the peer's wire ACK to its slot;
-    // nullptr when the caller doesn't care.
+
     bool sendMsg(const uint8_t *b, int len, uint8_t *outBaseSeq) {
         if (len <= 0) {
             if (outBaseSeq)
