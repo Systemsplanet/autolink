@@ -107,6 +107,7 @@ TEST_BINS = run_test_crc run_test_cobs run_test_blink run_test_framerx \
             run_test_baud_index_bounds \
             run_test_ping_gap_transition \
             run_test_seq_space_guard \
+            run_test_async_random_admission \
             run_test_pingpong_blink_and_delay \
             run_test_ping_mismatch_count \
             run_test_mtu_roundtrip \
@@ -121,7 +122,9 @@ TEST_BINS = run_test_crc run_test_cobs run_test_blink run_test_framerx \
             run_test_msg_codec \
             run_test_timer_phases \
             run_test_sync_resync_spiral \
-            run_test_linkrx_split_ctrl
+            run_test_linkrx_split_ctrl \
+            run_test_gbn_backoff \
+            run_test_async_chunk_gap
 
 # 'all' runs every unit suite, captures per-suite runtime, then
 # prints a summary: tests passed, total bytes used by the suite
@@ -785,6 +788,16 @@ run_test_ping_gap_transition: $(LINK_SRC) $(TPING)/PingGapTransitionTest.cpp
 run_test_seq_space_guard: $(LINK_SRC) $(TPROTO)/LinkSeqSpaceGuardTest.cpp
 	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/LinkSeqSpaceGuardTest.cpp -o $@
 
+# ASYNC-random death-spiral pin. A full-maxMsg random draw (22
+# chunks) cannot co-admit with a loaded GBN window; sendMsg rejects
+# it, the app cools down, and the stuck base spins whole-window
+# retransmits until the link drops (three times in the bench logs).
+# The fix caps Ping's RANDOM draw to maxLenForChunkBudget(window/2)
+# so every random message stays co-admittable. Drives the real
+# ArqCache window and source-pins the ceiling constant.
+run_test_async_random_admission: $(LINK_SRC) $(TPROTO)/AsyncRandomAdmissionTest.cpp
+	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/AsyncRandomAdmissionTest.cpp -o $@
+
 # Source-level pins for the ping-blink-on-send,
 # pong-blink-on-recv, and HTML GUI default delay-ms
 # (50 ms) fixes. Tiny shape locks for the dashboard
@@ -840,6 +853,29 @@ run_test_sync_resync_spiral: $(LINK_SRC) $(TPROTO)/SyncResyncSpiralTest.cpp
 # held (okCarry_) and reassembled, not dropped into the COBS framer.
 run_test_linkrx_split_ctrl: $(LINK_SRC) $(TPROTO)/LinkRxSplitCtrlTest.cpp
 	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/LinkRxSplitCtrlTest.cpp -o $@
+
+# Pins the v6.1.14 GBN whole-window retransmit backoff
+# (todo.md item 2): decideGbnBackoff math (noProgress=1
+# unchanged; doubling up to cap), source pin on the
+# Link/LinkTimers wire-up, and three runtime scenarios —
+# stuck base grows backoff exponentially under cap,
+# forward ACK resets gbnAttempts_ + gbnBackoffMs_ to 0,
+# honest maxRetx drop still fires under the cap-bounded
+# backoff (the cap keeps maxRetx reachable within a
+# bounded wall budget).
+run_test_gbn_backoff: $(LINK_SRC) $(TPROTO)/GbnBackoffTest.cpp
+	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/GbnBackoffTest.cpp -o $@
+
+# Pins the v6.1.14 ASYNC inter-chunk pacing gap (todo.md
+# item 1): interChunkGapMs_unlocked() returns 0 in SYNC
+# mode and cfg.asyncChunkGapMs in ASYNC mode; the public
+# IHal::delayUs primitive exists with a default that
+# delegates to delayMs and an EspHal override using
+# ets_delay_us; a multi-chunk ASYNC sendMsg emits exactly
+# (chunks-1) delayUs calls of (cfg.asyncChunkGapMs*1000)
+# us each; SYNC mode short-circuits to 0 delayUs calls.
+run_test_async_chunk_gap: $(LINK_SRC) $(TPROTO)/AsyncChunkGapTest.cpp
+	$(CXX) $(CXXFLAGS) $(LINK_SRC) $(TPROTO)/AsyncChunkGapTest.cpp -o $@
 
 # Pins the v6.0.6 base-seq tracking carry-over
 # (todo item 4): bytesRecvdForMessage returns
@@ -936,6 +972,9 @@ test_ota_core: run_test_ota_core
 
 test_seq_space_guard: run_test_seq_space_guard
 	./run_test_seq_space_guard
+
+test_async_random_admission: run_test_async_random_admission
+	./run_test_async_random_admission
 
 test_pingpong_blink_and_delay: run_test_pingpong_blink_and_delay
 	./run_test_pingpong_blink_and_delay
