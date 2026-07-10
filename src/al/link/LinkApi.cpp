@@ -159,6 +159,11 @@ int Link::sendMsg_unlocked(const uint8_t *b, int len) {
         txBytes += chunk;
         lastTxMs = hw.nowMs();
         offset += chunk;
+        if (offset < len) {
+            int gap = interChunkGapMs_unlocked();
+            if (gap > 0)
+                hw.delayUs((uint32_t)gap * 1000u);
+        }
     }
     return offset;
 }
@@ -346,6 +351,20 @@ bool Link::sendMsg(const uint8_t *b, int len, uint8_t *outBaseSeq) {
                 txBytes += chunk;
                 lastTxMs = hw.nowMs();
                 offset += chunk;
+                // Inter-chunk gap: inserted between successive
+                // data chunks of the same multi-chunk message
+                // (NOT between messages), only in ASYNC mode.
+                // 0 ms gap (the default for SYNC, or when the
+                // app sets asyncChunkGapMs=0) is a no-op here.
+                // delayUs (microsecond busy-wait) is the
+                // sub-tick primitive — a ms-level delay would
+                // round up to the FreeRTOS tick (10 ms @ 100 Hz)
+                // and 10x the ASYNC throughput.
+                if (offset < len) {
+                    int gap = interChunkGapMs_unlocked();
+                    if (gap > 0)
+                        hw.delayUs((uint32_t)gap * 1000u);
+                }
             }
         }
     }
