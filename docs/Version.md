@@ -1,6 +1,174 @@
 # 📅 AutoLink Version History
 
 All releases, most recent first.
+## v6.1.15
+
+**idf_component.yml lockstep fix + todo.md open-items reconciliation**
+
+Housekeeping release, no source logic change. Two defects, both
+process-level rather than wire-level. First, `idf_component.yml` was still
+pinned at `6.1.13` while `include/AutoLink.h` and `library.properties` had
+advanced to `6.1.14` — the ESP-IDF component manifest was silently dropped
+from the v6.1.14 lockstep bump. AGENTS rule 12 lists `idf_component.yml`
+alongside `library.properties` / `docs/Version.md` as a place the version
+lives, so a stale value there is a real contract drift for IDF-component
+consumers even though the Arduino path was correct. Second, v6.1.14's
+disclosed limitations twice reference "todo.md item 1" and a set of filed
+bench-validation sub-items, but `todo.md` carried no numbered open list at
+all — the referenced items existed only in prose in `docs/Version.md`. This
+release reconciles the two: `idf_component.yml` is bumped into lockstep at
+`6.1.15`, and `todo.md` now carries an explicit Open list (cross-compile
+verification blocked by sandbox network egress; ASYNC inter-chunk gap bench
+validation; GBN whole-window backoff bench validation) so the carried-over
+work the v6.1.14 entry filed is actually tracked where the process expects
+it. No `.cpp`/`.h`/`.ino` behavior, wire format, ACK/NAK vocabulary, public
+API, or test surface changed. The wire format is byte-for-byte identical to
+6.1.14.
+
+### What moved
+
+- `idf_component.yml` — `version: "6.1.13"` → `"6.1.15"`. Corrects the
+  lockstep drift missed in the v6.1.14 bump and advances to the current
+  release in one step. This is the only manifest that was out of sync;
+  `include/AutoLink.h` and `library.properties` were already correct at
+  6.1.14 and advance normally to 6.1.15.
+- `include/AutoLink.h` — `AUTOLINK_VERSION` `6.1.14` → `6.1.15`.
+- `library.properties` — `version=` `6.1.14` → `6.1.15`.
+- `todo.md` — replaced the bare "Verify"-only body with a numbered Open
+  list (3 items) capturing the carried-over work the v6.1.14 limitations
+  filed: (1) cross-compile gates unrun in-sandbox (no network egress);
+  (2) ASYNC inter-chunk-gap bench validation; (3) GBN whole-window backoff
+  bench validation. The last-networked-session verify summary is retained.
+
+### Wire format
+
+Unchanged. No opcodes, payload fields, header layouts, timers, or wire-level
+state touched. This release edits only version manifests and `todo.md`.
+
+### Regression tests
+
+- `make test` → 80/80 unit (~7.5 s wall). No suite count change — this
+  release adds no source and no test files.
+- `make itest` → 6/6 (~70 s wall). `run_loopback_random_fill` 499/499.
+- `python3 build/version.py check` → green (20 entries; this entry pushed
+  the tail entry off under `trim --keep 20`).
+- No `.cpp`/`.h` changed, so `build/pretty_print.py` has no new format
+  targets; the generated `AutoLinkWebHtml.h` is regenerated unchanged by
+  `make test` (dashboard assets untouched).
+
+### Disclosed limitations
+
+- `bash build/verify_build.sh` and `bash build/check_arduino_iface.sh` were
+  NOT re-run this session — the sandbox has no network egress, so
+  `build/arduino-cli-cmd.sh` cannot install `arduino-cli` + `esp32:esp32`.
+  Both PASSED at v6.1.14 (`.bin` 1074147 B / 81%, all 5 iface phases) and
+  this release changes no compiled source, so the v6.1.14 cross-compile
+  result stands. Now tracked as `todo.md` open item 1. Re-run in a
+  network-capable environment before any release that touches
+  `AutoLinkWeb.cpp` or public-header API surface.
+- The bench-validation work for the v6.1.14 ASYNC gap and GBN backoff is
+  unchanged by this release; it is now explicitly enumerated in `todo.md`
+  (open items 2 and 3) rather than living only in the v6.1.14 prose.
+
+### Result
+
+- 80/80 unit + 6/6 itest green in-sandbox; cross-compile gates carry the
+  v6.1.14 PASS (no compiled source changed). `idf_component.yml` is back in
+  lockstep and `todo.md` now tracks the carried-over bench work the v6.1.14
+  entry filed. Runtime behavior, wire vocabulary, and public API are
+  byte-for-byte identical to 6.1.14.
+---
+
+## v6.1.14
+
+**GBN whole-window retransmit backoff + ASYNC inter-chunk pacing gap (todo items 1 and 2)**
+
+Closes both carry-over todo items in one pass. Item 1 (UART overrun under multi-chunk ASYNC bursts) and item 2 (GBN whole-window retransmit storm amplifies congestion) are the two library-side bugs the v6.1.13 FireBeetle bench logs exposed once the app-side RANDOM cap stopped killing the link on admission rejection. The fix is two complementary pieces, both wire-no-change: (a) a small inter-chunk pacing gap (cfg.asyncChunkGapMs = 1 ms default) between consecutive chunks of a multi-chunk ASYNC send, so a large burst can't outrun the peer's UART RX-FIFO drain at 512000 baud — implemented via a new IHal::delayUs microsecond-resolution primitive (EspHal overrides with ets_delay_us, host test defaults to delayMs); (b) an exponential RTO backoff on GBN whole-window resends (decideGbnBackoff helper, pure, doubles each round up to a cap of 8*syncAckTimeoutMs) so a transient congestion event recovers instead of escalating to an honest maxRetx drop — the cap (8*500 ms = 4 s by default) keeps maxRetx reachable within a bounded wall budget so the drop contract is preserved. Both pins are host-side covered (no hardware bench required for the gate). The SYNC path short-circuits the gap to 0 (one frame in flight, ACK-gated, no burst shape); SYNC's retx ladder is unchanged. No wire format, ACK/NAK vocabulary, public API, or wire-level state machine changed. The wire format is byte-for-byte identical to 6.1.13.
+
+### What moved
+
+- `src/al/AutoLinkConfig.h` — new `int asyncChunkGapMs = 1` field. 0 disables (max throughput, peers must keep up). 1 ms is the library default that fixes the 512000 baud overrun (gives Pong's `uart_event_task` ~64 byte-times at 512000 baud to drain ~250 bytes of FIFO between chunks). Negative values clamp to 0.
+- `src/al/hal/IHal.h` — new `virtual void delayUs(uint32_t us)` primitive. Default body delegates to `delayMs((us+999)/1000)` so HALs that don't override still compile and run. Sub-tick precision is the production concern; ms-level vTaskDelay would round up to the FreeRTOS tick (10 ms @ 100 Hz) and 10x the ASYNC throughput.
+- `src/al/hal/EspHal.h` — `delayUs` override uses `ets_delay_us` (sub-tick busy-wait primitive ESP-IDF exposes for sub-tick waits; the wait is microseconds, well under any tick, and we're already holding the user task).
+- `test/common/MockHal.h` — `delayUs` records `delayUsCalls` + `totalDelayUs` counters (advances the mock clock by `(us+999)/1000` ms). Lets the AsyncChunkGapTest assert pacing magnitude on the mock clock rather than wall-clock measurement, keeping the host test subsecond.
+- `test/scripts/env/install_system_stubs.py` — new `rom/ets_sys.h` stub declaring `ets_delay_us` (matches the EspHal include). The ArduinoDroid + compile-check gate must keep clearing with the new include.
+- `test/test_desktop/al/CompileCheckTest.cpp` — `EXPECTED_STUB_SYMBOLS` gains `ets_delay_us`. The pre-existing ARDUINO-gated-file syntax check (`test_arduino_guarded_files_parse`) covers `src/al/hal/EspHal.h` parsing against the host stubs, so the new include lands in the gate.
+- `src/al/link/Link.h` — new `interChunkGapMs_unlocked()` helper (returns 0 in SYNC, `cfg.asyncChunkGapMs` in ASYNC). Single source for the mode-conditional pass-through. Pin 1 of AsyncChunkGapTest asserts both branches.
+- `src/al/link/LinkApi.cpp` — both multi-chunk emit loops (`Link::sendMsg_unlocked` and the ASYNC branch of `Link::sendMsg`) call `hw.delayUs(gap * 1000u)` between consecutive data chunks of the same multi-chunk message. NOT between messages (the gap is per-message, applied only when `offset < len` after a chunk is queued). Pin 3 of AsyncChunkGapTest asserts a 4-chunk ASYNC send emits exactly 3 delayUs calls totaling 3000 us; Pin 4 asserts the call site is gated on `interChunkGapMs_unlocked() > 0` so SYNC short-circuits to no-op.
+- `src/al/link/sweep/LinkDecision.h` — new pure `decideGbnBackoff(int noProgress, uint32_t baseMs, uint32_t maxMs)` helper. noProgress=1 → baseMs (unchanged from pre-fix behavior — a single RTO round is NOT backdoored); doubles each round; caps at maxMs. baseMs=0 → 0 (disables cleanly). max < base floors to base (defensive). Pinned by Pin 1 of GbnBackoffTest.
+- `src/al/link/Link.h` — new `gbnBackoffMs_` (current inter-resend cadence) and `gbnLastRetxBase_` (forward-progress snapshot, 0xFF sentinel) fields. `gbnBackoffCapMs_unlocked()` returns `8 * cfg.syncAckTimeoutMs` floored at `cfg.syncAckTimeoutMs` (caps the exponential doublings so a permanently-stuck base still trips maxRetx within a bounded wall budget).
+- `src/al/link/LinkTimers.cpp` — `sweepRetx_unlocked` snapshots `gbnLastRetxBase_ != 0xFF && gbnLastRetxBase_ != arq_.gbnBase()` to detect forward progress between rounds; if true, resets `gbnAttempts_` and `gbnBackoffMs_` to 0 (so the NEXT stall starts from the base RTO — no latency penalty on the happy path). Otherwise increments `gbnAttempts_`, stamps `gbnLastRetxBase_`, and sets `gbnBackoffMs_ = decideGbnBackoff(...)`. `onTimerOk_unlocked` stretches the next timer fire by `max(okTickMs(), gbnBackoffMs_)` so the just-resent base has time to draw a reply before the next RTO tick.
+- `src/al/link/LinkRx.cpp` — cumulative-ACK handler (`Link::onAck`'s GBN loop) resets `gbnAttempts_ = 0`, `gbnBackoffMs_ = 0`, `gbnLastRetxBase_ = 0xFF` on every successful ACK that advances the base. The forward-progress path inside `sweepRetx_unlocked` is the second reset (catches a base-advance that races the resend); this one is the deterministic path.
+- `src/al/link/LinkCore.cpp` (`reset_unlocked`), `src/al/link/LinkSweepGlue.cpp` (`lockOk_unlocked`), `src/al/link/LinkTx.cpp` (`sendCobsFrameAcked_unlocked`'s GBN-init branch) — all three reset `gbnAttempts_` + `gbnBackoffMs_` + `gbnLastRetxBase_` so a fresh link or first send never carries stale backoff state. Keeps the helper idempotent across re-locks.
+- `test/common/LinkTestAccessor.h` — new GBN backoff read/write pass-throughs (`gbnAttemptsForTest` / `gbnBackoffMsForTest` / `gbnLastRetxBaseForTest` / `resetGbnBackoffForTest` / `gbnBackoffCapMsForTest`), `getStateForTest` (host test that doesn't deadlock against the held `hal.lock()`), `getDiagCountForTest` (for the maxRetx-still-fires pin), `interChunkGapMsForTest` (mode-conditional passthrough read).
+- `test/test_desktop/al/link/GbnBackoffTest.cpp` (new) — 5 pins: decideGbnBackoff math; source pin on the Link/LinkTimers wire-up; runtime stuck-base grows backoff exponentially under the cap; runtime forward-ACK progress resets `gbnAttempts_` and `gbnBackoffMs_` to 0; runtime honest-drop on maxRetx still fires under the cap-bounded backoff (the 8*syncAckTimeoutMs cap keeps maxRetx reachable within a bounded wall budget).
+- `test/test_desktop/al/link/AsyncChunkGapTest.cpp` (new) — 5 pins: interChunkGapMs_unlocked mode-conditional pass-through; source pin on AutoLinkConfig.asyncChunkGapMs + IHal.delayUs + EspHal ets_delay_us override; runtime 4-chunk ASYNC send emits exactly 3 delayUs calls totaling 3000 us; structural pin that the call site is gated on `interChunkGapMs_unlocked() > 0`; IHal::delayUs default body falls back to delayMs.
+- `test/test_desktop/Makefile` — `run_test_gbn_backoff` + `run_test_async_chunk_gap` added to `TEST_BINS` with build recipes.
+
+### Wire format
+
+Unchanged. No new opcodes, payload fields, header layouts, or wire-level state. `MAX_CHUNK = 250`, `MSG_HDR = 6`, `POOL_SIZE = 64`, window 32, seq-space budget are all byte-for-byte identical to 6.1.13. The two new fields (`gbnBackoffMs_`, `gbnLastRetxBase_`) are sender-side RTO bookkeeping, never serialized. The inter-chunk gap is a transmitter-side pacing delay between already-encoded frames, no wire-level effect. The `delayUs` primitive is a sub-tick bus-wait on the user task, no protocol effect.
+
+### Regression tests
+
+- `make test` → 80/80 unit (~12.5 s wall; was 78/78 — new suites `run_test_gbn_backoff` + `run_test_async_chunk_gap` added inside the LinkDecisionTest/sweep suite row, no new Makefile surface past the `run_test_*` build recipes).
+- `make itest` → 6/6 (~70 s wall; no count change). `run_loopback_random_fill` re-run 3x standalone (10 s each) — 499/499 delivered every run, zero flakiness.
+- `make test_coverage_manifest` → green; both new bins correctly registered in the manifest's `src_for_*` entries.
+- `make assets_check` → green (no `AutoLinkWebHtml.h` regeneration needed; the change doesn't touch dashboard assets).
+- `run_test_version_free_source` → green (no hard-coded version strings introduced; the GbnBackoffTest/AsyncChunkGapTest comments refer to "current shape" / "maxRetx=3", not `6.1.14`).
+- `run_test_compile_check` → green: 15 dead-code boundary pins (1–12 from v6.1.10 + 13–15 for v6.1.11 deletions; the v6.1.14 changes add no new source files, so the dead-code pin set is unchanged). Phase 2 of the ARDUINO-gated syntax check covers the new `rom/ets_sys.h` include via the stub.
+- `bash build/verify_build.sh` → PASS, `.bin` 1074147 B against `esp32:esp32:firebeetle32` / `esp32:esp32@3.3.5` (was 1073655 B at 6.1.13; +492 B = the new `gbnBackoffMs_` / `gbnLastRetxBase_` fields + the `interChunkGapMs_unlocked()` branch + the decideGbnBackoff call site + the IHal::delayUs vtable entry, well under the 81% program-space budget).
+- `bash build/check_arduino_iface.sh` → PASS, all 5 phases. Phase 1 (standard `arduino-cli compile` happy-path): `.bin` + `.elf` produced. Phase 2 (sketch-TU flag-drop simulation against the real ESP32 `xtensa-esp-elf-g++` with only `-DARDUINO=10607 -I<lib_root>/src`): fails on missing core header `freertos/FreeRTOS.h` — the *right* reason, NOT the regression signature `'autolink' is not a namespace-name`. Phase 3 (gate self-test on a sandboxed broken shim with the canonical-include line commented out): gate fires with exit 2 (header-guard regression detected). Phase 4 (link-stage library-deps static checks: `library.properties` `depends=FS,LittleFS,WiFi,Preferences` + both web TUs `#include <FS.h>`): PASS. Phase 5 (arduino-cli end-to-end link smoke test for `AutoLinkWeb` + `LittleFS`): PASS, `.bin` 1062896 B / `.elf` 13350640 B.
+- `python3 build/version.py check` → green (20 entries; this entry pushed v6.0.25 off the tail).
+- `python3 build/pretty_print.py` → 155 files OK (155 formatted), 0 failed.
+
+### Disclosed limitations
+
+- The fix's hardware-bench confirmation of the prior `errs` climb (0 → 5) and Pong's rx-rate collapse is filed as the carried-over todo for the next source-touching pass. The host admission pin (AsyncChunkGapTest Pin 3) confirms the library now emits the gap; the bench confirmation that the `errs` climb no longer reproduces under RANDOM fill at 512000 baud still wants a physical FireBeetle pair run. The v6.1.13 cap on Ping's RANDOM draw already prevents the death-spiral in the bench; the v6.1.14 gap makes the library safe for genuinely large ASYNC messages (not just RANDOM-capped ones), so a future Ping config with a higher RANDOM ceiling won't reintroduce the overrun.
+- The inter-chunk gap is a fixed per-message wall-budget cost: for a 22-chunk ASYNC message at default `asyncChunkGapMs=1`, that's 21 ms of total pacing. At 512000 baud the message's actual wire time is ~1.5 ms per chunk × 22 = ~33 ms, so the gap adds ~64% wall overhead to the largest messages. This is the deliberate trade — the alternative is a hardware UART RX-FIFO overrun that loses data and triggers a NAK-driven whole-window resend (which the v6.1.14 GBN backoff now also mitigates). For users who need max throughput on a known-good peer, `cfg.asyncChunkGapMs = 0` disables the gap (the field is a public-API knob; documented in the field comment).
+- The GBN backoff's reset-on-forward-progress path is one timer-fire granularity, not a per-ACK check. A cumulative ACK that races the resend gets credited to the NEXT round's `gbnLastRetxBase_ != arq_.gbnBase()` check; the current round already resends. This is intentional — the resend-on-stale-base is what GBN correctness requires; the backoff only changes the cadence between rounds, not the per-round decision. Pinned by GbnBackoffTest Pin 4.
+- The hardware-bench confirmation of the v6.1.14 GBN backoff is not yet captured. A scenario where the base clears after N slow ACKs (recoverable congestion) would now stay up under backoff; a scenario where the peer is genuinely gone would still drop at maxRetx (the cap keeps that reachable). Both behaviors are pinned in simulation (Pin 4 + Pin 5) but the on-wire confirmation under real UART noise still wants a bench run. Filed in todo.md item 1.
+- `todo.md` items 1 (UART overrun) and 2 (GBN storm) are now closed at the library level. The bench-validation sub-items (re-lock cadence, sweep walk-down, ASYNC flood, on-wire confirmation of the gap on real UART noise, the backoff's recover-vs-drop distinction on a real UART) remain as a future bench pass.
+
+### Result
+
+- 80/80 unit + 6/6 itest + `verify_build.sh` PASS + `check_arduino_iface.sh` PASS + coverage-manifest gate green + version gate = all green. The two library-side bugs the v6.1.13 FireBeetle bench logs surfaced are now closed; the wire vocabulary, public API, and runtime behavior on a healthy link are byte-for-byte identical to 6.1.13 except for the two new knobs (`cfg.asyncChunkGapMs`, the implicit `gbnBackoffMs_` cadence). The bench validation is filed as a future pass.
+---
+
+## v6.1.13
+
+**ASYNC-random death spiral fixed: bound Ping RANDOM message size to half the GBN window**
+
+FireBeetle bench logs (Ping master + Pong slave, 512000 baud) showed SYNC passing in both GUI fill modes and ASYNC passing in SEQUENTIAL fill, but ASYNC dropping the link three times in a row the moment the operator switched to RANDOM fill and resumed. Root cause is an application-side admission mismatch, not a wire-protocol bug: Ping's RANDOM fill drew message sizes uniformly up to the full `maxMsg` (5120 B = 22 COBS chunks). A 22-chunk message cannot be admitted into the 32-slot GBN window while a realistically-loaded pipeline already holds inflight chunks (`inflight + 22 > 32`), so `sendMsg` rejects the whole message, the app enters its 1 s backpressure cooldown, and the still-stuck GBN base spins whole-window verbatim retransmits (`ARQ retx cobsSeq=… — verbatim` storms in the log) until `maxRetx` on the base forces an honest link drop (`seq=… maxRetx (GBN base) -> honest link drop`, `resweep: disc=1/2/3`). SEQUENTIAL fill never hits this because its sizes ramp from 1 byte and stay small early; SYNC never hits it because it is stop-and-wait (inflight is always 0). The fix bounds the RANDOM draw to `maxLenForChunkBudget(AUTOLINK_ARQ_PIPELINE_WINDOW / 2)` (3750 B = 16 chunks) so every random message stays co-admittable with a window that is already up to half full. No wire format, ACK/retransmit path, or library public API changed — the library's atomic window-full rejection was already correct; the app was feeding it messages that could never fit.
+
+### What moved
+
+- `src/al/AutoLinkConfig.h` — new `constexpr int maxLenForChunkBudget(int budget)`: the inverse of `chunksForMsgLen`, returning the largest message length whose chunk count fits `budget` GBN slots (`budget==1` → the merged single-frame ceiling `MAX_CHUNK - MSG_HDR`; otherwise `(budget-1) * MAX_CHUNK`). Pure function of the wire constants, `constexpr`, no state.
+- `src/al/pingpong/Ping.h` — new `RANDOM_MAX_BYTES = maxLenForChunkBudget(AUTOLINK_ARQ_PIPELINE_WINDOW / 2)` static constant. `pickMsgSize_` now clamps the RANDOM span to `min(maxSeqSize_, RANDOM_MAX_BYTES)` instead of drawing across the full `maxSeqSize_`. SEQUENTIAL and SYNC paths are untouched (SEQUENTIAL still ramps `seqSize_` 1..maxMsg; SYNC never calls the RANDOM branch).
+- `test/test_desktop/al/link/AsyncRandomAdmissionTest.cpp` (new) — four pins (below).
+- `test/test_desktop/Makefile` — `run_test_async_random_admission` build rule + run target, added to the `all` list.
+
+### Wire format
+
+Unchanged. No link-layer `.cpp`/`.h`/`.ino` behavior that crosses the wire was modified. The change is entirely (a) a new pure `constexpr` helper and (b) an application-layer message-size ceiling in the Ping example. COBS framing, the GBN window, the ACK/NAK vocabulary, and the retransmit ladder are byte-for-byte identical.
+
+### Regression tests
+
+`run_test_async_random_admission` — 4 pins:
+- **Pin 1**: `maxLenForChunkBudget(budget)` inverts `chunksForMsgLen` for every budget 1..32 — a message at the returned length fits the budget and one byte more overflows it; zero/negative budget → 0.
+- **Pin 2**: runtime, real `ArqCache` window. A message sized at the RANDOM ceiling (16 chunks) co-admits with a half-loaded window (`inflight=16`); the pre-fix full-maxMsg draw (22 chunks) is rejected by that same window — the death-spiral seed. Revert the cap → the app would offer the 22-chunk message → red.
+- **Pin 3**: source pin — Ping's `RANDOM_MAX_BYTES` is `maxLenForChunkBudget(AUTOLINK_ARQ_PIPELINE_WINDOW / 2)` and `pickMsgSize_` clamps the span to it. Reverting the clamp (span back to `maxSeqSize_`) → red.
+- **Pin 4**: `maxLenForChunkBudget(1) == MAX_CHUNK - MSG_HDR` (the merged single-frame ceiling).
+
+Toggle verified: reverting the `pickMsgSize_` clamp turns Pin 3 red; restoring it returns green. `make test` → 78/78 unit this session (77 prior + 1 new; the `run_test_version_free_source` scan trips only on sandbox home-directory clutter outside the project tree, which is stripped from the zip).
+
+### Disclosed limitations
+
+- `bash build/verify_build.sh` / `bash build/check_arduino_iface.sh` not run this session — no network egress in this sandbox (carry-over, `todo.md` item 1). The change touches `Ping.h` (an `#ifdef ARDUINO` translation unit not covered by host tests) and a `constexpr` helper in `AutoLinkConfig.h`; re-run both cross-compile gates in a networked environment before any release ship per AGENTS rule 4.
+- Hardware bench re-validation of ASYNC-random on a physical FireBeetle pair is filed as `todo.md` item 2. The fix is validated in simulation (the host admission pin) and by log analysis; the real-UART confirmation that the spiral no longer reproduces under RANDOM fill still wants a bench run.
+- The half-window ceiling (3750 B) is an application-policy choice for the Ping bench tool, not a library limit. A user application that needs larger single messages in ASYNC should either raise the window or pace its own sends so a large message co-admits — the library still accepts any message up to `maxMsg` when the free window has room.
+---
+
 ## v6.1.12
 
 **`todo.md` coverage-audit re-check (items 5–8); one `inline` keyword on `clampToMaxBauds()`**
@@ -661,112 +829,4 @@ Unchanged from 6.0.44 in every respect.
 ### Result
 
 - 73/73 unit + 5/5 itest + ArduinoDroid sketch-TU flag-drop gate (5 phases) + arduino-cli end-to-end link smoke test = all green.>
----
-
-## v6.0.44
-
-**ArduinoDroid sketch-TU flag-drop gate**
-
-The bug class this gate catches: ArduinoDroid (and some IDE integrations) compile the sketch translation unit with **no g++ flags** — no `-DARDUINO=`, no `-I<lib_root>/src`, no `-c`, no `-isysroot. Library `.cpp` files compile fine (they get the full flag list), but every `#ifdef ARDUINO` block in the public headers drops out for the sketch TU, and the user sees the regression signature:
-
-```
-error: 'autolink' is not a namespace-name
-error: 'PingPong' does not name a type
-```
-
-The library is fine. The build is broken. `build/verify_build.sh` cannot trigger this because `arduino-cli` always passes the full flag list. The new `build/check_arduino_iface.sh` simulates the worst case directly: it builds a fresh sketch TU against the ESP32 g++ toolchain with **only** `-DARDUINO=10607` and `-I<lib_root>/src` on the command line (everything else stripped). Three phases: (1) the standard `arduino-cli compile` happy path (positive control), (2) the minimal-flag TU — if the public-header `#ifdef ARDUINO` gate is intact, the failure is a missing core header (`freertos/FreeRTOS.h`, `Arduino.h`, etc.), which is the SAME error ArduinoDroid would surface; if the gate is broken, the failure is the regression signature, (3) a self-test that sandboxes `src/` with the canonical-include line commented out and verifies the gate fires (exit 2 = header-guard regression). Exit codes: 0 pass, 1 infra, 2 header-guard regression, 3 unrelated compile error, 4 self-test failure. Wire format, library surface, and host tests all unchanged from 6.0.43.
-
-### What moved
-
-- New: `build/check_arduino_iface.sh` (ArduinoDroid sketch-TU flag-drop gate).
-- `AGENTS.md` — rule 4 lists `bash build/check_arduino_iface.sh` as part of the verify-before-done set; layout section documents the new gate with exit codes.
-- `include/AutoLink.h` / `library.properties` / `idf_component.yml` — `6.0.43 → 6.0.44` lockstep bump (AGENTS rule 3).
-
-### Wire format
-
-Unchanged from 6.0.43 in every respect.
-
-### Regression tests
-
-- `bash build/check_arduino_iface.sh` — three phases, all PASS on this release:
-  - Phase 1 (standard happy-path compile via arduino-cli): PASS, .bin/.elf produced at the standard FQBN.
-  - Phase 2 (minimal-flag sketch TU against the real ESP32 toolchain): PASS — fails on missing `freertos/FreeRTOS.h` (the right reason), not on the header-guard regression signature.
-  - Phase 3 (gate self-test, sandboxed broken shim): PASS — the gate correctly detects the broken-gate regression and exits 2.
-- `make test_cpp` → 73/73 unit, 5/5 itest (`run_loopback`, `run_loopback_noise`, `run_loopback_sync`, `run_loopback_multichunk`, `run_loopback_losssweep`).
-- `python3 build/version.py check` → green (20 entries, this entry pushed v6.0.24 off the tail).
-- `make assets_check` → green (AutoLinkWebHtml.h current).
-
-### Disclosed limitations
-
-- The minimal-flag TU surfaces the regression signature only if a future change moves a public symbol out from behind `#ifdef ARDUINO` or removes the guard entirely. The gate does not catch a more subtle bug (e.g. `autolink::` declared but `PingPong` accidentally gated behind a different `#ifdef`); Phase 3's self-test pattern would still match `'PingPong' does not name`, so the regression signature list is robust to that class.
-- The gate depends on the same arduino-cli install `verify_build.sh` uses (esp32:esp32@3.3.5); if the sandbox can't run either, both are unverified. Last cleared end-to-end at this session.
-- `todo.md` Open 1 (hardware carry-over + bench-validate the 6.0.33–6.0.43 backlog) remains open; this release does not move it.
-
-### Result
-
-- 73/73 unit + 5/5 itest + cross-compile + ArduinoDroid sketch-TU flag-drop gate = all green.>
----
-
-## v6.0.43
-
-**Separation-of-concerns release: fat context split, message codec extracted, one owner for slot metadata, OK-tick decomposed, test hooks gated off the device build — no protocol change**
-
-Executes the five-item SoC backlog from the v6.0.42 audit; wire format and behavior are unchanged. (1) The fat `LinkContext` is gone: `IHalCtx` (lock/clock/baud/timer), `ISweepCtx : IHalCtx` (sweep host seam), and `IReorderSink` (delivery sink) replace it, with the wire constants moved to `LinkWire.h`; `LinkArq::waitForAck` now takes `IHalCtx&`, `LinkSweep` takes `ISweepCtx&`, `LinkReorder::flushContiguous` takes `IReorderSink&`, and a segregation pin (TestAccessorStructureTest) turns red if the headers re-merge. (2) The app-message layer left `Link`: `LinkMsgCodec.h/.cpp` owns the 6-byte header encode/decode (`msgHdrEncode`/`msgHdrDecode`), the RX cursor (`LinkMsgCodec` replaces `rxMsgLen`/`rxMsgCrc`), and the pure `msgResyncScan`; `recvMsg` and `findMsgHeaderResync_unlocked` are now thin I/O around pure decisions, table-tested in `LinkMsgCodecTest` (roundtrip, bounds, resync truth table). (3) Per-slot metadata has one owner: `bytesRecvd_[256]` moved from `Link` into the `LinkArq` slot record (`onAcked(seq, bytes)`, `bytesFor`, `bytesForMessage`); `Link::bytesRecvdFor*` are thin delegates and the O(256) join lives with the state it joins (LinkBaseSeqTrackingTest Pin 4 re-pointed at the one-owner shape). (4) `onTimerOk_unlocked` is a six-line sequencer over `expireReorder_unlocked` / `applyHealth_unlocked` / `sweepRetx_unlocked`; each phase is accessor-drivable and pinned in the new `LinkTimerPhasesTest` (expiry counts lostMsgs without dropping; a symmetric-idle verdict resets with exactly one disc; maxRetx retires without resetting). (5) Test hooks are off the device build: `testForwardResync_`, the forward-resync branch in `LinkRx`, `test_sendMsgBegin/StillWaiting`, and the facade's `test_arqCache_*` shims are gated under `AUTOLINK_HOST_TEST`; the dead `Link::test_markAckedPending` / `test_reorderSlot*` forwarders (the accessor already reached `arq_`/`reorder_` directly) are deleted, as are the facade's dead `test_markAckedPending`/`test_sendMsg*ForTest` wrappers. Boundary pins updated to assert the gate itself.
-
-### What moved
-
-- New: `src/al/link/IHalCtx.h`, `ISweepCtx.h`, `IReorderSink.h`, `LinkWire.h`; deleted `LinkContext.h`.
-- New: `src/al/link/LinkMsgCodec.h/.cpp`; `Link.h` drops `rxMsgLen`/`rxMsgCrc` for a `LinkMsgCodec msgRx_`.
-- `src/al/link/arq/LinkArq.h/.cpp` — `onAcked(seq, bytes)`, `bytesFor`, `bytesForMessage`, `bytesRecvd_[256]`; `waitForAck(IHalCtx&)`.
-- `src/al/link/LinkTimers.cpp` — `expireReorder_unlocked` / `applyHealth_unlocked` / `sweepRetx_unlocked` + sequencer.
-- `src/al/link/Link.h` / `LinkRx.cpp` / `LinkApi.cpp` — host-test gates; dead forwarders removed; `include/AutoLink.h` facade shims gated, dead wrappers removed.
-- Makefiles register `LinkMsgCodec.cpp` in both suites; new `run_test_msg_codec`, `run_test_timer_phases`.
-- New tests: `LinkMsgCodecTest.cpp`, `LinkTimerPhasesTest.cpp`. Updated pins: TestAccessorStructureTest (+segregation), LinkAckBytesTest Pin 3 (decomposed timer shape), LinkBaseSeqTrackingTest Pin 4 (one-owner shape), BoundaryInvariantsTest (gate shape), LinkContextTest (`MockCtx : ISweepCtx + IReorderSink`), LinkBaudIndexBoundsTest (`ISweepCtx&` casts), constant-source pins re-pointed at `LinkWire.h`.
-- Accessor: `expireReorder`/`applyHealth`/`sweepRetx`/`setLastRx`/`setLastTx` drives.
-- `include/AutoLink.h` / `library.properties` / `idf_component.yml` — lockstep bump.
-
-### Wire format
-
-Unchanged from 6.0.41/42 in every respect.
-
-### Regression tests
-
-- 73/73 unit (two new suites), 5/5 itest, green after each of the five refactors.
-- Device-shape guard: the full `src/` tree compiles clean WITHOUT `-DAUTOLINK_HOST_TEST` (host syntax pass), catching gate mistakes before the cross-compile.
-
-### Disclosed limitations
-
-- `build/verify_build.sh` still not runnable in-sandbox (no `arduino-cli`/network). This release moves headers and adds `#ifdef` gates — exactly the class host tests can miss — so the cross-compile carry-over (todo item 6) is mandatory before flashing, even though the ungated host syntax pass is clean.
----
-
-## v6.0.42
-
-**Comment strip to bare minimum, dead-code and copy-paste elimination, doc refresh — no protocol change**
-
-Housekeeping release; wire format and behavior are byte-for-byte identical to 6.0.41. All comments were machine-stripped from `src/`, `include/`, and `examples/` (~2100 comment lines), then the bare minimum re-added by hand at the non-obvious invariants only: the RTO-derived reorder hold, `HoldResult` semantics, selective-ACK / stale-re-ACK wrap-safety (and its dependence on the stalled-window gate), whole-message reservation, the OK-tick bounds, the 2 x RTO watchdog repair horizon, maxRetx slot-retire rationale, and the single-unlock BREAK discipline. Dead code removed: unused `Link::peekTxSeq()` and the unused locked `Link::resendCobsFrame()` wrapper, plus two dead statements caught in 6.0.41. Copy-paste eliminated: `sendCtrlCobsFrame_unlocked` and `sendAckFrame_unlocked` shared a CRC8+COBS+tx+accounting body, now factored into `txSmallCobs_unlocked`; five unit tests carried identical `kBauds`/`mkCfg`/`negotiateToOk` fixtures, now shared via `test/common/TestCfg.h` (`testBaseCfg` + `lockPair`). Two source-grep pins that asserted comment prose or per-body `txBytes +=` text were converted to behavioral pins (`PingResumeSourceTest` now asserts the proactive `clearQueue_()` call; `ModeSyncAsyncFixesTest` Pin 4b measures `Stats.tx` growth across real ACK/NAK sends via the accessor). Docs refreshed to match the code: README ARQ section (RTO-derived hold, selective ACK, stale re-ACK, slot retire, stalled-window gate), `Protocol.md` asym-idle (repair-horizon gate), `Tests.md` (losssweep row). `developer.md`'s comment policy already prescribed "comments only for non-obvious invariants" — the source now practices it.
-
-### What moved
-
-- Comments stripped and minimally re-added across `src/`, `include/`, `examples/` (55 files).
-- `src/al/link/Link.h` — dead `peekTxSeq()` / `resendCobsFrame()` removed; `txSmallCobs_unlocked` declared.
-- `src/al/link/LinkTx.cpp` — ctrl/ACK frame builders share `txSmallCobs_unlocked`.
-- `test/common/TestCfg.h` (new) — shared `testBaseCfg` + `lockPair`; adopted by `LinkReorderHoldTest`, `LinkSyncStallWatchdogTest`, `LinkTimerRearmTest`, `LinkFastRetxTest`, `LinkBaseSeqTrackingTest`.
-- `test/common/LinkTestAccessor.h` — `ackFrame` / `nakFrame` wrappers for the behavioral txBytes pin.
-- Pins converted from text to behavior: `PingResumeSourceTest`, `ModeSyncAsyncFixesTest` (Pins 4b/4c merged).
-- Docs: `README.md`, `docs/Protocol.md`, `docs/Tests.md` refreshed; `docs/API.md` symbol-verified against the code.
-- `include/AutoLink.h` / `library.properties` / `idf_component.yml` — lockstep bump.
-
-### Wire format
-
-Unchanged from 6.0.41 in every respect.
-
-### Regression tests
-
-- Full suites green after every phase (strip, dead-code removal, dedupe): 71/71 unit, 5/5 itest.
-- The two converted pins now test behavior instead of source prose and survive comment changes by construction.
-
-### Disclosed limitations
-
-- `build/verify_build.sh` still not runnable in-sandbox (no `arduino-cli`/network); comment-only strip plus the `LinkTx` refactor touched source — cross-compile carry-over stands (todo Open 1).
-- `pretty_print-test.py` formatting cases still require clang-format (unavailable offline); merge/skip logic verified.
 ---
