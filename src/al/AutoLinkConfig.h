@@ -31,6 +31,24 @@ constexpr int chunksForMsgLen(int len) {
     return 1 + n;
 }
 
+// Largest message length whose chunk count fits `budget` GBN slots.
+// A single ASYNC message that exceeds the free window can never be
+// admitted while any prior chunk is in flight: sendMsg rejects it
+// whole, the app backs off, and the wire fills with whole-window
+// retransmits on the stuck base until maxRetx drops the link. An
+// app that sizes its messages against a fraction of the window (see
+// Ping's RANDOM ceiling) keeps every message co-admittable with a
+// realistically-loaded pipeline — the invariant SYNC (one frame in
+// flight) and ramped SEQUENTIAL (small early messages) already
+// satisfy. Pinned by AsyncRandomAdmissionTest.
+constexpr int maxLenForChunkBudget(int budget) {
+    if (budget <= 0)
+        return 0;
+    if (budget == 1)
+        return MAX_CHUNK - MSG_HDR;
+    return (budget - 1) * MAX_CHUNK;
+}
+
 inline size_t streamBufferFloor(const AutoLinkConfig &cfg);
 
 constexpr size_t AUTOLINK_DEFAULT_MAX_MSG = 5120;
@@ -112,6 +130,22 @@ struct AutoLinkConfig {
     uint8_t maxRetx = 5;
 
     int txDelayMs = 0;
+
+    // ASYNC-mode multi-chunk pacing: gap inserted between
+    // successive chunks of a single multi-chunk message
+    // (header chunk, then data chunks) so a large burst
+    // can't outrun the peer's UART RX-FIFO drain. Zero
+    // disables the gap (max throughput, peers must keep
+    // up). 1 ms gives Pong's uart_event_task ~64 byte-times
+    // at 512000 baud to drain ~250 bytes of FIFO between
+    // chunks — small enough to be invisible at slower
+    // bauds, large enough to prevent the multi-chunk
+    // overrun -> NAK -> whole-window-resend spiral the
+    // FireBeetle bench reproduced at 512000 baud with
+    // uncapped bursts. SYNC mode never emits a burst (one
+    // chunk in flight, ACK-gated), so the gap is a no-op
+    // there. Pinned by AsyncChunkGapTest.
+    int asyncChunkGapMs = 1;
 };
 
 inline size_t streamBufferFloor(const AutoLinkConfig &cfg) {
