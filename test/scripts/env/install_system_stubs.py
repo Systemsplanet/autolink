@@ -204,6 +204,7 @@ public:
 };
 } // namespace fs
 """,
+    "rom/ets_sys.h": "#pragma once\ninline void ets_delay_us(unsigned int) {}\n",
     "esp_http_server.h": """#pragma once
 #include <Arduino.h>
 typedef void *httpd_handle_t;
