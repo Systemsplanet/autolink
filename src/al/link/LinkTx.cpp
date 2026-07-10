@@ -63,6 +63,8 @@ uint8_t Link::sendCobsFrameAcked_unlocked(const uint8_t *b, int n,
     if (cfg.mode != AutoLinkConfig::Mode::SYNC && !arq_.gbnActive()) {
         arq_.setGbnBase(seq);
         gbnAttempts_ = 0;
+        gbnBackoffMs_ = 0;
+        gbnLastRetxBase_ = 0xFF;
         arq_.setGbnActive(true);
     }
     arq_.onSent(seq, baseSeq, hw.nowMs());
