@@ -134,6 +134,50 @@ public:
     }
     uint8_t gbnBase() const { return l_.arq_.gbnBase(); }
     bool gbnActive() const { return l_.arq_.gbnActive(); }
+    // GBN backoff state (todo item 2 — whole-window
+    // retransmit storm backoff). The accessor reads/writes
+    // the private fields so the GbnBackoffTest can drive
+    // both the stuck-base escalation and the forward-ACK
+    // reset without a full Link::onAck ACK-roundtrip (the
+    // reset is also exercised through that path in the
+    // source pin, but pulling it through the wire frame
+    // adds 30+ ms of host pumpClock work to the test for
+    // no extra pin coverage).
+    int gbnAttemptsForTest() const { return l_.gbnAttempts_; }
+    uint32_t gbnBackoffMsForTest() const { return l_.gbnBackoffMs_; }
+    uint8_t gbnLastRetxBaseForTest() const { return l_.gbnLastRetxBase_; }
+    void resetGbnBackoffForTest() {
+        l_.gbnAttempts_ = 0;
+        l_.gbnBackoffMs_ = 0;
+        l_.gbnLastRetxBase_ = 0xFF;
+    }
+    uint32_t gbnBackoffCapMsForTest() const {
+        return l_.gbnBackoffCapMs_unlocked();
+    }
+    // discCount pass-through for the GbnBackoffTest
+    // (Pin 5: the honest drop contract is preserved under
+    // backoff — the cap (8*RTO) keeps maxRetx reachable
+    // within a bounded wall budget).
+    uint64_t getDiagCountForTest() const {
+        Stats s;
+        l_.getStats(s);
+        return s.discCount;
+    }
+    // State read for the same drop-detection path
+    // (Pin 5 loop). getState() takes the lock
+    // internally, so the test must NOT also hold
+    // hal.lock() — the accessor does its own
+    // lock/unlock, so the call is safe.
+    State getStateForTest() const { return l_.getState(); }
+    // ASYNC inter-chunk gap helper pass-through
+    // (todo item 1). Reads cfg.mode and
+    // cfg.asyncChunkGapMs through the
+    // Link::interChunkGapMs_unlocked() helper
+    // so the AsyncChunkGapTest Pin 1 can assert
+    // the mode-conditional pass-through without
+    // touching the Link's private cfg member
+    // directly.
+    int interChunkGapMsForTest() const { return l_.interChunkGapMs_unlocked(); }
     void setLastRx(uint32_t t) { l_.lastRxMs = t; }
     void setLastTx(uint32_t t) { l_.lastTxMs = t; }
     void nakFrame(uint8_t seq) {
