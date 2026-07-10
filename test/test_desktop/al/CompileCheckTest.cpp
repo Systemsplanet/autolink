@@ -47,7 +47,9 @@ const std::vector<std::string> EXPECTED_STUB_SYMBOLS = {
     "httpd_stop", "esp_err_to_name", "xTaskCreatePinnedToCore",
     "xStreamBufferCreate", "esp_random", "esp_restart",
     // OTA handler surface (see install_system_stubs.py)
-    "httpd_req_recv", "esp_ota_begin", "esp_ota_set_boot_partition"
+    "httpd_req_recv", "esp_ota_begin", "esp_ota_set_boot_partition",
+    // Sub-tick pacing primitive for ASYNC inter-chunk gap.
+    "ets_delay_us"
 };
 
 std::string readFile(const std::string &path) {
