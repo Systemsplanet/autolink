@@ -155,7 +155,11 @@ to detect peer silence.
 The existing idle watchdog fires after 10s of no RX. the current protocol adds
 a **faster asymmetric detection**: if the local side has TX
 activity (we sent a heartbeat in the last 1000ms) but no RX in
-the last 300ms, the peer is silent. Drop to PHASE1 immediately.
+the last 300ms *and* the silence has outlasted the retransmit
+repair horizon (2 x `syncAckTimeoutMs`), the peer is silent.
+Drop to PHASE1. The horizon gate prevents false drops during
+flood backpressure, where a lost NAK legitimately parks the
+window on the RTO sweep for up to one RTO.
 
 **Recovery is symmetric.** Both `pong-bounce` and `ping-bounce`
 cases are caught in 300ms by the same mechanism. The campaign
