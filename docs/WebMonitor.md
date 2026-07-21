@@ -2,7 +2,7 @@
 
 `AutoLinkWeb` adds a self-contained WiFi dashboard to any AutoLink sketch. Include `AutoLinkWeb.h`, construct a monitor object that wraps your `AutoLink`, and call `begin()` once in `setup()` after `comm.begin()`. If WiFi connects, a mobile-friendly page is served — by default on port **8765** (pass a third argument to `begin()` to change it). If WiFi fails, `isUp()` returns `false` and the UART link is completely unaffected.
 
-The `UtilPing` / `UtilPong` helpers wire this up for you automatically when you pass WiFi credentials to their constructor; the snippet below is the manual equivalent for a custom sketch.
+The `PingPong` wrapper wire this up for you automatically when you pass WiFi credentials to their constructor; the snippet below is the manual equivalent for a custom sketch.
 
 ```cpp
 #include <AutoLink.h>
@@ -26,7 +26,7 @@ The dashboard updates once per second and shows:
 
 | Widget | What it shows |
 |---|---|
-| **State pill** (header) | Green `OK` / amber `LCK` / red `SWP` — animates on transition |
+| **State pill** (header) | Green `OK` / red `SWP` — animates on transition |
 | **TX Rate** | Bytes/s + cumulative total since power-on |
 | **RX Rate** | Bytes/s + cumulative total since power-on |
 | **Errors** | Big red number = lifetime disconnect count (OK→SWP transitions). Hint lines underneath show `N lost msgs` (wire loss) and `N frame errors` (bad CRC / malformed COBS / overflow). |
