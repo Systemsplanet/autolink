@@ -1,0 +1,244 @@
+
+
+console.log('[autolink] dashboard script loaded, HTML build v{{VERSION}}');
+console.log('[autolink] starting up…');
+
+var logPaused=false,msgPaused=true,logFullOpen=false,lastSeq=0,fails=0,busy=false,currentLvl=null;
+var currentMode=null;
+var currentLinkMode=null;
+
+var deviceRole=null;
+
+function fallbackCopy(text,b){
+  var ta=document.createElement('textarea');
+  ta.value=text;ta.style.position='fixed';ta.style.opacity='0';
+  document.body.appendChild(ta);ta.focus();ta.select();
+  var revertLabel=b.dataset.defaultLabel||b.textContent;
+  if(!b.dataset.defaultLabel)b.dataset.defaultLabel=b.textContent;
+  try{
+    var ok=document.execCommand('copy');
+    b.textContent=ok?'\u2713 Copied':'\u2717 Failed';
+    console.log('[autolink] copy log: fallback path '+(ok?'succeeded':'failed'));
+  }catch(e){
+    b.textContent='\u2717 Failed';
+    console.warn('[autolink] copy log: fallback threw '+(e&&e.message?e.message:e));
+  }
+  document.body.removeChild(ta);
+  setTimeout(function(){b.textContent=revertLabel;},1200);
+}
+
+async function resetAll(){
+  console.log('[autolink] button: reset (counters)');
+  var b=document.getElementById('rbtn');
+  b.textContent='\u2026';
+  try{
+    var r=await tfetch('/reset',{method:'POST'},5000);
+    b.textContent=r.ok?'\u2713 Done':'\u2717 Err';
+    console.log('[autolink] reset result: '+(r.ok?'OK':'fail http '+(r.status||'?')));
+  }catch(e){
+    b.textContent='\u2717 Err';
+    console.warn('[autolink] reset failed: '+(e&&e.message?e.message:e));
+  }
+  setTimeout(function(){b.textContent='\u21bb Reset';},1200);
+}
+
+async function reboot(skipConfirm){
+  if(!skipConfirm && !confirm('Reboot the device now? The link will drop and reconnect in a few seconds.'))return;
+  console.log('[autolink] button: reboot (device reset requested)');
+  clearLog();lastSeq=0;
+  var b=document.getElementById('rebootBtnTop');
+  b.textContent='Rebooting\u2026';
+  try{
+    var r=await tfetch('/reboot',{method:'POST'},5000);
+    console.log('[autolink] reboot ack: '+(r&&r.ok?'OK':'fail http '+(r&&r.status||'?')));
+  }catch(e){
+    console.log('[autolink] reboot: device disconnected (expected)');
+  }
+  show('alert');
+  var tries=0;
+  var iv=setInterval(async function(){
+    tries++;
+    try{
+      var r=await tfetch('/stats',null,5000);
+      if(r.ok){
+        clearInterval(iv);
+        console.log('[autolink] reboot: device back online after '+(tries+1)+' s, reloading');
+        location.reload();
+      }
+    }catch(e){}
+    if(tries>30){
+      clearInterval(iv);
+      console.warn('[autolink] reboot: device did not come back online within 30 s');
+    }
+  },1000);
+}
+
+function updateFillBar(){
+  var t=document.getElementById('log').textContent;
+  var pct=Math.min(100,Math.round(t.length/5000))+'%';
+  ['logFill','logFillFull'].forEach(function(id){var b=document.getElementById(id);if(b)b.style.setProperty('--pct',pct);});
+}
+function openLogFull(){
+  logFullOpen=true;
+  var o=document.getElementById('logOverlay');o.classList.add('open');
+  var dst=document.getElementById('logFull');
+  dst.innerHTML=document.getElementById('log').innerHTML;
+  dst.scrollTop=dst.scrollHeight;updateFillBar();
+  console.log('[autolink] button: log overlay opened ('+document.getElementById('log').children.length+' entries)');
+}
+function closeLogFull(){
+  logFullOpen=false;
+  document.getElementById('logOverlay').classList.remove('open');
+  console.log('[autolink] button: log overlay closed');
+}
+function appendLog(sev,seq,text){
+  if(seq+1>lastSeq)lastSeq=seq+1;
+  if(logPaused)return;
+  function addTo(p){
+    var atEnd=p.scrollHeight-p.scrollTop<=p.clientHeight+12;
+    var d=document.createElement('div');d.className=sev;d.textContent=text;p.appendChild(d);
+    if(p.textContent.length>500000){while(p.children.length>1&&p.textContent.length>400000)p.removeChild(p.firstChild);}
+    if(atEnd)p.scrollTop=p.scrollHeight;
+  }
+  addTo(document.getElementById('log'));
+  if(logFullOpen)addTo(document.getElementById('logFull'));
+  updateFillBar();
+
+  try{if(localStorage.verbose==='1')console.log('[autolink] log['+seq+'] '+sev+' '+text);}catch(_){}
+}
+
+function tfetch(url,opts,ms){
+  var c=new AbortController();
+  var id=setTimeout(function(){c.abort();},ms||5000);
+  var o=Object.assign({signal:c.signal},opts||{});
+  var method=(opts&&opts.method)||'GET';
+  console.log('[autolink] '+method+' '+url+' (timeout '+(ms||5000)+'ms)');
+  return fetch(url,o).then(function(r){
+      clearTimeout(id);
+      console.log('[autolink] '+method+' '+url+' -> '+r.status);
+      return r;
+    },function(e){
+      clearTimeout(id);
+      console.warn('[autolink] '+method+' '+url+' FAILED: '+(e&&e.message?e.message:e));
+      throw e;
+    });
+}
+
+function bps(n){if(n>=1048576)return(n/1048576).toFixed(1)+' MB/s';if(n>=1024)return(n/1024).toFixed(1)+' KB/s';return n+' B/s';}
+function bytes(n){if(n>=1073741824)return(n/1073741824).toFixed(2)+' GB';if(n>=1048576)return(n/1048576).toFixed(2)+' MB';if(n>=1024)return(n/1024).toFixed(1)+' KB';return n+' B';}
+function hms(s){return[Math.floor(s/3600),Math.floor(s%3600/60),s%60].map(function(x){return('0'+x).slice(-2);}).join(':');}
+
+function set(id,v){var e=document.getElementById(id);if(e)e.textContent=v;}
+function setPill(st){
+  var p=document.getElementById('pill');
+  if(!p)return;
+  p.textContent=st;p.className='pill '+(st==='OK'?'ok':st==='SWP'?'swp':st==='LCK'?'lck':'');
+}
+function show(id){var e=document.getElementById(id);if(e)e.style.display='block';}
+function hide(id){var e=document.getElementById(id);if(e)e.style.display='none';}
+
+function clearLog(){
+  var n=document.getElementById('log').children.length;
+  ['log','logFull'].forEach(function(id){var e=document.getElementById(id);if(e)e.innerHTML='';});
+  updateFillBar();
+  console.log('[autolink] button: clear log (cleared '+n+' entries)');
+}
+// Walk the live log's child nodes (each line
+// is a <div>) and join with \n + trailing
+// newline so Copy and Save emit unix-line-
+// delimited plain text. textContent on the
+// parent renders with no line breaks at all
+// (block boundaries collapse).
+function al_logAsText(){
+  var log=document.getElementById('log');
+  if(!log)return'';
+  var parts=[];
+  for(var i=0;i<log.children.length;i++){
+    var c=log.children[i];
+    if(c.textContent)parts.push(c.textContent);
+  }
+  return parts.join('\n')+(parts.length?'\n':'');
+}
+function copyLog(){
+  var t=al_logAsText();
+  var bytes=t.length;
+  // Even with an empty log we still attempt
+  // the clipboard write so the button label
+  // flips to "Copied" + reverts on the
+  // standard path. textContent alone is
+  // non-empty from inline-block whitespace;
+  // tests pin the label-revert behavior.
+  if(navigator.clipboard){
+    navigator.clipboard.writeText(t).then(function(){
+      var b=document.getElementById('cbtn');
+      b.textContent='\u2713 Copied';
+      setTimeout(function(){b.textContent='Copy';},1200);
+      console.log('[autolink] button: copy log ('+bytes+' bytes copied to clipboard)');
+    }).catch(function(e){
+      fallbackCopy(t,document.getElementById('cbtn'));
+      console.warn('[autolink] copy log: clipboard API failed ('+(e&&e.message?e.message:e)+'), used fallback');
+    });
+  }else{
+    fallbackCopy(t,document.getElementById('cbtn'));
+    console.log('[autolink] button: copy log (fallback path, '+bytes+' bytes)');
+  }
+}
+
+function saveLog(){
+  var t=al_logAsText();
+  if(!t.length){
+    console.warn('[autolink] save log: log is empty, nothing to save');
+    return;
+  }
+  var name=(deviceRole==='Pong'?'pong.txt':(deviceRole==='Ping'?'ping.txt':'autolink.txt'));
+  try{
+    var blob=new Blob([t],{type:'text/plain;charset=utf-8'});
+    var url=URL.createObjectURL(blob);
+    var a=document.createElement('a');
+    a.href=url;
+    a.download=name;
+    a.style.display='none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function(){document.body.removeChild(a);URL.revokeObjectURL(url);},200);
+    var b=document.getElementById('sbtn');
+    b.textContent='\u2713 Saved';
+    setTimeout(function(){b.textContent='Save';},1200);
+    console.log('[autolink] button: save log ('+t.length+' bytes -> '+name+')');
+  }catch(e){
+    console.warn('[autolink] save log failed: '+(e&&e.message?e.message:e));
+  }
+}
+function togglePause(){
+  logPaused=!logPaused;
+  var lbl=logPaused?'\u25b6 Resume':'\u25ae\u25ae Pause';
+  ['pbtn','pbtn2'].forEach(function(id){var b=document.getElementById(id);if(b)b.textContent=lbl;});
+  console.log('[autolink] button: log scroll '+(logPaused?'paused':'resumed'));
+}
+
+async function toggleMsgPause(){
+  if(deviceRole!=='Ping'){
+    console.log('[autolink] toggleMsgPause ignored — device role is '+deviceRole+' (not Ping)');
+    return;
+  }
+  msgPaused=!msgPaused;
+  applyMsgPauseLabel();
+  console.log('[autolink] button: message pause -> '+msgPaused+' (sending /pausemsg)');
+  try{
+    var r=await tfetch('/pausemsg?p='+(msgPaused?'1':'0'),{method:'POST'},5000);
+    if(!r.ok){
+      console.warn('[autolink] /pausemsg returned '+r.status+' — local UI shows last-known state until /stats reconciles');
+    }
+  } catch(e){
+    console.warn('[autolink] /pausemsg fetch failed: '+(e&&e.message?e.message:e)+' — local UI shows last-known state until /stats reconciles');
+  }
+}
+function applyMsgPauseLabel(){
+  var b=document.getElementById('topPbtn');
+  if(b){
+    if(msgPaused){b.innerHTML='\u25b6 Start';b.className='btn pause on';}
+    else{b.innerHTML='\u25ae\u25ae Pause';b.className='btn pause';}
+  }
+}
+
+// SYNC/ASYNC link-mode radio buttons. POST the new
