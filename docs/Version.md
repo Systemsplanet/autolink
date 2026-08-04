@@ -1,6 +1,376 @@
 # 📅 AutoLink Version History
 
 All releases, most recent first.
+## v6.1.67
+
+**Gap-stop latch, SYNC NAK fast-retx, a P3 camp that outlasts a slow
+peer, a bounded upgrade back to it, and app-layer soak coverage**
+
+Four fixes from two field log sets, one per failure actually
+observed, plus new soak coverage at a layer that had none. All four
+fixes carry toggle-red-verified pins that reproduce the logged
+figure when disabled.
+
+**1. Ping's gap-stop latched a delivered seq and re-fired on every
+cobsSeq wrap (ASYNC).** A session that never disconnected
+(`disc=0`) stalled the app four times for 5001 ms each, always on
+`seq=189`, across 23 s — long after 189 was delivered and acked.
+Two defects combined. `lastNakSeq_` was released only by
+`reset_unlocked`, so with no disconnect it held 189 for the whole
+session. And `decideGapTransition` resumed only on
+`lastAck == currentGap`; `lastAckSeq_` advances thousands of times
+a second while `Ping::loop` samples it at loop rate, so Resume was
+a race the sampler effectively always lost — the field log
+contains zero `gap resumed` lines. With the latch stuck and Resume
+unreachable, every wrap back to 189 found the slot briefly pending
+again and re-entered gap-stop. Fixed: an ACK now releases
+`lastNakSeq_`, both for the acked seq and across the cumulative-ACK
+walk range; and `decideGapTransition` takes an explicit
+`gapPending` predicate (`isAcked` on the gapped seq) instead of
+inferring liveness from a `lastAckSeq()` sample. The
+already-acked dedupe in `Ping.h` stays as second-line defense but
+is no longer load-bearing.
+
+**2. SYNC had no NAK-driven retransmit.** `onNak` returned before
+any resend when `mode == SYNC`, so the peer's explicit "I am
+missing this" — arriving ~6 ms after each retransmission — was
+discarded and the ladder slept the full `syncAckTimeoutMs` anyway.
+Four dead RTOs, then a BREAK storm and a walk down to the slowest
+baud. Log timestamps put each timeout exactly 500 ms after its
+retx (13.340 -> 13.840) rather than after the NAK at 13.346,
+confirming `waitForAck` runs its own deadline and nothing on the
+SYNC path consumed the NAK. Fixed with `LinkArq::noteNakWake`: a
+CRC-valid NAK naming the seq under wait makes `waitForAck` return
+immediately so the existing ladder takes its next step now.
+Ownership stays with the ladder — SYNC never populates the
+ArqCache, so a NAK-driven cache resend would ship a zero-byte
+frame the peer reads as a seq advance. `waitForAck` clears the
+flag on entry, capping this at one wake per attempt so the
+observed 17-NAK/65 ms burst cannot spin the ladder through every
+attempt. `arq_.onNaked` moved to the ASYNC side of the guard: it
+only reseats `sentAtMs_`, which the SYNC path never reads.
+
+**3. The P3 preferred-baud camp expired before a slow peer could
+return.** After a preserving reset the master camped at
+`preferredBaud_` for `RESWEEP_PREF_MAX_ATTEMPTS` (2) x a t3-sized
+timer (~250 ms) = ~750 ms. In the field the peer stopped answering
+for ~12 s (its own log stops mid-stream, no reset banner), so the
+camp expired almost immediately and the pair relocked at the
+slowest baud instead of the proven one. Fixed: the camp is now
+bounded by a wall-clock budget (`resweepPrefDeadlineMs_`, 3-5 s
+derived from `syncAckTimeoutMs`) rather than a count of t3-sized
+attempts, with a hard attempt ceiling as a spin guard. Camp length
+no longer scales with t3. The slave camp was already dwell-based
+(`idleTimeoutMs/2`) and is unchanged. The disc-storm and
+`locksWithoutRecv_` guards still gate whether the camp is entered
+at all, so a genuinely dead peer still reaches the P1 walk.
+
+**4. A slow fallback lock had no way back to a faster proven
+baud.** `preferredBaud_` is overwritten by every `lockOk_unlocked`
+call, including a `p2-fallback` lock at the slowest baud — from
+then on every preserving reset (fix 3's wider camp included) camped
+at the slow baud, with no memory that a faster baud had ever
+worked. Fixed: `bestProvenBaud_` tracks the fastest baud this pair
+has ever locked and only ever moves toward faster, surviving a slow
+fallback lock. A lock slower than `bestProvenBaud_` arms a deadline
+(`BAUD_UPGRADE_DELAY_MS` after the lock, so a fresh lock gets a
+chance to settle first); the OK-tick handler spends one preserving
+reset per attempt retrying the proven baud, capped at
+`BAUD_UPGRADE_MAX_ATTEMPTS` (3) so a persistently degraded line
+settles rather than oscillating. A full from-scratch renegotiation
+(non-preserving reset) clears `bestProvenBaud_` along with
+`preferredBaud_`, so the upgrade never chases a baud the pair no
+longer has evidence for.
+
+**5. App-layer soak coverage added, with an honest limit on what
+it proves.** No itest instantiated the real `Ping`/`Pong`
+classes — their constructors are hard-wired to ESP32 UART/GPIO
+params, so this is not achievable without refactoring them to
+accept an injectable `IHal` first, which is a testability change
+out of scope here. Added `AppGapStopSoakTest` instead: it
+reimplements Ping's gap-stop wiring exactly (the real
+`decideGapTransition` call, the real `isAcked`-based pending check)
+on top of two real `Link` objects, driving real traffic under real
+wire loss across all four mode x fill-shape cells. Its SYNC driving
+initially sent one shot and passively waited, abandoning any lost
+frame after a single timeout instead of retrying it — caught during
+verification when SYNC/random delivery came back near-zero; fixed
+to drive the real retx ladder (`test_syncRtoStep`, the same step
+`sendMsg` uses) on RTO, after which SYNC/random went from 38/83
+delivered to 161/161. It pins general app-layer soundness under
+sustained loss — bounded delivery, no crash, no permanent stall —
+at cells that had zero coverage before. It is deliberately not
+claimed as a regression pin for fix 1 or fix 2: reverting fix 1
+changes nothing observable in this harness, because under this
+traffic/loss shape `lastNakSeq_` gets refreshed often enough that a
+stale value never survives long enough to matter; reverting fix 2
+also changes nothing, because this harness drives SYNC's ladder on
+its own timer rather than through the blocking `sendMsg()` call
+whose `waitForAck` internals fix 2 lives in. Both were verified by
+hand. `PingGapLatchTest` and `SyncNakFastRetxTest` (both new this
+release, unit-level) are the toggle-red-verified regression pins
+for those two mechanisms; this soak is coverage alongside them, not
+a replacement.
+
+**Pins rewritten, not deleted.** Three existing source-grep pins
+broke on contract-preserving changes because they were anchored on
+code shape rather than behaviour: `SyncResyncSpiralTest` Pin 4
+(anchored on `arq_.onNaked`'s position), `PingSendFailureTest` Pin
+5 (required `lastAckSeq()` to appear), and `WireSimReConvergeTest`
+Pin 3 / `GbnKeepRearmTest` Pin 2 (anchored on the retry gate's
+literal text). Each was re-anchored on the contract it exists to
+protect and, where possible, strengthened — Pin 4 now also asserts
+the SYNC branch wakes the ladder and that `onNaked` stays
+ASYNC-side. `LinkBaseSeqTrackingTest` used fixed 16-32 KB `fread`
+buffers that silently truncate as the files they read grow past
+them — the exact failure class four other pins hit once before
+(see v6.1.50) — converted to dynamic reads so file growth can't
+silently reintroduce it.
+
+**Also in this release.** The v6.1.66 entry below cited two open
+items as carried from `docs/todo.md` that were not in it; not
+repeated here. `docs/todo.md`'s hardware-validation item was moved
+into these limitations per AGENTS.md rule 5 (hardware work doesn't
+belong in the todo tracker). The "no post-lock upgrade path" and
+"app-layer soak coverage" items `docs/todo.md` carried are resolved
+by fixes 4 and 5 above and removed from it.
+
+**Verification.** 128/128 unit, 8/8 itest (7 loopback/recovery +
+the new app-layer soak), `loopback_fieldsoak` PASS with output
+byte-identical to v6.1.66 (`sent=3370 verified=3370 mismatches=0
+lost=4`, same breaks/drainStalls/worstWedge) across two runs, so
+none of the five changes perturbed the soak. Toggle-red confirmed
+individually: fix 1's latch persists at 189 and `PingGapLatchTest`
+catches it; fix 2's wait runs 501 ms instead of 7 ms; fix 3's camp
+collapses to 750 ms / 2 re-PINGs; fix 4's `bestProvenBaud_`
+regresses to the slow baud instead of surviving the fallback lock
+— each reproducing the logged field figure or the mechanism it
+depends on.
+
+**Limitations.** Cross-compile gates (`build/verify_build.sh`,
+`build/check_arduino_iface.sh`) cannot run in this sandbox — no
+network egress, standing limitation — and `clang-format` is
+unavailable, so `build/pretty_print.py` is a no-op here.
+
+*Peer-side stall, not root-caused.* In the SYNC log set the peer's
+log stops mid-stream at 15:05:58.557 with no reset banner and it
+does not answer for ~12 s; the master's recovery behaviour
+accounts for what happened after, but not for the stall itself.
+Ping's own device-side symptom (`Pong not ready` gated at
+>=1000 ms yet silent for 4.96 s, with setSpd and loop-log
+timestamps releasing together) points at lock contention between
+the SWP timer task and the app loop. `blinkWait` is ruled out —
+it routes to a non-blocking `blinker.start()`. Not root-causable
+from logs; needs on-device instrumentation.
+
+*Hardware validation outstanding.* No fix in v6.1.60 through
+v6.1.67 has been re-run on the FireBeetle pair. That re-run is the
+remaining acceptance step, and is the only way to exercise
+v6.1.66's BREAK-flush guard or this release's SYNC/upgrade fixes at
+all under a real UART, since several touch timing this sandbox can
+only simulate.
+
+---
+
+## v6.1.66
+
+**GBN storm-stuck honest-drop swallowed real RTOs; five compounding field fixes**
+
+**GBN storm-stuck honest-drop swallowed real RTOs; five compounding field fixes**
+
+Six fixes from one field-log investigation (three FireBeetle
+disconnects at seq=170/63/181), ordered by dependency: the primary
+disconnect cause, two hardening fixes behind it, a recovery-path
+bug for receive-only peers, a sweep-cadence fix, and a BREAK/UART
+guard.
+
+**1. `sweepRetx_unlocked` dropped the link without retransmitting
+(primary).** The storm-stuck branch tested `if (a == Drop ||
+baseStormStuck)` — once the base-storm-stuck clock tripped, a
+genuine `LinkArq::Action::Retx` verdict (a real RTO, retxCount=0)
+was routed into the honest-drop evaluation instead of being
+retransmitted. At 512000 baud with nothing yet locked, `ackRtoMs`
+and `gbnBaseStuckThresholdMs_` both floor to `syncAckTimeoutMs`, so
+the first RTO and the stuck verdict land on the same tick — every
+one of the three field disconnects fired this way. Fixed: a real
+`Retx` verdict now always retransmits and rearms the stuck clock
+first, regardless of `baseStormStuck`; the honest-drop path only
+runs on `Drop` or on a storm-stuck base whose real retx count has
+reached 2. Added `LinkArq::retxCountFor(seq)` (the existing
+`retxCountTotal()` is window-wide and wrong for this gate).
+
+**2. Backoff didn't stretch the stuck window.** `gbnBackoffMs_`
+lengthened the next retx tick but nothing lengthened
+`gbnBaseStuckThresholdMs_`, so a backed-off round always landed
+after the stuck window had already expired. Fixed: the effective
+threshold used by the storm-stuck check is now clamped to
+`max(gbnBaseStuckThresholdMs_, gbnBackoffMs_ + ackRtoMs)`.
+
+**3. `baudAwareStuckThresholdMs_unlocked`'s drain math was 1000×
+low.** `pendingBytes * 10 / baud` yields 0 ms at 512000 and 8 ms at
+9600 — the function's own comment documents "≈8.3 s at 9600". The
+500 ms floor masked it at every baud tested until now. Fixed:
+`* 10000ull / baud` (bits/s → bits/ms).
+
+**4. A receive-only peer could never clear `recentDiscs_`, so it
+vetoed its own recovery.** `recentDiscs_` has exactly one clear
+site (`onAck`) — a peer whose application never calls `sendMsg`
+(the field's Pong role) never receives an ACK of its own, so that
+site never fires. Three disconnects inside 10 s tripped its own
+`DISC_STORM_THRESHOLD` and forced a full P1 walk at the exact
+moment the sender fast-pathed P3 back to the preserved baud —
+guaranteed mismatch. Fixed: a CRC-valid `recvMsg` delivery is the
+same "baud is good" evidence as an ACK, so it clears
+`recentDiscs_` too (`LinkApi.cpp`), with the same clear added at
+the valid-NAK site (`LinkRx.cpp`) for symmetry.
+
+**5. One PING per ~1650 ms P2 dwell.** The master sent exactly one
+`PING_CMD` per dwell; one corrupted PING (CRC-fail lines confirmed
+corruption at baud-transition boundaries) forfeited the whole
+dwell. Fixed: `enterPhase2` and `onTimerSwp_unlocked` now resend
+`PING_CMD` on a ~250 ms sub-tick cadence (aligned to
+`phase2Slave`) for the rest of the dwell.
+
+**6. A delivered BREAK flushed RX during SWP.** `uart_flush_input`
+ran before `onBreak()`, and `onBreak()` is a no-op in any non-OK
+state — so a BREAK glitch from the peer's own `setSpd` transition
+destroyed in-flight sweep frames with no compensating recovery.
+`POST_SETSPD_BREAK_GUARD_MS` only guards *local* setSpd. Fixed:
+`Link::changeState_unlocked` now mirrors OK/SWP state to the HAL
+via a new `IHal::setOkState` hook (`EspHal`'s `okState`, same
+shape as the existing `running` flag — the UART event task runs
+outside Link's lock and can't read `Link::state` directly); the
+BREAK handler skips the flush while not OK.
+
+**What moved.** `LinkTimersOk.cpp` was already over the 15 KB file
+cap; fix 1 pushed it further, so the GBN sweep-retx half
+(`sweepRetx_unlocked` + the new `gbnRetxBaseAndRearm_unlocked`
+helper) moved to a new `timers/gbn/LinkTimersGbn.cpp` — `timers/`
+was already at the 7-file package cap, so this is a fresh sibling
+package rather than a same-directory split (the precedent
+`LinkTimerBreak.cpp` split predates the cap; `timers/` inherited
+it already full). `LinkTimersOk.cpp` is now ~16 KB, down from
+~25 KB.
+
+**Also fixed, unrelated to the six but found while in these
+files.** `CMakeLists.txt` (the stock ESP-IDF, non-Arduino build)
+was missing `LinkTimerBreak.cpp` and `LinkBreak.cpp` from its
+source list entirely — a real link failure waiting for any
+consumer building outside Arduino. `idf_component.yml` had drifted
+to 6.1.64 while `AutoLink.h`/`library.properties` were at 6.1.65.
+Both corrected in this pass.
+
+**Regression coverage.** New `GbnStuckForcesRetxTest` (fix 1, three
+pins: coincident Retx wins over a same-tick storm-stuck verdict;
+the storm-stuck+Hold+retxCount<2 case still retransmits rather
+than dropping; the honest drop still fires once real retx count
+reaches 2 with continued silence — the fix does not weaken
+`GbnDropPolicyTest`'s peer-gone contract). `GbnBackoffTest` Pin 6
+(fix 2, clamp). `BaudAwareStuckThresholdPerTickTest` Pin 2 (fix 3,
+the doc's own 32-pending/9600/≥8000 ms worked example). New
+two-node itest `recovery/ReceiveOnlyPeerRecoveryTest` (fix 4:
+sender + receive-only peer, three real disconnect/reconverge/
+round-trip cycles inside 10 s simulated time, every one fast-
+pathed to the preserved baud — toggle either `recentDiscs_ = 0`
+insertion off and `recentDiscs_` climbs 1→2→3 and trips the veto
+on cycle 3, confirmed by reverting and rerunning). New two-node
+`sweep/cadence/MasterPhase2PingCadenceTest` (fix 5: master's first
+P2 PING dropped, the sub-tick retry alone still promotes both
+sides to PHASE3 at the original baud well inside the dwell —
+toggle off and the slave's own P2 dwell times out first and walks
+away from baud[0], confirmed by reverting). New source-level
+`EspHalBreakFlushGuardTest` (fix 6, four pins across
+`IHal.h`/`EspHal.h`/`LinkCore.cpp`/`EspHalUartEvent.h` — necessarily
+source-level, `EspHal.h` is ESP32-only and cannot compile in this
+sandbox). Full suite: 124/124 unit, 7/7 itest (6 loopback +
+the new recovery itest), `loopback_fieldsoak` PASS 2x deterministic
+(sent=3370 verified=3370 lost=4, identical both runs — the 4
+documented losses and the wedge/drain-stall counts are the
+pre-existing, surfaced-and-accounted-for open items from prior
+releases, not new).
+
+**Limitations.** Cross-compile gates (`build/verify_build.sh`,
+`build/check_arduino_iface.sh`) cannot run in this sandbox — no
+network egress, standing limitation. Fix 6 could not be verified
+by execution for the same reason (`EspHal.h`/`EspHalUartEvent.h`
+are Arduino/ESP-IDF-only); its coverage is source-level only. A
+FireBeetle bench re-run at 512000 to validate the new retx timing
+against real hardware has not been done. The two open items
+carried from `docs/todo.md` (residual 1-msg loss per BREAK-
+adjacent reset; a receive wedge root-caused to lock contention
+between the SWP timer task and the app loop) are untouched by this
+pass and remain open.
+---
+
+## v6.1.65
+
+**BREAK-suspect confirm window was a one-shot timer sleep — idle keepalive never got a chance to run**
+
+The OK-state BREAK confirm window (`breakSuspectMs_` /
+`breakConfirmMs_unlocked`) is driven by a single one-shot RTOS
+timer — `xTimerCreate(..., pdFALSE, ...)` on the real HAL, and
+`MockHal::pumpClock` models the identical semantics. `onBreak()`
+armed that timer for the *entire* confirm duration in one call.
+The timer fires exactly once, at expiry, with no intermediate
+wake-up — so `onTimerOk_unlocked` was never invoked again until
+the deadline had, by construction, always already elapsed. The
+"not yet expired, keep waiting" branch inside it was dead code
+under real operation.
+
+An idle link's only route to clearing suspicion is a CRC-valid
+control frame (`noteValidFrameOk_unlocked`, satisfied by a
+PING/PONG round trip), and the only thing that sends one is the
+periodic keepalive check in `onTimerOk_unlocked`. Because that
+function never ran again before the deadline, a BREAK landing
+during an idle stretch was **structurally guaranteed** to confirm
+into a reset — even against a fully healthy, merely-idle peer.
+Traced end to end on a field log: master goes idle, a BREAK
+lands, the confirm window silently sleeps through its full
+duration, the deadline fires unconditionally, `reset_unlocked`
+bumps the session epoch, and the very next sweep PING reaches a
+still-OK slave as an epoch jump — `OK-state PING epoch mismatch:
+peer 0 -> 1, forcing resync` — tearing down a link that was never
+actually unhealthy.
+
+- **`onBreak()` now arms an early wake-up** when an idle
+  keepalive is due before the confirm deadline, instead of
+  always sleeping through the full window.
+- **`onTimerOk_unlocked()`'s intermediate tick sends the due
+  keepalive** and re-arms for whichever comes first — the next
+  keepalive-due point or the true remaining deadline — not the
+  old placeholder `okTickMs()`, which is commonly seconds long
+  and would have overshot the deadline entirely once the branch
+  became reachable.
+- Every existing BREAK-related pin (`BreakConfirmTest` x5,
+  `BreakInterruptCoalesceTest` x2, `BreakFastConfirmAfterFrames`,
+  `BreakBaudAwareConfirm`) traced line-by-line against the new
+  arm math: all either use `idleTimeoutMs=0` or keep
+  `pendingCount>0` for their scenario, both of which leave the
+  new code path inert, and all still pass unmodified.
+- New `BreakSuspectKeepaliveTest`: Pin 1 (single-node) pins the
+  exact wire-shape defect — an overdue keepalive at arm time must
+  produce an early `startTimer` call, not the full window, and
+  the resulting tick must emit a 5-byte PING CTRL frame while
+  still suspect. Pin 2 (two-node) is the end-to-end case: an idle
+  link takes a BREAK mid-idle, two keepalive round trips complete
+  inside the confirm window, suspicion fully clears
+  (two-frame-clear), and `discCount` never increments. Toggle off
+  (revert to the old unconditional full-window arm) -> red on
+  Pin 1's core assertion, confirmed by reverting and re-running
+  against the unmodified 6.1.64 source.
+
+**Limitations.** `run_loopback_losssweep` (1% flood-loss floor,
+2 disconnects) fails on this release exactly as it does on
+unmodified 6.1.64 — confirmed by reverting both changed files
+and reproducing the identical failure signature. It is unrelated
+to this fix and untouched by it; root-causing it is out of scope
+for this pass and belongs in `docs/todo.md`. Real-hardware
+validation of the fixed timing (a FireBeetle bench run
+reproducing an idle-then-BREAK sequence at 512000, scope-timed
+against the RTOS timer) has not been done and cannot be done in
+this environment.
+---
+
 ## v6.1.64
 
 **The post-lock settle window dropped CRC-valid frames.
@@ -95,6 +465,7 @@ nothing covered the window.
 
 No protocol or wire-format change. The settle window's
 duration and arming are untouched.
+---
 
 ## v6.1.63
 
@@ -167,6 +538,8 @@ Gate: **116 / 119** (the 3 quarantined in
 unchanged). No protocol change, no public-
 surface change, no new test logic beyond
 pin 11's four checks.
+---
+
 ## v6.1.62
 
 **FreeRTOS-Kernel second-pass include-order fix in LinkArq.h.**
@@ -228,6 +601,8 @@ Gate: **116 / 119** (the 3 quarantined in
 `base_seq_tracking`, `linkrx_split_ctrl` —
 unchanged). No new tests; this is a
 header-parse-only fix.
+---
+
 ## v6.1.61
 
 **Re-ship — host-gate follow-ups from the v6.1.60 ship.**
@@ -308,6 +683,8 @@ Gate: **116 / 119** (the 3 quarantined in
 `docs/todo.md` — `fill_byte_roundtrip`,
 `base_seq_tracking`, `linkrx_split_ctrl` —
 unchanged).
+---
+
 ## v6.1.60
 
 **Field-log wedge batch (master's ~3.3 s cycling collapse + slave 10.5 s dead-link miss)**
@@ -430,6 +807,7 @@ all pass. Existing `LinkArqTest`,
 `ModeSyncAsyncFixesTest`, `WireSimReConvergeTest`,
 `OkKeepaliveTest`, `LinkTimerRearmTest`,
 loopback (5s quick) tests all still pass.
+---
 
 ## v6.1.59
 
@@ -445,6 +823,7 @@ pin reference left over from the v6.1.52 era:
   points at the real pin.
 
 No source or test changes — comment-only fix.
+---
 
 ## v6.1.58
 
@@ -533,6 +912,7 @@ not republished here; it shipped a refuse-outright
 rate limiter that contradicted the documented
 `1..cfg.maxMsg` contract and reinvoked the
 v6.1.53 wedge as policy.
+---
 
 ## v6.1.55
 
@@ -555,6 +935,7 @@ v6.1.53 wedge as policy.
   v6.1.53. Documented in `docs/todo.md`.
 
 Closed in v6.1.54: see v6.1.54 entry.
+---
 
 ## v6.1.54
 
@@ -596,6 +977,7 @@ three substantive issues that v6.1.53 had introduced:
   onNak settle gate. Now passing.
 
 Closed in v6.1.53: see v6.1.53 entry.
+---
 
 ## v6.1.53
 
@@ -660,5 +1042,7 @@ left unaddressed:
   helpers moved to a new `PingFill.h` (1.6 KB);
   `pickMsgSize_` clamps via
   `pingPickMsgSizeClamped()` instead of inline math.
+---
 
 ## v6.1.52
+---
