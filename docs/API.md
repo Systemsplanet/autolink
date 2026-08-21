@@ -9,7 +9,7 @@ Wire-level behaviour: `docs/Protocol.md`. Dashboard: `docs/WebMonitor.md`.
 | `int send(const uint8_t *b, int len)` | `len` if queued, `0` if the link is down or the window is full | `len` must be `1..cfg.maxMsg` (default 5120). Safe to call every loop. |
 | `int recv(uint8_t *b, int max)` | `>0` message length, `0` nothing ready, `-1` rejected | `max` should be `>= cfg.maxMsg`. On `-1` the bad message is drained and a frame error is counted. |
 | `bool ready()` | `true` once the link is in `State::OK` | Optional — `send` / `recv` gate themselves. |
-| `void getStats(Stats &s)` | — | `tx`, `rx` (since `resetStats()`), `discCount` (OK→SWP transitions), `frameErrs` (cumulative). |
+| `void getStats(Stats &s)` | — | `tx`, `rx` (since `resetStats()`), `discCount` (OK→SWP transitions), `frameErrs` (cumulative). Drop counters, broken out by cause rather than one conflated total: `postLockQuietDrops`, `rateLimitedDrops`, `gbnWindowFullDrops`, `poolExhaustDrops`, `txRingStallDrops`, `settleDrops`, and `logDrops` (the host-side log ring overflowed — a diagnostic-visibility signal, not a link-health one). |
 | `void getDiag(Diag &d)` | — | `txSeq`, `rxSeq`, `rxSeqSet`, `gaps`, `stale`, `lostMsgs`, `baudRetries`, `preferredBaud`. |
 | `void resetStats()` / `resetErrors()` / `resetDiag()` | — | Throughput / disconnect+frame-error / diagnostic counters, independently. |
 
