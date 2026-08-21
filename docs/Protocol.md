@@ -150,14 +150,26 @@ arrived in order and the CRC-16 verifies.
 
 ### ASYNC — Go-Back-N (default)
 
-The sender keeps up to `AUTOLINK_ARQ_PIPELINE_WINDOW` chunks in flight. The
-receiver accepts **strictly in order**:
+The sender keeps up to `AUTOLINK_ARQ_PIPELINE_WINDOW` chunks in flight, clamped
+at `begin()` to what the *receiver's* stream buffer can actually hold —
+`min(AUTOLINK_ARQ_PIPELINE_WINDOW, streamBufferFloor(cfg) / (MAX_CHUNK +
+MSG_HDR))`. At the field-tested default (`streamBufferSize` sized for a 2048 B
+`maxMsg`) this clamps the compile-time window of 32 down to 16 — a full 32-chunk
+window (8000 B) would always overrun a 4108 B receiver buffer regardless of ACK
+timing. The clamped value is what actually governs admission; read it back via
+`arqWindow()`, not the raw macro. The receiver accepts **strictly in order**:
 
 - **In order** → deliver, and cumulative-ACK the new contiguous high-water mark.
 - **Ahead of the expected seq** (a gap) → **drop the frame** and NAK the expected
   seq. Every out-of-order arrival re-NAKs, which is the fast-retransmit signal.
 - **Behind** (a stale duplicate, its ACK was lost) → re-ACK so the sender frees
   the slot.
+- **The app hasn't drained enough of its buffer to accept the next message** →
+  hold at the expected seq and NAK it, same as a gap, but the hold does *not*
+  re-NAK on every subsequent retx arrival the way a gap does — it re-NAKs only
+  once the app has actually freed more buffer space than it had when the hold
+  was first raised. A receiver whose app layer is genuinely stuck (not just
+  slow) would otherwise answer a resend storm with a NAK storm of its own.
 
 An ACK is cumulative: it frees every sender slot from `gbnBase` through the acked
 seq. Interior slots whose own ACK never arrived — the reason the base was stuck —
@@ -167,7 +179,14 @@ landed byte-for-byte.
 The only retransmit target is the base (the oldest unacked). A NAK matching it, or
 its RTO (`cfg.syncAckTimeoutMs`), triggers a resend of the window **from the base
 forward** — the receiver discards out-of-order frames, so the base alone would
-never make progress.
+never make progress. A NAK for the base is not always acted on immediately: it is
+suppressed (counted, but no resend goes out and the sender's RTO clock is left
+alone) when a *same-event* NAK arrives inside a short dedup window (at least
+`2 * gbnResendFlightMs`, so a peer NAKing faster than one resend can land doesn't
+trigger a second one), and when the base has already exhausted its NAK-driven
+retry budget without advancing — at that point the peer is holding the base
+deliberately (the app-buf-full case above), not dropping frames, and resending
+more copies cannot help; the RTO ladder becomes the only recovery path.
 
 Three things keep that resend from becoming a death spiral on a full-duplex UART:
 
@@ -193,10 +212,22 @@ that draw random message sizes should clamp against
 ### SYNC
 
 One frame in flight. `sendMsg` blocks on the ACK and runs its own retransmit
-ladder, resending the **same** seq verbatim up to `cfg.maxRetx`. A mid-message
-timeout can leave the peer holding a partial length-prefixed message, so an
-exhausted ladder drops the link and sends a BREAK — both framers realign in one
-round trip. SYNC never populates the ARQ cache.
+ladder, resending the **same** seq verbatim up to `cfg.maxRetx`. What happens
+when that ladder is exhausted depends on which frame it was:
+
+- **Single-chunk message** (fits in one frame) or a **multi-chunk message's
+  body frames** (anything after the header): the message is abandoned —
+  `sendMsg` returns failure with `SendMsgReason::SyncMidMessageTimeout` — but
+  the link is **not** reset and no BREAK is sent. The receiver has no
+  message-assembly state to strand here beyond its own per-frame RTO, which
+  times out on its own and resyncs the framer. A hardware backpressure blip on
+  one message no longer tears the whole link down.
+- **Multi-chunk message's header frame**: an exhausted ladder here still drops
+  the link and sends a BREAK, the original behavior — the header carries the
+  message length, and losing it changes what the receiver is waiting for, not
+  just how much of it arrived.
+
+SYNC never populates the ARQ cache.
 
 ## Health watchdogs (`LinkHealth.h`)
 
