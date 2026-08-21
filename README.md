@@ -57,7 +57,13 @@ using namespace autolink;
 
 AutoLink comm(UART_NUM_2, 16, 17, /*isMaster=*/true);
 
-void setup() { comm.begin(); }
+void setup() {
+    // begin() returns false if the UART ring can't fit one COBS frame
+    // (heap starvation or a too-small cfg.txBufferSize); the link stays
+    // down rather than coming up wedged.
+    if (!comm.begin())
+        return;
+}
 void loop()  {
     if (comm.ready()) {
         // comm.send(buf, n); comm.recv(buf, sizeof buf);
