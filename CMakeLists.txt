@@ -14,7 +14,7 @@ cmake_minimum_required(VERSION 3.16)
 #              from here when this component is consumed.
 #
 # Both directories are added to the include path so internal
-# relative includes ("al/link/Link.h", "al/util/Log.h", etc.)
+# relative includes ("al/link/Link.h", "al/util/log/Log.h", etc.)
 # keep working.
 #
 # EspHal.cpp and the four src/al/web/handlers/*.cpp TUs are
@@ -46,9 +46,9 @@ set(AUTOLINK_CORE_SRCS
     "src/al/link/arq/LinkArq.cpp"
     "src/al/link/sweep/LinkBaudSweep.cpp"
     "src/al/link/sweep/LinkSweep.cpp"
-    "src/al/util/Log.cpp"
-    "src/al/util/UtilCobs.cpp"
-    "src/al/util/UtilCrc.cpp"
+    "src/al/util/log/Log.cpp"
+    "src/al/util/codec/UtilCobs.cpp"
+    "src/al/util/codec/UtilCrc.cpp"
     "src/al/web/AutoLinkWebCore.cpp"
     "src/al/web/OtaCore.cpp"
 )
