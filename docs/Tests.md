@@ -74,7 +74,15 @@ manifest self-test fails if a suite slips through.
 ## Adding a test
 
 1. Put it in the file that mirrors the source. New functional area of `Link`? New
-   `<Class><Area>Test.cpp` under the matching directory.
+   `<Class><Area>Test.cpp` under the matching directory. Exception:
+   `al/link/field89_1_6/`, `field89_7_12/`, `field91/`, `field92/` hold one
+   `.cpp` per pin from a single field-log-driven review round (AL89 through
+   AL92) rather than one per functional area — the split points are by which
+   review batch found the issue, not by subsystem. `field89_1_6/` and
+   `field89_7_12/` additionally share
+   `field89_1_6/FieldWedgeFixes89Common.h` via a `-I` flag added only to
+   those suites' Makefile rules, and `field89_7_12/FieldWedgeFixes89Main.cpp`
+   is the shared entry point for both halves.
 2. One `test_<thing>()` per case; `main()` lists them in order. Print a
    `=== Test: ... ===` banner and `PASS`; let `assert` do the failing.
 3. Protocol tests use `MockHal.h`:
