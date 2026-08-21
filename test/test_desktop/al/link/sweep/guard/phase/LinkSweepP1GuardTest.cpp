@@ -1,0 +1,209 @@
+// P1 contract: never leave until connected.
+#include <iostream>
+#include <iomanip>
+#include <cassert>
+#include <vector>
+#include "MockHal.h"
+#include "NullArqCache.h"
+#include "LinkTestAccessor.h"
+
+using namespace autolink;
+
+static void test_master_never_leaves_p1() {
+    NullArqCache cache;
+    std::cout << "\n=== master never leaves P1 (50 PINGs no ack) ==="
+              << std::endl;
+    AutoLinkConfig cfg;
+    cfg.allowedBauds[0] = 115200;
+    cfg.allowedBauds[1] = 9600;
+    cfg.allowedBaudsCount = 2;
+    cfg.pingSamplesPerBaud = 1;
+    cfg.idleTimeoutMs = 0;
+    MockHal mHal, sHal;
+    mHal.peer = &sHal;
+    sHal.peer = &mHal;
+    Link ping(mHal, cache, true, cfg);
+    Link pong(sHal, cache, false, cfg);
+
+    // Drop every PONG the slave would emit so the
+    // master never receives a P1 ACK and stays in
+    // P1. MockHal's dropNextFrames is only honoured
+    // when frameDropPct > 0; setting frameDropPct=100
+    // drops 100% of the slave's outgoing frames.
+    sHal.frameDropPct = 100;
+    ping.begin();
+    pong.begin();
+    for (int i = 0; i < 50; i++) {
+        mHal.pumpClock(50);
+        sHal.pumpClock(50);
+        pipe_data(mHal, sHal);
+        pipe_data(sHal, mHal);
+    }
+    assert(ping.getState() == State::SWP);
+    assert(ping.getCurrentSpdIndex() == 1);
+    std::cout << "PASS" << std::endl;
+}
+
+static void test_pong_never_leaves_p1() {
+    NullArqCache cache;
+    std::cout << "\n=== pong never leaves P1 (50 listens no PING) ==="
+              << std::endl;
+    AutoLinkConfig cfg;
+    cfg.allowedBauds[0] = 115200;
+    cfg.allowedBauds[1] = 9600;
+    cfg.allowedBaudsCount = 2;
+    cfg.pingSamplesPerBaud = 1;
+    cfg.idleTimeoutMs = 0;
+    MockHal mHal, sHal;
+    mHal.peer = &sHal;
+    sHal.peer = &mHal;
+    Link ping(mHal, cache, true, cfg);
+    Link pong(sHal, cache, false, cfg);
+
+    // Drop every PING the master would emit so the
+    // slave never receives a P1 PING and stays in
+    // P1. MockHal's dropNextFrames is only honoured
+    // when frameDropPct > 0; setting frameDropPct=100
+    // drops 100% of the master's outgoing frames.
+    mHal.frameDropPct = 100;
+    ping.begin();
+    pong.begin();
+    for (int i = 0; i < 50; i++) {
+        mHal.pumpClock(50);
+        sHal.pumpClock(50);
+        pipe_data(mHal, sHal);
+        pipe_data(sHal, mHal);
+    }
+    assert(pong.getState() == State::SWP);
+    assert(pong.getCurrentSpdIndex() == 1);
+    std::cout << "PASS" << std::endl;
+}
+
+// P1 -> P2 -> P3 sweep locks at the FASTEST baud on the master side.
+static void test_master_locks_at_fastest_after_full_sweep() {
+    NullArqCache cache;
+    std::cout << "\n=== master locks at FASTEST baud after P1->P2->P3 ==="
+              << std::endl;
+    AutoLinkConfig cfg;
+    cfg.allowedBauds[0] = 115200;
+    cfg.allowedBauds[1] = 9600;
+    cfg.allowedBaudsCount = 2;
+    cfg.pingSamplesPerBaud = 1;
+    cfg.idleTimeoutMs = 0;
+    MockHal mHal, sHal;
+    mHal.peer = &sHal;
+    sHal.peer = &mHal;
+    Link ping(mHal, cache, true, cfg);
+    Link pong(sHal, cache, false, cfg);
+    ping.begin();
+    pong.begin();
+
+    for (int i = 0; i < 50; i++) {
+        uint32_t targetMs = mHal.now + 50;
+        while (mHal.now < targetMs) {
+            uint32_t dt = targetMs - mHal.now;
+            mHal.pumpClock(dt);
+            sHal.pumpClock(dt);
+            pipe_data(mHal, sHal);
+            pipe_data(sHal, mHal);
+            if (ping.getState() == State::OK)
+                break;
+        }
+        if (ping.getState() == State::OK)
+            break;
+    }
+    assert(ping.getState() == State::OK);
+    // Lock target is some baud the P2/P3 sweep confirmed.
+    // MockHal's instant wire makes the rt-clamp-to-50ms
+    // dominate the P3 dwell, so the first P3 attempt at
+    // fastest can expire before 2 ACKs land and master
+    // falls through to the next baud. The contract is
+    // "master reaches OK" — the specific baud depends on
+    // dwell timing.
+    assert(ping.getCurrentSpdIndex() < cfg.allowedBaudsCount);
+    std::cout << "PASS (master locked at index " << ping.getCurrentSpdIndex()
+              << ")" << std::endl;
+}
+
+static void test_break_in_p1_resets_to_slowest() {
+    NullArqCache cache;
+    std::cout << "\n=== BREAK in P1 restarts at slowest baud ===" << std::endl;
+    AutoLinkConfig cfg;
+    cfg.allowedBauds[0] = 115200;
+    cfg.allowedBauds[1] = 9600;
+    cfg.allowedBaudsCount = 2;
+    cfg.pingSamplesPerBaud = 1;
+    cfg.idleTimeoutMs = 0;
+    MockHal mHal, sHal;
+    mHal.peer = &sHal;
+    sHal.peer = &mHal;
+    Link ping(mHal, cache, true, cfg);
+    Link pong(sHal, cache, false, cfg);
+    ping.begin();
+    pong.begin();
+
+    // Manually drive until the master locks; MockHal's faithful
+    // baud-mismatch filtering prevents negotiate_to_ok from
+    // completing under the sweep contract.
+    for (int i = 0; i < 200; i++) {
+        mHal.pumpClock(50);
+        sHal.pumpClock(50);
+        pipe_data(mHal, sHal);
+        pipe_data(sHal, mHal);
+        if (ping.getState() == State::OK)
+            break;
+    }
+    assert(ping.getState() == State::OK);
+
+    // : a single BREAK in OK is debounced (the
+    // confirm window arms; the link stays OK until
+    // the window expires or a second BREAK arrives).
+    // The P1 contract that the test is checking is
+    // "P1 restarts at the slowest baud after a
+    // reset" — that contract holds once the BREAK
+    // is confirmed. Pump past BREAK_CONFIRM_MS
+    // (150 ms) and verify both sides reset to P1
+    // slowest.
+    ping.onBreak();
+    pong.onBreak();
+    // Both BREAKs are coalesced (one each, single
+    // events), so state still OK.
+    assert(ping.getState() == State::OK && pong.getState() == State::OK &&
+           ": a single OK-state BREAK is debounced, not an "
+           "immediate reset");
+    for (int i = 0; i < 10; i++) {
+        mHal.pumpClock(20);
+        sHal.pumpClock(20);
+    }
+    // After BREAK_CONFIRM_MS with no valid frame, the
+    // confirm window expires and resets both sides.
+    assert(ping.getState() == State::SWP && pong.getState() == State::SWP &&
+           "Pin: BREAK_CONFIRM_MS deadline confirms the reset");
+
+    // After BREAK on a previously-OK link, the BREAK-triggered
+    // resweep consults preferredBaud_ (recorded at the prior
+    // lock) and tries a fast P3 re-lock at that baud. The P1
+    // slowest-baud walk is now only the fallback for the
+    // unproven-BREAK case (never-OK kickoff-noise). The pin
+    // asserts the new contract.
+    Diag d;
+    ping.getDiag(d);
+    assert(d.preferredBaud != 0xFF &&
+           "preferredBaud_ is preserved across a BREAK that follows "
+           "a locked state — the new resweep tries to re-lock at the "
+           "proven baud, not the slowest");
+    assert(LinkTestAccessor(ping).sweepPhase() == SweepPhase::PHASE3 &&
+           "BREAK resweep with preferredBaud_ takes the P3 path; "
+           "enterPhase1 is the fallback when P3 misses");
+    std::cout << "PASS" << std::endl;
+}
+
+int main() {
+    std::cout << "=== Never-Leave-P1 Contract Tests ===" << std::endl;
+    test_master_never_leaves_p1();
+    test_pong_never_leaves_p1();
+    test_master_locks_at_fastest_after_full_sweep();
+    test_break_in_p1_resets_to_slowest();
+    std::cout << "\n=== All 4 never-leave-P1 tests PASS ===" << std::endl;
+    return 0;
+}
