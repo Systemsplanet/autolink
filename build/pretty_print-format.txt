@@ -1,0 +1,63 @@
+---
+Language: Cpp
+BasedOnStyle: LLVM
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 80
+Standard: c++14
+
+# Braces
+BreakBeforeBraces: Attach
+Cpp11BracedListStyle: false
+
+# Pointer / reference alignment: `int* p`, `int& r` (right side)
+PointerAlignment: Right
+ReferenceAlignment: Right
+
+# Spaces
+SpaceAfterCStyleCast: false
+SpaceAfterLogicalNot: false
+SpaceAfterTemplateKeyword: false
+SpaceBeforeAssignmentOperators: true
+SpaceBeforeCaseColon: false
+SpaceBeforeParens: ControlStatements
+SpaceInEmptyParentheses: false
+SpacesBeforeTrailingComments: 1
+
+# Indent
+IndentCaseLabels: false
+AccessModifierOffset: -4
+NamespaceIndentation: None
+ContinuationIndentWidth: 4
+
+# Preserve preprocessor nesting indentation (e.g. `#  if`, `#    include`)
+IndentPPDirectives: AfterHash
+
+BreakStringLiterals: false
+
+# Align
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignConsecutiveMacros: false
+AlignEscapedNewlines: Left
+AlignOperands: false
+AlignTrailingComments: true
+
+# Allow short functions on a single line
+AllowShortFunctionsOnASingleLine: All
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+
+# Keep includes grouped
+IncludeBlocks: Preserve
+SortIncludes: false
+
+# Misc
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 2
+FixNamespaceComments: true
+...
