@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+"""dashboard_assets.py -- single source of truth for dashboard
+HTML / CSS / JS, with version interpolation.
+
+Reads the committed source files under `src/al/web/assets/` and
+emits five small generated headers under `src/al/web/generated/`,
+plus a tiny aggregator header. Each generated file holds exactly
+one `static const char NAME[]` -- no file duplicates another's
+bytes, unlike the single-file scheme this replaces (which also
+emitted a `DASHBOARD_HTML` array that concatenated all five parts
+a second time, doubling flash usage for no runtime benefit: nothing
+read that combined array except a chunked-send loop that can just
+send the five parts in sequence instead).
+
+Inputs (committed, edited by hand), all under src/al/web/assets/:
+
+  dashboard.css                raw CSS, no version markers
+  dashboard_1_core.js          raw JS, part 1 of 3 (concatenated in
+  dashboard_2_controls.js      order to reconstruct the original
+  dashboard_3_poll.js          dashboard.js; split only to keep each
+                                file under the repo's per-file size
+                                cap -- browsers see one <script> with
+                                the same bytes either way). May carry
+                                `{{VERSION}}` markers.
+  dashboard_html_part_a.html   markup before the CSS-injection site
+                                (DOCTYPE through `<style>`)
+  dashboard_html_part_b.html   markup between `</style>` and the
+                                JS-injection site (header, main,
+                                controls, opens `<script>`)
+  dashboard_html_part_c.html   markup after the JS-injection site
+                                (`</script>` through end)
+
+Why separate markup files and not one HTML template with `{{CSS}}` /
+`{{JS}}` markers: the dashboard tests (AutoLinkWebTest,
+HandleRootChunkedTest) grep specific substrings like `id="delayMs"`
+or `<title>AutoLink Monitor</title>`. Leaving the markup unmodified
+and concatenating the asset strings around it preserves those
+contracts.
+
+Outputs, all under src/al/web/generated/:
+
+  DashboardPartA.h    static const char DASHBOARD_HTML_PART_A[]
+  DashboardCss.h      static const char DASHBOARD_CSS[]
+  DashboardPartB.h    static const char DASHBOARD_HTML_PART_B[]
+  DashboardJs.h       static const char DASHBOARD_JS[]
+  DashboardPartC.h    static const char DASHBOARD_HTML_PART_C[]
+  AutoLinkWebHtml.h   #includes the five above and
+                      #defines DASHBOARD_HTML_DEFINED
+
+The build step is one concern: read the asset files, emit six
+generated files. No string-merge, no backup, no verification -- the
+host test suite (`make test`) exercises the result end-to-end, so
+any drift is caught at the next test run.
+
+Idempotency: re-running with no source changes produces
+byte-identical output.
+
+Usage:
+  dashboard_assets.py              # default: repo-root-relative paths
+  dashboard_assets.py --check      # exit non-zero if any output is stale
+  dashboard_assets.py --assets DIR --out DIR
+"""
+import argparse
+import sys
+from pathlib import Path
+
+
+VERSION_MARKER = '{{VERSION}}'
+
+# name -> (asset filename(s) relative to --assets, generated header
+# filename relative to --out, C identifier).
+_PARTS = [
+    ('DASHBOARD_HTML_PART_A', ['dashboard_html_part_a.html'], 'DashboardPartA.h'),
+    ('DASHBOARD_CSS', ['dashboard.css'], 'DashboardCss.h'),
+    ('DASHBOARD_HTML_PART_B', ['dashboard_html_part_b.html'], 'DashboardPartB.h'),
+    ('DASHBOARD_JS_1', ['dashboard_1_core.js'], 'DashboardJs1.h'),
+    ('DASHBOARD_JS_2', ['dashboard_2_controls.js'], 'DashboardJs2.h'),
+    ('DASHBOARD_JS_3', ['dashboard_3_poll.js'], 'DashboardJs3.h'),
+    ('DASHBOARD_HTML_PART_C', ['dashboard_html_part_c.html'], 'DashboardPartC.h'),
+]
+
+# No aggregator file: seven generated files is already the directory's
+# budget (AGENTS rule: <=7 files per package). AutoLinkWebCore.h -- hand
+# written, not generated -- includes all seven directly and defines
+# DASHBOARD_HTML_DEFINED; that is the one place the "aggregate" concept
+# needs to exist, and it already owns the dashboardHtml() API.
+
+
+def _read(p: Path) -> str:
+    if not p.exists():
+        sys.exit(f'dashboard_assets: input not found: {p}')
+    return p.read_text(encoding='utf-8')
+
+
+def _split_version(s: str) -> str:
+    """Split a `{{VERSION}}`-bearing string into a C++ raw-string
+    literal + AUTOLINK_VERSION token sequence, so the runtime value
+    is spliced in at compile time via adjacent string-literal
+    concatenation. No marker: one literal, verbatim."""
+    if VERSION_MARKER not in s:
+        return f'R"DASH({s})DASH"'
+    parts = s.split(VERSION_MARKER)
+    out_parts = []
+    for i, part in enumerate(parts):
+        if i > 0:
+            out_parts.append('AUTOLINK_VERSION')
+        if part:
+            out_parts.append(f'R"DASH({part})DASH"')
+    return ' '.join(out_parts)
+
+
+def _gen_part_header(const_name: str, literal_expr: str) -> str:
+    return (
+        f'// Auto-generated by build/dashboard_assets.py from '
+        f'src/al/web/assets/. Do not edit by hand.\n'
+        f'#pragma once\n'
+        f'#include "AutoLink.h"\n'
+        f'\n'
+        f'namespace autolink {{\n'
+        f'static const char {const_name}[] = {literal_expr};\n'
+        f'}} // namespace autolink\n'
+    )
+
+
+def generate(assets_dir: Path) -> dict:
+    """Returns {relative_output_path: content} for every generated
+    file -- one per part, seven total, no aggregator."""
+    out = {}
+    for const_name, asset_names, hdr_name in _PARTS:
+        raw = ''.join(_read(assets_dir / n) for n in asset_names)
+        literal = _split_version(raw)
+        out[hdr_name] = _gen_part_header(const_name, literal)
+    return out
+
+
+def _split_for_parts(html: str) -> tuple:
+    """Split a single HTML template (with {{CSS}} and {{JS}}
+    markers) into the three markup files around those injection
+    points. Used only by the --from-template convenience path, not
+    the default."""
+    css_open = html.find('<style>')
+    css_close = html.find('</style>')
+    js_open = html.find('<script>')
+    js_close = html.find('</script>')
+    if -1 in (css_open, css_close, js_open, js_close):
+        sys.exit('dashboard_assets: --from-template needs <style>...</style>'
+                 ' and <script>...</script> in the source.')
+    return (
+        html[:css_open + len('<style>')],
+        html[css_close:js_open + len('<script>')],
+        html[js_close:],
+    )
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--repo', default='.', help='repo root (default: cwd)')
+    p.add_argument('--assets', help='path to src/al/web/assets/')
+    p.add_argument('--out', help='path to src/al/web/generated/')
+    p.add_argument('--check', action='store_true',
+                   help='exit non-zero if any generated file is stale')
+    p.add_argument('--from-template',
+                   help='split a single HTML template into the three '
+                        'markup part files under --assets, then generate '
+                        'as usual. The template must contain {{CSS}} and '
+                        '{{JS}} markers.')
+    args = p.parse_args()
+
+    repo = Path(args.repo).resolve()
+    assets_dir = Path(args.assets) if args.assets else repo / 'src/al/web/assets'
+    out_dir = Path(args.out) if args.out else repo / 'src/al/web/generated'
+
+    if args.from_template:
+        tpl = _read(Path(args.from_template))
+        tpl = tpl.replace('{{CSS}}', '').replace('{{JS}}', '')
+        a, b, c = _split_for_parts(tpl)
+        (assets_dir / 'dashboard_html_part_a.html').write_text(a, encoding='utf-8')
+        (assets_dir / 'dashboard_html_part_b.html').write_text(b, encoding='utf-8')
+        (assets_dir / 'dashboard_html_part_c.html').write_text(c, encoding='utf-8')
+
+    generated = generate(assets_dir)
+
+    if args.check:
+        stale = []
+        for name, content in generated.items():
+            existing = ((out_dir / name).read_text(encoding='utf-8')
+                        if (out_dir / name).exists() else '')
+            if existing != content:
+                stale.append(name)
+        if stale:
+            sys.stderr.write(
+                f'dashboard_assets: stale (regenerate with '
+                f'dashboard_assets.py): {", ".join(stale)}\n')
+            return 1
+        return 0
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for name, content in generated.items():
+        (out_dir / name).write_text(content, encoding='utf-8')
+    print(f'dashboard_assets: wrote {len(generated)} files to {out_dir}')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
