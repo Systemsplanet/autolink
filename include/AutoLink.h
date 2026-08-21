@@ -2,8 +2,8 @@
 #pragma once
 #include "al/link/arq/ArqCache.h"
 #include "al/link/Link.h"
-#include "al/util/Log.h"
-#include "al/util/UtilBlink.h"
+#include "al/util/log/Log.h"
+#include "al/util/blink/UtilBlink.h"
 #include <memory>
 #include <string.h>
 #include <stdlib.h>
@@ -21,7 +21,7 @@ struct EspHal;
 #endif
 
 namespace autolink {
-#define AUTOLINK_VERSION "6.1.67"
+#define AUTOLINK_VERSION "6.1.98"
 
 class AutoLinkTestAccessor;
 
@@ -90,48 +90,43 @@ public:
     }
 #endif
 
-    void begin() {
+    // H2: returns bool — false means
+    // the link is in a fatal misconfig
+    // (the ring the HAL would install
+    // is too small for the COBS worst
+    // case; the H1 fix in Link::begin
+    // returns false on that path).
+    // true means the link is alive
+    // and (if not linkPaused) about
+    // to start the wire handshake.
+    bool begin() {
         Log::log().info(
             "AutoLink", "begin: starting v%s mode=%s maxMsg=%u isMaster=%s",
             AUTOLINK_VERSION,
-            cfg_.mode == AutoLinkConfig::Mode::ASYNC ? "ASYNC" : "SYNC",
+            mode() == AutoLinkConfig::Mode::ASYNC ? "ASYNC" : "SYNC",
             (unsigned)cfg_.maxMsg, isMasterNode_ ? "true" : "false");
-        // hal->begin() must run first: it installs the UART driver
-        // and creates the sweep timer (xTimerCreate). link->begin()
-        // may kick off immediately (unpaused slave) and drive the
-        // HAL — hw.startTimer()/hw.setSpd() before the timer/UART
-        // exist silently no-op, freezing the sweep forever.
-        // Sync the HAL's mode with the facade's before
-        // hal->begin() so the txBufferFloor / rxBufferFloor
-        // pick up the right branch. The two were decoupled
-        // (facade and HAL each held a copy of the original
-        // AutoLinkConfig) and the field log showed the
-        // divergence: facade reported mode=SYNC, HAL
-        // reported mode=ASYNC with the 381 B ASYNC tx floor
-        // under a 32x254 B SYNC window. uart_write_bytes
-        // silently blocks the loop the moment more than 1.5
-        // chunks are queued. Forwarding here makes the
-        // facade the single source of truth, and the
-        // post-begin disagreement log below catches any
-        // custom HAL that doesn't honour setMode(). Pinned
-        // by ModeSyncBeforeBeginTest.
-        if (hal)
-            hal->setMode(cfg_.mode);
-#ifdef ARDUINO
-        hal->begin();
-#endif
-        link->begin();
-        if (hal && hal->getMode() != cfg_.mode) {
+        // Link::begin() begins the HAL itself (hw.begin(cfg)) before it
+        // can kick off and drive it — hw.startTimer()/hw.setSpd() against
+        // an uninstalled UART or timer silently no-op and freeze the
+        // sweep forever. The HAL is initialised from the link's config in
+        // begin() and reads the mode from there; an explicit facade-side
+        // hal->setMode(cfg_.mode) here would *revert* a mode the app
+        // deliberately installed via AutoLink::setMode() before begin(),
+        // because cfg_.mode is a construction-time snapshot and does not
+        // track setMode(). Pinned by ModeSyncBeforeBeginTest.
+        bool ok = link->begin();
+        if (hal && hal->getMode() != link->mode()) {
             Log::log().error(
                 "AutoLink",
-                "mode mismatch at begin: facade=%s HAL=%s — "
+                "mode mismatch at begin: link=%s HAL=%s — "
                 "buffer floor sized for HAL's mode, not the link's. "
                 "Likely a custom HAL that didn't honour setMode().",
-                cfg_.mode == AutoLinkConfig::Mode::ASYNC ? "ASYNC" : "SYNC",
+                link->mode() == AutoLinkConfig::Mode::ASYNC ? "ASYNC" : "SYNC",
                 hal->getMode() == AutoLinkConfig::Mode::ASYNC ? "ASYNC"
                                                               : "SYNC");
         }
         Log::log().info("AutoLink", "begin: link layer ready");
+        return ok;
     }
 
     void blinkWait(int n, int onMs = 60, int offMs = 60, long delayMs = 0) {
@@ -179,6 +174,7 @@ public:
     void setMode(AutoLinkConfig::Mode m) {
         AutoLinkConfig::Mode prev =
             link ? link->mode() : AutoLinkConfig::Mode::SYNC;
+        cfg_.mode = m;
         if (hal)
             hal->setMode(m);
         if (link)
@@ -193,6 +189,22 @@ public:
 
     size_t maxMsg() const {
         return link ? link->maxMsg() : AUTOLINK_DEFAULT_MAX_MSG;
+    }
+
+    // Cap maxMsg *before* begin() so the buffer floors are sized for
+    // the smaller ask. The web monitor's default asks for 5120-byte
+    // messages; on a 41 KB post-alloc free heap that consumes ~26 KB
+    // across streamBuf + rxBuf + txBuf and leaves only heapReserveBytes
+    // for LWIP / httpd, which is too little. Capping to 2048 (the
+    // message size the dashboard's /stats JSON comfortably fits in)
+    // takes streamBuf 10252 -> 4108 and txBuf 5588 -> 2540, freeing
+    // ~9 KB without changing rxBuf (which depends on the ARQ
+    // pipeline window, not maxMsg). Pinned by
+    // EspHalHeapAccountingTest's field-numbers case.
+    void setMaxMsg(size_t m) {
+        cfg_.maxMsg = m;
+        if (link)
+            link->setMaxMsg(m);
     }
 
     void setTxDelayMs(int ms) {
@@ -215,9 +227,28 @@ public:
     }
 
     int arqPendingCount() const { return link ? link->arqPendingCount() : 0; }
+    // Effective GBN window after Link::begin()'s installed-ring clamp —
+    // may be smaller than the compile-time AUTOLINK_ARQ_PIPELINE_WINDOW.
+    // Callers sizing sends against a fixed WINDOW constant will
+    // over-admit against a clamped ring; use this instead. Pinned by
+    // ArqWindowAccessorTest.
+    int arqWindow() const { return link ? link->arqWindow() : 0; }
 
-    uint16_t bytesRecvdForMessage(uint8_t baseSeq) const {
-        return link ? link->bytesRecvdForMessage(baseSeq) : (uint16_t)0;
+    // F8: the facade is now 2-arg. The
+    // caller's sendMsg returns the lap
+    // in SendResult.baseLap; passing the
+    // same (baseSeq, baseLap) pair the
+    // header went out under is the only
+    // way to walk the ARQ's per-message
+    // byte count without aliasing a
+    // re-stamped seq across a 254-lap
+    // wrap. The single-arg form is gone
+    // from the production surface; the
+    // 2-arg form is the only API app
+    // code can call.
+    uint16_t bytesRecvdForMessage(uint8_t baseSeq, uint8_t baseLap) const {
+        return link ? link->bytesRecvdForMessage(baseSeq, baseLap)
+                    : (uint16_t)0;
     }
     bool isAcked(uint8_t seq) const {
         return link ? link->isAcked(seq) : false;
@@ -271,12 +302,17 @@ public:
     }
     int recvMsg(uint8_t *b, int max_len) { return link->recvMsg(b, max_len); }
 
-    void err() { link->err(); }
+    void err() { link->err(FrameErrCause::CrcFail); }
     void clearErr() { link->clearErr(); }
     int getErrCount() const { return link->getErrCount(); }
     State getState() const { return link->getState(); }
     uint32_t getCurrentBaud() const { return link->getCurrentBaud(); }
     void getDiag(Diag &d) const { link->getDiag(d); }
+    // AL87-06: number of chunks currently awaiting ACK. Threaded
+    // through to the periodic stats heartbeat so a field capture
+    // can distinguish "device wedged" from "device fine, log line
+    // lost" without cross-referencing the /logs `dropped` counter.
+    int pendingAcks() const { return link->pendingAcks(); }
 
     size_t getStreamBufferSize() const {
         return link->getConfig().streamBufferSize;
